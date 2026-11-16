@@ -13,6 +13,7 @@ import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { ScheduleService } from '../src/scheduling/ScheduleService';
+import * as scheduleProcesses from '../src/scheduling/claude/ClaudeScheduleProcesses';
 import * as ownershipRuntime from '../src/delegation/OwnershipRuntime';
 import { SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
 
@@ -22,6 +23,7 @@ const nativeFsync = syncFs.fsyncSync;
 let persistencePlatforms: NodeJS.Platform[];
 let root: string, executor: ClaudePersistentExecutor, raw: any, service: ScheduleService;
 let child: any, hosts: any[], inventory: Map<string, string>, deliver: any, serial: number;
+let onManagement: undefined | (() => Promise<void>);
 let onCreate: undefined | (() => Promise<void>);
 let modelReply: any;
 let nativeVersion: string;
@@ -31,14 +33,15 @@ let modelReplyType: 'success' | 'error' | 'missing';
 let background: string[], closeCode: number, withholdClose: boolean, errorAfterCreate: boolean, failCleanup: boolean;
 const frame = (value: object, host = child) => host.stdout.emit('data', Buffer.from(JSON.stringify(value) + '\n'));
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
-const terminal = (id: string) => {
-  frame({ type: 'result', uuid: `result-${++serial}`, user_message_uuid: id, user_message_uuids: [id], is_error: false, terminal_reason: 'completed', result: 'Synthetic result' });
-  frame({ type: 'command_lifecycle', command_uuid: id, state: 'completed' });
+const terminal = (id: string, host = child) => {
+  frame({ type: 'result', uuid: `result-${++serial}`, user_message_uuid: id, user_message_uuids: [id], is_error: false, terminal_reason: 'completed', result: 'Synthetic result' }, host);
+  frame({ type: 'command_lifecycle', command_uuid: id, state: 'completed' }, host);
 };
 function spawnFixture() {
   const host: any = Object.assign(new EventEmitter(), { pid: 4000 + hosts.length, killed: false,
     stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn(() => { host.emit('close', null, 'SIGTERM'); return true; }) });
   hosts.push(host); child = host;
+  host.on('close', () => { host.closed = true; });
   host.stdin = { writable: true, end: vi.fn(() => { if (!withholdClose) queueMicrotask(() => host.emit('close', closeCode, null)); }),
     write: vi.fn((line: string, done?: () => void) => {
       const packet = JSON.parse(line);
@@ -64,10 +67,13 @@ function spawnFixture() {
           frame({ type: 'command_lifecycle', command_uuid: packet.uuid, state: 'started' }, host);
           const action = raw.sessionSchedules?.pending?.action;
           if (action) {
+            await onManagement?.();
+            if (host.closed) return;
             const id = `tool-${++serial}`;
             frame({ type: 'control_request', request_id: id, request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
               tool_use_id: id, input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } }, host);
             const reply = JSON.parse(host.stdin.write.mock.calls.at(-1)[0]);
+            if (reply.response.response.hookSpecificOutput?.permissionDecision === 'deny') { terminal(packet.uuid, host); return; }
             expect(reply.response.response).toEqual({});
             let content: string;
             if (action.tool === 'CronCreate') {
@@ -79,7 +85,7 @@ function spawnFixture() {
             frame({ type: 'user', ...(action.tool === 'CronList' ? { tool_use_result: { jobs: [...inventory].map(([key, prompt]) => ({ id: key, prompt, cron: '* * * * *', recurring: true, durable: false })) } } : {}), message: { content: [{ type: 'tool_result', tool_use_id: id, content,
               is_error: action.tool === 'CronCreate' && errorAfterCreate || action.tool === 'CronDelete' && failCleanup }] } }, host);
           }
-          terminal(packet.uuid);
+          terminal(packet.uuid, host);
         }
       });
       done?.(); return true;
@@ -99,12 +105,14 @@ beforeEach(async () => {
   boot = 'fixture-boot';
   vi.spyOn(ownershipRuntime, 'bootIdentity').mockImplementation(() => ({ host: 'fixture-host', boot, namespace: 'fixture-pid-namespace' }));
   vi.spyOn(ownershipRuntime, 'kernelGate').mockReturnValue({ verify: () => {}, close: () => {} });
-  onCreate = undefined;
+  onCreate = undefined; onManagement = undefined;
   nativeVersion = '2.1.311';
   nativeCapabilities = ['interrupt_receipt_v1', 'msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'];
   modelReply = { model: 'synthetic-model' }; modelReplyType = 'success';
   hosts = []; inventory = new Map(); background = []; serial = 0; closeCode = 0; withholdClose = false; errorAfterCreate = false; failCleanup = false;
   vi.mocked(spawn).mockImplementation(spawnFixture as any);
+  vi.spyOn(scheduleProcesses, 'scheduleProcesses').mockImplementation(() => hosts.filter(host => !host.closed).map(host => ({
+    pid: host.pid, birth: String(host.pid), command: 'synthetic-native --resume synthetic-original-session' })));
   executor = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, owner.threadId, 'synthetic-model', undefined, 'synthetic-native');
   raw = executor; deliver = vi.fn();
   service = new ScheduleService({ directory: path.join(root, 'catalog'), now: () => Date.now(), canRecover: () => true, isOwnerCurrent: () => true,
@@ -310,6 +318,218 @@ describe('Claude production orderly recovery', () => {
     expect(inventory.size).toBe(2);
     list.mockRestore(); stop.mockRestore();
   });
+  it.each([false, true])('quarantines a refused restore and admits new explicit work in the original session and boot (legacy=%s)', async legacy => {
+    if (legacy) {
+      const ownership = raw.scheduleHostOwnership();
+      vi.spyOn(ownership, 'reserveForNewJob').mockImplementationOnce(() => ownership.reserve(true));
+    }
+    await create(); const original = executor.getSessionId();
+    await abruptRestart(false); await service.recover();
+    expect((await executor.execute('Continue the original conversation')).success).toBe(true);
+    raw.delegation = { groups: ['scheduling'] };
+    await executor.withReviewedNativeCleanup('cleanup', () => true, async session => {
+      for (const definition of await session.inventory()) await session.remove(definition);
+    });
+    expect(inventory.size).toBe(0);
+    raw.delegation = undefined;
+    expect((await create('new-explicit-job')).state).toBe('active');
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', recovery: { status: 'blocked' } });
+    expect(service.hasUnresolvedRecovery()).toBe(false);
+    expect(executor.getSessionId()).toBe(original);
+    expect(boot).toBe('fixture-boot');
+  });
+
+  it.each([false, true])('binds clean recovery and retained cancellation to the new owner after dirty rearm (recover=%s)', async recover => {
+    const ownership = raw.scheduleHostOwnership();
+    vi.spyOn(ownership, 'reserveForNewJob').mockImplementationOnce(() => ownership.reserve(true));
+    const old = await create();
+    const oldIdentity = JSON.parse(old.recovery!.identity);
+    await abruptRestart(false); await service.recover();
+    await executor.execute('Continue the original session');
+    raw.delegation = { groups: ['scheduling'] };
+    await executor.withReviewedNativeCleanup('remove-old-definition', () => true, async host => {
+      for (const entry of await host.inventory()) await host.remove(entry);
+    });
+    raw.delegation = undefined;
+    const fresh = await create('new-owner-job');
+    const freshIdentity = JSON.parse(fresh.recovery!.identity);
+    expect(freshIdentity.ownerToken).toMatch(/^[a-f0-9-]{36}$/);
+    expect(freshIdentity.ownerToken).not.toBe(oldIdentity.ownerToken);
+    const filename = raw.scheduleHostOwnership().filename;
+    const archives = (await fs.readdir(path.dirname(filename))).filter(name => name.includes('.retired-'));
+    expect(archives).toHaveLength(1);
+    const archive = path.join(path.dirname(filename), archives[0]);
+    const diagnostic = await fs.readFile(archive, 'utf8');
+    expect(JSON.parse(diagnostic).clean).toBe(false);
+    await service.suspendForRestart();
+    await service.destroy(); await executor.destroy();
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, owner.threadId, 'synthetic-model', undefined, 'synthetic-native');
+    raw = executor;
+    service = new ScheduleService({ directory: path.join(root, 'catalog'), canRecover: () => true, isOwnerCurrent: () => true,
+      provider: { recoveryFor: () => executor.nativeScheduleRecovery,
+        create: (input, emit, admit) => executor.createNativeSchedule(input, emit, undefined, admit) }, deliver });
+    await service.initialize();
+    if (recover) {
+      await service.recover();
+      expect((await service.list(owner)).map(record => record.state)).toEqual(['failed', 'active']);
+      expect(JSON.parse((await service.list(owner))[1].recovery!.identity).ownerToken).toBe(freshIdentity.ownerToken);
+      await service.suspendForRestart();
+    }
+    raw.effort = 'high'; // Fail synchronous preflight before any native admission.
+    const spawnCount = hosts.length;
+    await service.recover();
+    expect(hosts).toHaveLength(spawnCount);
+    expect((await service.list(owner))[1].state).toBe('failed');
+    raw.effort = undefined;
+    await executor.listModels();
+    raw.delegation = { groups: ['scheduling'] };
+    await executor.withReviewedNativeCleanup('check-owner-proof', () => true, async host => {
+      expect(await host.inventory()).toEqual([]);
+      expect(host.retirementConfirmed?.(freshIdentity.ownerToken)).toBe(true);
+      expect(host.retirementConfirmed?.(oldIdentity.ownerToken)).toBe(false);
+      expect(host.retirementConfirmed?.()).toBe(false);
+    });
+    raw.delegation = undefined;
+    await executor.withNativeScheduleOperation('cancel-new', () => true,
+      async () => expect(await service.cancel(owner, fresh.id)).toMatchObject({ state: 'cancelled' }), false);
+    await expect(executor.withNativeScheduleOperation('cancel-old', () => true,
+      () => service.cancel(owner, old.id), false)).rejects.toThrow('predecessor work remains unconfirmed');
+    expect(inventory.size).toBe(0);
+    expect(await fs.readFile(archive, 'utf8')).toBe(diagnostic);
+    expect(JSON.parse(await fs.readFile(filename, 'utf8')).predecessorUncertain).toBe(true);
+    expect(executor.getSessionId()).toBe('synthetic-original-session');
+    await service.recover();
+    expect((await service.list(owner)).map(record => record.state)).toEqual(['failed', 'cancelled']);
+  });
+
+  it('records creation refusal for a live native owner and admits a later explicit request after its exit', async () => {
+    const inventoryProbe = vi.mocked(scheduleProcesses.scheduleProcesses);
+    const normal = inventoryProbe.getMockImplementation()!;
+    inventoryProbe.mockImplementation(() => [...normal(), { pid: 9001, birth: 'other', command: 'synthetic-native --resume synthetic-original-session' }]);
+    await expect(create('refused')).rejects.toThrow('Another native host');
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', creationRefused: true });
+    expect(inventory.size).toBe(0);
+    inventoryProbe.mockImplementation(normal);
+    expect((await create('explicit-after-exit')).state).toBe('active');
+    expect(executor.getSessionId()).toBe('synthetic-original-session');
+  });
+
+  it.each([[false, false], [true, false], [true, true]])('settles a no-handle timeout through public chat and new scheduling (late terminal=%s, sibling=%s)', (lateTerminal, sibling) => {
+    return (async () => {
+      const session = executor.getSessionId();
+      const thread: any = { id: owner.threadId, name: 'Synthetic', workingDirectory: root, delegation: false };
+      const manager: any = { contextResets: new ThreadContextReset(path.join(root, 'timeout-resets')),
+        getThread: () => thread, getDefaultThread: () => thread, listThreads: () => [thread],
+        updateThread: vi.fn(async (_id, fields) => Object.assign(thread, fields)) };
+      const guard = new DirectoryGuard([root]);
+      const pool = new ThreadExecutorPool(manager, guard, { type: 'claude-persistent' }, () => executor);
+      const ws: any = { send: vi.fn(), isConnected: () => true, hasPendingTaskResults: () => false,
+        trackTask: vi.fn(), onClose: () => () => {}, onTaskResultAck: () => () => {} };
+      const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent' } : undefined,
+        getConfigDir: () => path.join(root, 'timeout-handler'), getSharedSymlinks: () => [] };
+      const handler = new MessageHandler(ws, pool, manager, guard, config);
+      const state = handler as any;
+      state.schedules = service; state.scheduleInitialization = Promise.resolve(service); state.scheduleResultsSupported = true;
+      vi.spyOn(state, 'detectBackends').mockResolvedValue([{ id: 'auto', label: 'Claude', installed: true }]);
+      vi.spyOn(state.delegation.registry, 'list').mockResolvedValue([]);
+      (service as any).options.recoveryTimeoutMs = 20;
+      (service as any).options.acquireRecovery = () => {
+        if (state.scheduleRecoveryThreads.has(thread.id)) throw new Error('Recovery thread admission unavailable.');
+        state.scheduleRecoveryThreads.add(thread.id);
+        return () => state.scheduleRecoveryThreads.delete(thread.id);
+      };
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let recoveryHost: typeof child;
+      const originalTimer = global.setTimeout;
+      vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: any, ...args: any[]) =>
+        originalTimer(callback, delay === 60_000 ? 100 : delay, ...args)) as any);
+      let sequence = 0;
+      const send = (content: string) => handler.handleMessage({ type: 'command', threadId: thread.id, openId: owner.openId,
+        messageId: `timeout-${++sequence}`, content, isSlashCommand: content.startsWith('/'), timestamp: Date.now() } as any);
+      const response = () => ws.send.mock.calls.map(([message]: any[]) => message).filter((message: any) => message.type === 'response').at(-1);
+      try {
+        await send('Initialize synthetic managed tools'); expect(response().success).toBe(true);
+        await create(); if (sibling) await create('second');
+        await service.suspendForRestart(); await executor.listModels();
+        recoveryHost = child;
+        onManagement = () => raw.sessionSchedules?.scope?.id === 'restore-first' ? gate : Promise.resolve();
+        await service.recover();
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', recovery: { status: 'blocked' } });
+        if (sibling) {
+          expect((await service.list(owner))[1]).toMatchObject({ state: 'interrupted',
+            recovery: { status: 'pending', handoff: 'clean', nativeDefinitionAbsent: true } });
+          expect(inventory.size).toBe(0);
+        }
+        await send('Before settlement'); expect(response().success).toBe(false);
+        expect(response().openId).toBe(owner.openId);
+        if (lateTerminal) release();
+        await vi.waitFor(() => expect(state.scheduleRecoveryThreads.size).toBe(0));
+        if (sibling) {
+          await vi.waitFor(async () => expect((await service.list(owner))[1].state).toBe('active'));
+          expect((await service.list(owner))[0].state).toBe('failed');
+        }
+        onManagement = undefined;
+        await send('Continue the original conversation'); expect(response().success, JSON.stringify(response())).toBe(true);
+        expect(executor.getSessionId()).toBe(session);
+        expect(service.hasUnresolvedRecovery()).toBe(false);
+        if (sibling) {
+          expect((await service.list(owner)).map(record => record.state)).toEqual(['failed', 'active']);
+          wake('recovered-untouched-sibling', [...inventory.values()][0]); terminal('recovered-untouched-sibling');
+          await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+          await service.recover();
+          expect((await service.list(owner))[0].state).toBe('failed');
+          expect(child).toBe(recoveryHost);
+          return;
+        }
+        expect(service.canSuspendForRestart()).toBe(true);
+        expect(service.requiresShutdownHandoff()).toBe(false);
+        expect(handler.tryBeginAutomaticUpdate()).toBe(true);
+        await handler.prepareAutomaticUpdate(); await handler.endAutomaticUpdate();
+        await send('/schedule cleanup review'); expect(response().success).toBe(true);
+        expect(inventory.size).toBe(0);
+        await send('/schedule cron "* * * * *" --tz UTC -- New explicit work');
+        expect(response().success).toBe(true);
+        expect(inventory.size).toBe(1); expect(executor.getSessionId()).toBe(session);
+        expect(boot).toBe('fixture-boot');
+        if (recoveryHost !== child) {
+          recoveryHost.emit('close', null, 'SIGTERM');
+          expect(raw.claudeProcess).toBe(child); expect(state.scheduleRecoveryThreads.size).toBe(0);
+          await send('Continue after the stale host callback'); expect(response().success).toBe(true);
+          expect(inventory.size).toBe(1);
+        }
+      } finally { onManagement = undefined; release(); await executor.destroy(); await drain(); await handler.destroy(); }
+    })();
+  });
+
+  it('joins a late management terminal without recycling a healthy sibling host', async () => {
+    await create(); await create('second'); await service.suspendForRestart(); await executor.listModels();
+    // Establish the healthy sibling before applying the short failure deadline.
+    // Coverage and concurrent filesystem work must not time out that first job.
+    (service as any).options.recoveryTimeoutMs = 2000;
+    onCreate = async () => { (service as any).options.recoveryTimeoutMs = 20; onCreate = undefined; };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    onManagement = () => raw.sessionSchedules?.scope?.id === 'restore-second' ? gate : Promise.resolve();
+    const originalTimer = global.setTimeout;
+    vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: any, ...args: any[]) =>
+      originalTimer(callback, delay === 60_000 ? 100 : delay, ...args)) as any);
+    const originalHost = child;
+    try {
+      await service.recover();
+      await new Promise(resolve => originalTimer(resolve, 150));
+      expect(originalHost.stdin.end).not.toHaveBeenCalled(); expect(originalHost.kill).not.toHaveBeenCalled();
+      expect((await executor.execute('Wait for the exact management turn')).success).toBe(false);
+      release(); await vi.waitFor(() => expect(service.hasUnresolvedRecovery()).toBe(false));
+      expect((await service.list(owner)).map(record => record.state)).toEqual(['active', 'failed']);
+      onManagement = undefined;
+      expect((await executor.execute('Continue with the healthy sibling')).success).toBe(true);
+      wake('healthy-sibling', [...inventory.values()][0]); terminal('healthy-sibling');
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(child).toBe(originalHost);
+    } finally { release(); onManagement = undefined; }
+  });
+
   it('does not infer predecessor death from a same-boot abrupt close', async () => {
     await create(); await abruptRestart(false); await service.recover();
     expect(hosts).toHaveLength(1);
@@ -328,7 +548,7 @@ describe('Claude production orderly recovery', () => {
     expect([...inventory.keys()]).toEqual([sibling]); expect(inventory.has(target)).toBe(false);
     const record = (await service.list(owner)).find(r => r.id === 'first')!;
     expect(record.cancelRequested).toBe(true);
-    expect(record.state).toBe(nextBoot ? 'cancelled' : 'interrupted');
+    expect(record.state).toBe(nextBoot ? 'cancelled' : 'failed');
     expect(executor.getSessionId()).toBe('synthetic-original-session');
     const actions = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line))
       .filter((p: any) => p.type === 'user');
@@ -430,9 +650,9 @@ describe('Claude production orderly recovery', () => {
       expect((await service.list(owner))[0].recovery?.status).toBe('blocked');
       expect(inventory.size).toBe(0);
       expect(raw.acknowledgedModel).not.toBe('synthetic-model');
-      expect((await executor.execute('Must stay fenced')).success).toBe(false);
+      expect((await executor.execute('Chat after failed restoration')).success).toBe(true);
     });
-  it.each(['error', 'missing'] as const)('keeps a %s restored model reply fenced and does not replay CREATE', async replyType => {
+  it.each(['error', 'missing'] as const)('quarantines a %s restored model reply without blocking chat or replaying CREATE', async replyType => {
     raw.model = undefined;
     await create(); await service.suspendForRestart(); modelReplyType = replyType;
     const originalTimer = global.setTimeout;
@@ -450,7 +670,7 @@ describe('Claude production orderly recovery', () => {
       expect((await service.list(owner))[0].recovery?.status).toBe('blocked');
       expect(inventory.size).toBe(0);
     }
-    expect((await executor.execute('Must stay fenced')).success).toBe(false);
+    expect((await executor.execute('Chat after failed restoration')).success).toBe(true);
   });
   it('defers updater admission for admitted work and waits for background completion without killing', async () => {
     await create(); wake('active-occurrence', [...inventory.values()][0]); await drain();
@@ -463,7 +683,7 @@ describe('Claude production orderly recovery', () => {
     background = []; frame({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
     await handoff; expect(old.stdin.end).toHaveBeenCalledTimes(1);
   });
-  it('does not let another recovered job cleanup release a later unresolved restoration fence', async () => {
+  it('keeps a healthy sibling after a later read-only restoration failure', async () => {
     raw.model = undefined;
     await create(); await create('second'); await service.suspendForRestart();
     onCreate = async () => { modelReplyType = 'missing'; onCreate = undefined; };
@@ -472,9 +692,9 @@ describe('Claude production orderly recovery', () => {
       originalTimer(callback, delay === 10000 ? 20 : delay, ...args)) as any);
     await service.recover();
     expect((await service.list(owner)).find(record => record.id === 'second')!.recovery?.status).toBe('blocked');
-    expect((await executor.execute('Before cleanup')).success).toBe(false);
+    expect((await executor.execute('Before cleanup')).success).toBe(true);
     await service.cancel(owner, 'first');
-    expect((await executor.execute('After unrelated cleanup')).success).toBe(false);
+    expect((await executor.execute('After unrelated cleanup')).success).toBe(true);
   });
   it('retains an error-after-commit restore handle and never automatically duplicates creation', async () => {
     await create(); await service.suspendForRestart(); errorAfterCreate = true; failCleanup = true;
@@ -503,7 +723,7 @@ describe('Claude production orderly recovery', () => {
     await create(); await service.suspendForRestart();
     let cancellation: Promise<unknown> | undefined;
     onCreate = async () => {
-      onCreate = undefined;
+      onCreate = undefined; onManagement = undefined;
       cancellation = service.cancel(owner, 'first'); void cancellation.catch(() => {});
       await (service as any).tail;
       expect((await service.list(owner))[0].cancelRequested).toBe(true);
@@ -518,7 +738,7 @@ describe('Claude production orderly recovery', () => {
   it('refuses identity changes and does not start a new host after explicit reset', async () => {
     await create(); await service.suspendForRestart(); executor.resetContext(); await drain();
     await service.recover(); expect(hosts).toHaveLength(1);
-    expect((await service.list(owner))[0].state).toBe('interrupted');
+    expect((await service.list(owner))[0].state).toBe('failed');
   });
   it('refuses unowned native definitions without deleting them or closing the host', async () => {
     await create(); inventory.set('foreign-native-job', '[synthetic-unmanaged]\nForeign reminder');
@@ -652,7 +872,7 @@ describe('Claude production orderly recovery', () => {
     await service.recover();
     expect(inventory.size).toBe(0);
     expect((await service.list(owner))[0].recovery?.status).toBe('blocked');
-    expect((await executor.execute('Must stay fenced')).success).toBe(false);
+    expect((await executor.execute('Chat after failed restoration')).success).toBe(true);
   });
   it('keeps restricted and managed worker recovery disabled', async () => {
     raw.delegationWorker = true; expect(executor.nativeScheduleRecovery).toBeUndefined();

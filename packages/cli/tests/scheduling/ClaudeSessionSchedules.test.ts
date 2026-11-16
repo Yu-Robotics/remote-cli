@@ -503,6 +503,45 @@ describe('Claude foreground native schedule protocol', () => {
     expect(h.manage).not.toHaveBeenCalled(); expect(h.adapter.busy).toBe(false); h.adapter.processClosed();
   });
 
+  it('expires only the captured recovery scope and joins its late management terminal', async () => {
+    const h = harness(); let finish!: (value: { success: boolean }) => void;
+    h.manage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const restored = { ...input(), recovery: { version: 1 as const, provider: 'fixture', strategy: 'reconstruct' as const,
+      identity: JSON.stringify({ marker: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }) } };
+    const pending = h.adapter.inToolOperation('restore-old', () => true, () => h.adapter.create(restored, vi.fn(), undefined, undefined, true), false);
+    const failure = expect(pending).rejects.toThrow('authorization expired');
+    h.adapter.foregroundDispatched('management-old', true);
+    h.adapter.expireRecovery('unrelated');
+    expect(h.manage).toHaveBeenCalledOnce();
+    h.adapter.expireRecovery('restore-old'); await failure;
+    const joined = vi.fn(); const settlement = h.adapter.settleManagement().then(joined);
+    await Promise.resolve(); expect(joined).not.toHaveBeenCalled();
+    finish({ success: true }); await Promise.resolve(); await Promise.resolve();
+    expect(joined).not.toHaveBeenCalled();
+    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'unrelated-turn', state: 'completed' });
+    await Promise.resolve(); expect(joined).not.toHaveBeenCalled();
+    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'management-old', state: 'completed' });
+    await settlement; expect(joined).toHaveBeenCalledOnce();
+    const next = h.adapter.inToolOperation('restore-new', () => true, () => h.adapter.create(input('new'), vi.fn()), false);
+    h.adapter.foregroundDispatched('management-new', true);
+    h.adapter.expireRecovery('restore-old');
+    const action = JSON.parse(h.manage.mock.calls.at(-1)![0]!.split('\n').at(-1)!);
+    expect(h.hook(action.tool, action.input)).toEqual({}); h.receipt(h.created());
+    expect((await next).nativeId).toBe('native-one'); h.adapter.processClosed();
+  });
+  it('retains an invoked mutation receipt after recovery expiry and blocks its stale wake before inference', async () => {
+    const h = harness();
+    const pending = h.adapter.inToolOperation('restore-invoked', () => true, () => h.adapter.create(input(), vi.fn()), false);
+    h.adapter.foregroundDispatched('management-invoked', true);
+    const action = JSON.parse(h.manage.mock.calls.at(-1)![0]!.split('\n').at(-1)!);
+    expect(h.hook(action.tool, action.input)).toEqual({});
+    h.adapter.expireRecovery('restore-invoked');
+    expect(h.adapter.cleanupMutationPending).toBe(true);
+    h.receipt(h.created()); expect((await pending).nativeId).toBe('native-one');
+    expect(h.occurrence(action.input.prompt)).toHaveProperty('decision', 'block');
+    h.adapter.processClosed();
+  });
+
   it('uses queued same-session management for slash/card controls and denies unrelated tools during it', async () => {
     const h = harness(); const events = vi.fn();
     const pending = h.adapter.create(input(), events);

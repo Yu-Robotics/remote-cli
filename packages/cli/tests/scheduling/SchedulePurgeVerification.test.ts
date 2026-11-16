@@ -21,6 +21,20 @@ function fixture() {
     run: () => verifySchedulePurge(record, host, current, accept) };
 }
 describe('framework schedule purge verification', () => {
+  it('checks retirement against the original job incarnation on every evidence use', async () => {
+    const f = fixture();
+    const ownerToken = '22222222-2222-4222-8222-222222222222';
+    f.record.recovery!.identity = JSON.stringify({ ...f.identity, ownerToken });
+    let currentToken = ownerToken;
+    f.host.retirementConfirmed = token => token === currentToken;
+    const evidence = await f.run();
+    expect(evidence.status).toBe('verified');
+    if (evidence.status !== 'verified') throw new Error('Missing exact owner evidence');
+    expect(evidence.isCurrent()).toBe(true);
+    currentToken = '33333333-3333-4333-8333-333333333333';
+    expect(evidence.isCurrent()).toBe(false);
+    expect(await f.run()).toMatchObject({ reason: 'predecessor_unknown' });
+  });
   it('verifies fresh original-session absence while preserving all siblings', async () => {
     const f = fixture();
     f.inventory.mockResolvedValue([{ id: 'sibling', prompt: 'Unrelated task', cron: '* * * * *', durable: false }]);

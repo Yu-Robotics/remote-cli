@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { validateScheduleId, validateSchedulePrompt, validateScheduleRule } from './ScheduleCommand';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner, ScheduleRecord, ScheduleRule, ScheduleRecoveryCheckpoint } from './types';
-import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from './types';
+import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleRecoverySettledError, NativeScheduleCleanupError } from './types';
 import { assertNativeScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
 
 export const SCHEDULE_CATALOG_FILE = 'schedule-catalog.json';
@@ -99,6 +99,7 @@ interface Runtime {
   stopPromise?: Promise<void>;
   stopped: boolean;
   recoveryAbort?: AbortController;
+  recoveryAdmitted?: boolean;
   releasing?: boolean;
   releasePromise?: ReturnType<NonNullable<NativeScheduleHandle['releaseForRestart']>>;
   releaseAdmission?: () => void;
@@ -146,9 +147,10 @@ function sameCleanupOwner(left: ScheduleOwner, right: ScheduleOwner): boolean {
   return left.threadId === right.threadId && left.openId === right.openId;
 }
 
-/** Terminal intent prevents recreation, but uncertain native cleanup still owns admission. */
+/** Failed future-only history is inactive; live runtimes still own admission.
+ * Other providers retain their existing native cleanup obligations. */
 function recoveryOwnsWork(record: ScheduleRecord): boolean {
-  return !!record.recovery && (!['completed', 'cancelled'].includes(record.state)
+  return !!record.recovery && !(record.state === 'failed' && record.recovery.futureOnly) && (!['completed', 'cancelled'].includes(record.state)
     || !!record.error?.startsWith('Native process exit unconfirmed:'));
 }
 
@@ -230,6 +232,14 @@ export class ScheduleService {
           if (record.recovery?.status === 'pending') { record.recovery.status = 'blocked'; changed = true; }
           continue; // Terminal tombstones always win over a stale recovery checkpoint.
         }
+        // A consumed future-only attempt or an already blocked interrupted row
+        // cannot regain automatic admission after another service restart.
+        if (record.recovery?.futureOnly && (record.state === 'creating'
+          || record.state === 'interrupted' && record.recovery.status === 'blocked')) {
+          record.state = 'failed'; record.recovery.status = 'blocked';
+          record.error ??= 'Interrupted native restoration quarantined; original session and cleanup evidence retained.';
+          changed = true; continue;
+        }
         if (LIVE.has(record.state) || record.recovery?.status === 'pending'
           || record.state === 'interrupted' && record.recovery?.futureOnly && record.rule.kind === 'cron') {
           const futureOnly = record.recovery?.futureOnly && record.rule.kind === 'cron';
@@ -294,6 +304,10 @@ export class ScheduleService {
       const runtime = this.newRuntime();
       runtime.completed = new Set(record.completedOccurrences);
       const controller = new AbortController(); runtime.recoveryAbort = controller;
+      // Admission contention has not consumed this job's clean checkpoint.
+      // Leave it pending so the exact earlier runtime can release the thread.
+      try { runtime.releaseAdmission = this.options.acquireRecovery?.(structuredClone(record)); }
+      catch (error) { await this.recoveryDiagnostic(record, errorText(error)); continue; }
       this.runtimes.set(id, runtime);
       const current = () => !controller.signal.aborted && !this.closing && !this.fault && !record.cancelRequested
         && this.current(record) && this.options.canRecover?.(structuredClone(record)) === true;
@@ -308,13 +322,12 @@ export class ScheduleService {
       let admitted = false;
       let succeeded = false;
       try {
-        runtime.releaseAdmission = this.options.acquireRecovery?.(structuredClone(record));
         await this.serial(async () => {
           if (!current()) throw new Error('Recovery admission expired.');
           // Consume clean proof before mutation. A crash must not replay an orderly-only restore.
           record.state = 'creating'; delete record.recovery!.handoff; delete record.recovery!.nativeDefinitionAbsent; await this.persist();
         });
-        admitted = true;
+        admitted = true; runtime.recoveryAdmitted = true;
         const admission = Promise.resolve().then(() => provider.reconcile(restoreRecord,
           { notBefore: this.now(), signal: controller.signal, isCurrent: current,
             isOwnerCurrent: () => !record.cancelRequested && !this.fault && this.current(record),
@@ -335,11 +348,19 @@ export class ScheduleService {
             if (controller.signal.aborted) await this.stop(id, runtime).catch(() => {});
           }
           runtime.resolveReady(runtime.handle);
+          if (!runtime.handle && (error instanceof NativeScheduleRecoverySettledError
+            || error instanceof NativeScheduleNotAdmittedError || error instanceof NativeScheduleAbsentError)) {
+            runtime.stopped = true;
+            this.releaseRecoveryAdmission(runtime);
+            if (this.runtimes.get(id) === runtime) this.runtimes.delete(id);
+          }
           // A rejection without a handle is not proof that native admission never happened.
           throw error;
         });
         const handle = await Promise.race([receipt, new Promise<never>((_, reject) => {
-          timer = setTimeout(() => { controller.abort(); reject(new Error('Native recovery timed out; ownership retained, do not recreate.')); },
+          timer = setTimeout(() => { controller.abort(); reject(new Error(record.recovery?.futureOnly
+            ? 'Native recovery timed out; this job will not restart automatically. Native settlement and cleanup remain separate.'
+            : 'Native recovery timed out; ownership retained, do not recreate.')); },
             this.options.recoveryTimeoutMs ?? 30_000);
         })]);
         text(handle.nativeId);
@@ -349,6 +370,7 @@ export class ScheduleService {
         await this.serial(async () => {
           if (!current()) throw new Error('Recovery owner retired before receipt persistence.');
           record.nativeId = handle.nativeId;
+          if (handle.recoveryIdentity) { text(handle.recoveryIdentity, 8192); record.recovery!.identity = handle.recoveryIdentity; }
           if (record.state === 'creating') record.state = 'active';
           record.recovery!.status = 'eligible'; delete record.error;
           await this.persist();
@@ -356,15 +378,16 @@ export class ScheduleService {
         succeeded = true;
       } catch (error) {
         controller.abort();
-        if (!admitted || error instanceof NativeScheduleAbsentError || error instanceof NativeScheduleNotAdmittedError) { runtime.stopped = true; runtime.resolveReady(undefined); }
+        if (!admitted || error instanceof NativeScheduleAbsentError || error instanceof NativeScheduleNotAdmittedError || error instanceof NativeScheduleRecoverySettledError) { runtime.stopped = true; runtime.resolveReady(undefined); }
         // Do not retry an ambiguous mutation or release its handle on a timeout.
-        await this.blockRecovery(record, errorText(error));
+        if (admitted) await this.blockRecovery(record, errorText(error), !!record.recovery?.futureOnly);
+        else await this.recoveryDiagnostic(record, errorText(error));
         if (runtime.handle) await this.stop(id, runtime).catch(() => {});
         else if (runtime.stopped) this.runtimes.delete(id);
       } finally {
         if (timer) clearTimeout(timer);
         if (succeeded || runtime.stopped) {
-          runtime.releaseAdmission?.(); runtime.releaseAdmission = undefined;
+          this.releaseRecoveryAdmission(runtime);
         }
       }
     }
@@ -380,6 +403,19 @@ export class ScheduleService {
         cwd: record.cwd, prompt: record.prompt, rule: record.rule, ...record.execution })?.releaseRestartAdmission?.();
       released.add(record.threadId);
     }
+  }
+
+  private releaseRecoveryAdmission(runtime: Runtime): void {
+    const release = runtime.releaseAdmission;
+    runtime.releaseAdmission = undefined;
+    release?.();
+    if (!release || !runtime.recoveryAdmitted || !runtime.recoveryAbort?.signal.aborted) return;
+    // Join the current pass before retrying untouched siblings. Failed rows are
+    // never candidates, and canRecover/acquireRecovery recheck newer admission.
+    const retry = Promise.resolve(this.recoveryRun).catch(() => {}).then(() => {
+      if (!this.closing && !this.fault && this.hasPendingRecovery()) return this.recover();
+    });
+    this.track(retry);
   }
 
   private checkpoint(value: ScheduleRecoveryCheckpoint): ScheduleRecoveryCheckpoint {
@@ -398,12 +434,12 @@ export class ScheduleService {
   }
 
   private async recoveryDiagnostic(record: ScheduleRecord, reason: string): Promise<void> {
-    await this.serial(async () => { record.error = reason; await this.persist(); });
+    await this.serial(async () => { record.error = reason; if (!this.fault) await this.persist(); });
   }
 
-  private async blockRecovery(record: ScheduleRecord, reason: string): Promise<void> {
+  private async blockRecovery(record: ScheduleRecord, reason: string, quarantine = false): Promise<void> {
     await this.serial(async () => {
-      if (!['completed', 'cancelled'].includes(record.state)) record.state = 'interrupted';
+      if (!['completed', 'cancelled'].includes(record.state)) record.state = quarantine ? 'failed' : 'interrupted';
       record.recovery!.status = 'blocked'; record.error = reason;
       if (!this.fault) await this.persist();
     });
@@ -841,13 +877,13 @@ export class ScheduleService {
     const record = this.owned(owner, id);
     const runtime = this.runtimes.get(id);
     if (record.state === 'cancelled' && runtime?.handle?.cancellationKeepsRunning && !record.error) return false;
-    return LIVE.has(record.state) || recoveryOwnsWork(record) || record.state === 'interrupted' && !!record.nativeId && this.supportsRetainedCancellation(record)
+    return LIVE.has(record.state) || recoveryOwnsWork(record) || ['interrupted', 'failed'].includes(record.state) && !!record.nativeId && this.supportsRetainedCancellation(record)
       || Boolean(runtime && !runtime.stopped);
   }
 
   /** Newly observed cleanup facts never supply historical recovery proof. The optional
    * retirement callback is framework-owned and checked under the native cleanup lease. */
-  async recordReviewedCleanup(owner: ScheduleOwner, ids: string[], absent: boolean, retirementConfirmed?: () => boolean): Promise<void> {
+  async recordReviewedCleanup(owner: ScheduleOwner, ids: string[], absent: boolean, retirementConfirmed?: (record: Readonly<ScheduleRecord>) => boolean): Promise<void> {
     this.checkReady(); validateOwner(owner); ids.forEach(validateScheduleId);
     if (!ids.length) return;
     await this.serial(async () => {
@@ -861,7 +897,7 @@ export class ScheduleService {
         record.error = absent ? 'Owner-reviewed native definition absent on current host; predecessor work remains unknown.'
           : 'Owner-reviewed native deletion requested; absence and predecessor work remain unconfirmed.';
         const runtime = this.runtimes.get(id);
-        if (absent && retirementConfirmed?.() === true && (!runtime || runtime.stopped && !runtime.running.size)
+        if (absent && retirementConfirmed?.(record) === true && (!runtime || runtime.stopped && !runtime.running.size)
           && !this.recordOperations.has(id) && !this.recoveryRun && !this.refreshes && !this.retainedCancellations.has(id)) {
           record.state = 'cancelled'; record.cleanupConfirmed = true; delete record.error;
           // Native-only cleanup must not discard already-admitted output. History
@@ -953,8 +989,8 @@ export class ScheduleService {
       if (!runtime && record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent) { record.state = 'cancelled'; delete record.error; await this.persist(); }
       const retainedCleanup = !runtime || runtime.stopped && !runtime.handle?.nativeDefinitionAbsent
         && this.supportsRetainedCancellation(record);
-      if (retainedCleanup && (recoveryOwnsWork(record)
-        || record.state === 'interrupted' && !!record.nativeId && this.supportsRetainedCancellation(record))) {
+      if (retainedCleanup && (recoveryOwnsWork(record) || record.state === 'failed' && !!record.recovery
+        || ['interrupted', 'failed'].includes(record.state) && !!record.nativeId && this.supportsRetainedCancellation(record))) {
         operation = Promise.resolve().then(() => this.cancelRetained(record));
         this.retainedCancellations.set(id, operation);
         return;
@@ -1021,8 +1057,8 @@ export class ScheduleService {
   hasUnresolvedHandoff(): boolean { return this.handoffUnresolved; }
 
   hasUnresolvedRecovery(): boolean {
-    return [...this.records.values()].some(record => recoveryOwnsWork(record)
-      && record.recovery?.status !== 'eligible');
+    return [...this.runtimes.values()].some(runtime => !!runtime.recoveryAbort && !runtime.stopped && runtime.recoveryAbort.signal.aborted)
+      || [...this.records.values()].some(record => recoveryOwnsWork(record) && record.recovery?.status !== 'eligible');
   }
 
   hasPendingRecovery(): boolean {
@@ -1141,7 +1177,8 @@ export class ScheduleService {
 
   /** Providers with durable intent must complete handoff before unrelated host teardown. */
   requiresShutdownHandoff(): boolean {
-    return [...this.records.values()].some(record => !!record.recovery);
+    return [...this.records.values()].some(record => !!record.recovery
+      && (!(record.state === 'failed' && record.recovery.futureOnly) || !!this.runtimes.get(record.id) && !this.runtimes.get(record.id)!.stopped));
   }
 
   destroy(): Promise<void> {
@@ -1270,7 +1307,7 @@ export class ScheduleService {
       // after a failed cancellation cleanup. Never downgrade confirmed exit.
       if (event.type === 'stopped' && event.exitConfirmed !== false) {
         runtime.stopped = true;
-        runtime.releaseAdmission?.(); runtime.releaseAdmission = undefined;
+        this.releaseRecoveryAdmission(runtime);
         if (record.error?.startsWith('Native process exit unconfirmed:')) {
           delete record.error;
           await this.persist();
@@ -1299,9 +1336,10 @@ export class ScheduleService {
         record.nativeId = event.nativeId;
         await this.persist(); return;
       }
+      const finishingFailed = record.state === 'failed' && event.type === 'completed' && runtime.running.has(event.occurrenceId);
       const finishingCancelled = record.state === 'cancelled' && runtime.handle?.cancellationKeepsRunning
         && event.type === 'completed' && runtime.running.has(event.occurrenceId);
-      if ((!finishingCancelled && record.state === 'cancelled') || record.state === 'failed' || record.state === 'completed') return;
+      if ((!finishingCancelled && record.state === 'cancelled') || record.state === 'failed' && !finishingFailed || record.state === 'completed') return;
       if (event.type === 'stopped') {
         if (LIVE.has(record.state)) { record.state = 'interrupted'; record.error = bounded(event.reason, ERROR_BYTES); }
       } else {
@@ -1335,7 +1373,7 @@ export class ScheduleService {
               ...(event.error !== undefined && { error: bounded(event.error, ERROR_BYTES) }) });
             if (finishingCancelled) { cleanup = true; }
             else if (record.rule.kind === 'once') { record.state = 'completed'; cleanup = true; }
-            else if (record.state !== 'interrupted') {
+            else if (record.state !== 'interrupted' && record.state !== 'failed') {
               record.state = runtime.running.size ? 'running' : 'active';
               if (record.recovery && !runtime.running.size) record.recovery.status = 'eligible';
             }
@@ -1415,7 +1453,7 @@ export class ScheduleService {
         // finishes. Keep ownership until its terminal stopped notification.
         if (handle?.retirementConfirmed !== false && (!handle?.cancellationKeepsRunning || !runtime.running.size)) runtime.stopped = true;
         if (runtime.stopped) {
-          runtime.releaseAdmission?.(); runtime.releaseAdmission = undefined;
+          this.releaseRecoveryAdmission(runtime);
           await this.rememberCleanup(id, runtime);
         }
       } catch (error) {
@@ -1456,7 +1494,7 @@ export class ScheduleService {
   private canAdmitOccurrence(id: string, runtime: Runtime): boolean {
     const record = this.records.get(id);
     return !!record && this.runtimes.get(id) === runtime && !this.closing && !this.hostRetirement && !this.fault
-      && !runtime.stopped && !runtime.cancelling && !record.cancelRequested
+      && !runtime.stopped && !runtime.cancelling && !runtime.recoveryAbort?.signal.aborted && !record.cancelRequested
       && LIVE.has(record.state) && this.current(record);
   }
 
@@ -1629,8 +1667,9 @@ export class ScheduleService {
           || !['unattributed', 'native_absence_unknown', 'predecessor_unknown'].includes(entry.reason as string)) throw new Error('Invalid cleanup selector.');
         if (entry.nativeId !== undefined) text(entry.nativeId);
         if (entry.attribution !== undefined) {
-          const a = object(entry.attribution, ['sessionId', 'marker', 'promptHash', 'rule']);
+          const a = object(entry.attribution, ['sessionId', 'marker', 'ownerToken', 'promptHash', 'rule']);
           text(a.sessionId);
+          if (a.ownerToken !== undefined && (entry.backend !== 'claude' || typeof a.ownerToken !== 'string' || !/^[a-f0-9-]{36}$/.test(a.ownerToken))) throw new Error('Invalid cleanup owner incarnation.');
           if (typeof a.promptHash !== 'string' || !/^[a-f0-9]{64}$/.test(a.promptHash)
             || (entry.backend === 'claude' ? typeof a.marker !== 'string' || !/^[a-f0-9-]{36}$/.test(a.marker) : a.marker !== undefined)) throw new Error('Invalid cleanup attribution.');
           const rule = object(a.rule, ['kind', 'at', 'expression', 'timezone']);

@@ -24,6 +24,22 @@ function fixture(backend: 'claude' | 'dsh' = 'claude') {
 }
 
 describe('deletion-only schedule selectors', () => {
+  it('retains exact owner attribution after history removal without borrowing another incarnation', async () => {
+    const f = fixture();
+    const ownerToken = '22222222-2222-4222-8222-222222222222';
+    f.record.recovery!.identity = JSON.stringify({ ...JSON.parse(f.record.recovery!.identity), ownerToken });
+    const receipt = cleanupRecord(f.record, 'predecessor_unknown');
+    expect(receipt.attribution?.ownerToken).toBe(ownerToken);
+    f.host.inventory.mockResolvedValue([]);
+    const proof = vi.fn((token?: string) => token === ownerToken);
+    const host = { ...f.host, retirementConfirmed: proof };
+    const evidence = await verifySchedulePurge(receipt, host, f.current, f.accept);
+    expect(evidence.status).toBe('verified'); expect(evidence.isCurrent()).toBe(true);
+    expect(proof).toHaveBeenLastCalledWith(ownerToken);
+    delete receipt.attribution!.ownerToken;
+    expect(await verifySchedulePurge(receipt, host, f.current, f.accept)).toMatchObject({ reason: 'predecessor_unknown' });
+    expect(host.remove).not.toHaveBeenCalled();
+  });
   it('never treats AGY as the DSH recovery provider when deriving deletion attribution', () => {
     const f = fixture('dsh'); f.record.backend = 'agy';
     expect(cleanupRecord(f.record, 'unattributed').attribution).toBeUndefined();

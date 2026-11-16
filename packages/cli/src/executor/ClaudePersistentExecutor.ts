@@ -2,7 +2,7 @@ import type { NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from '../scheduling/types';
+import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleRecoverySettledError, NativeScheduleCleanupError } from '../scheduling/types';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleRecovery, NativeScheduleRelease } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
@@ -582,13 +582,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           throw new Error('Native cancellation requires the matching original session, model and supported current host. Open that thread and retry the full managed schedule ID; no replacement was created.');
         }
         const ownership = this.scheduleHostOwnership();
-        const predecessorConfirmed = ownership.cancellationProof();
+        const predecessorConfirmed = ownership.cancellationProof(identity.ownerToken);
         const timezone = await this.readNativeScheduleTimezone();
         if (!current()) throw new Error('Native cancellation host changed.');
         await this.schedules().cancelRetained({ id: record.id, threadId: record.threadId, backend: 'claude',
           cwd: record.cwd, prompt: record.prompt, rule: record.rule, recovery: record.recovery }, record.nativeId, current, timezone);
         if (!current()) throw new Error('Native cancellation host changed after deletion.');
-        if (!predecessorConfirmed || !ownership.cancellationProof()) {
+        if (!predecessorConfirmed || !ownership.cancellationProof(identity.ownerToken)) {
           throw new Error('Owned future definition is absent on the current host, but predecessor work remains unconfirmed in this boot. Cancellation intent is retained; do not recreate the job. Review predecessor ownership before claiming complete cleanup.');
         }
       },
@@ -602,7 +602,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           && state.epoch === this.stopEpoch && !this.claudeProcess) this.scheduleRestart = undefined;
       },
       reconcile: async (record, context, emit) => {
-        let identity: { sessionId: string; cwd: string; threadId: string; model?: string; effort?: string; effectiveModel?: string };
+        let identity: { ownerToken?: string; sessionId: string; cwd: string; threadId: string; model?: string; effort?: string; effectiveModel?: string };
         let clean: boolean | undefined;
         // Only this synchronous preflight can certify that no native admission
         // began. Failures after host startup retain the ordinary uncertainty fence.
@@ -619,7 +619,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
           this.scheduleRestart = undefined;
           const ownership = this.scheduleHostOwnership();
-          ownership.reserve(!!clean);
+          ownership.reserve(!!clean, identity.ownerToken);
           if (!clean) ownership.assertRebootRecovery();
         } catch (error) {
           throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native recovery preflight refused admission.');
@@ -632,6 +632,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         const input: NativeScheduleInput = { id: record.id, threadId: record.threadId, backend: 'claude',
           cwd: record.cwd, prompt: record.prompt, rule: record.rule, ...record.execution, recovery: record.recovery };
         let handle: NativeScheduleHandle | undefined;
+        let adapter: ClaudeSessionSchedules | undefined;
+        const expire = () => adapter?.expireRecovery(`restore-${record.id}`);
+        context.signal.addEventListener('abort', expire, { once: true });
         try {
           await this.listModels();
           if (!current()) throw new Error('Claude recovery owner changed.');
@@ -647,11 +650,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             }
             this.recordModelSelection(identity.effectiveModel);
           }
-          const adapter = this.schedules();
+          this.scheduleHostOwnership().bindHost(child.pid!);
+          adapter = this.schedules();
           const timezone = await this.readNativeScheduleTimezone();
           if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery host changed.');
           handle = await adapter.inToolOperation(`restore-${record.id}`, current,
-            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId, context.canAdmitOccurrence), false);
+            () => adapter!.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId, context.canAdmitOccurrence), false);
           if (!current() || this.claudeProcess !== child || !this.turnLedger.supported(child?.pid)) throw new NativeScheduleCleanupError('Claude recovery host or protocol changed.', handle);
           const recovered = this.recoverableScheduleHandle(handle, input, restoration);
           this.scheduleRestoring = undefined;
@@ -661,15 +665,46 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           const cleanup = error instanceof NativeScheduleCleanupError ? error.handle : handle;
           if (cleanup) throw new NativeScheduleCleanupError(error instanceof Error ? error.message : 'Claude recovery failed after native creation.',
             this.recoverableScheduleHandle(cleanup, input, restoration));
-          throw error; // Keep direct input fenced until cleanup or explicit context reset.
-        }
+          // No cleanup handle means the adapter never admitted a mutation. Still
+          // join its exact management turn before reopening ordinary input.
+          const settled = adapter?.settleManagement() ?? Promise.resolve();
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([settled, new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Native recovery management settlement timed out.')), 60_000);
+            })]);
+          } catch (settlementError) {
+            if (this.scheduleRestoring !== restoration || this.stopEpoch !== epoch) throw settlementError;
+            if (adapter?.hasJobs || adapter?.admittedWork || adapter?.cleanupMutationPending
+              || !this.turnLedger.inventory || this.turnLedger.inventory.size
+              || [...this.turnLedger.tasks.values()].some(task => !task.terminal)) {
+              // A sibling or unknown live task forbids recycling the shared host.
+              // Keep joining this exact turn so its eventual terminal releases
+              // the failed attempt instead of leaving a permanent no-handle fence.
+              await settled;
+            } else {
+              // Only an isolated failed management host may be recycled. Session
+              // identity/history survive, and close drains all native output first.
+              await this.stopProcess();
+              if (this.currentScheduleManagement) {
+                this.currentCommandReject?.(new Error('Failed native recovery management host closed.'));
+                this.resetCurrentCommand(); this.isProcessing = false;
+              }
+              await settled;
+            }
+          } finally { clearTimeout(timer); }
+          if (this.scheduleRestoring === restoration) this.scheduleRestoring = undefined;
+          throw new NativeScheduleRecoverySettledError(error instanceof Error ? error.message : 'Native recovery failed.');
+        } finally { context.signal.removeEventListener('abort', expire); }
       },
     };
   }
 
   private recoverableScheduleHandle(handle: NativeScheduleHandle, input: NativeScheduleInput, restoration?: object): NativeScheduleHandle {
     if (!input.recovery) return handle;
-    const identity = JSON.parse(input.recovery.identity);
+    // describe() runs before creation reserves ownership. Capture the actual
+    // admitted incarnation here, never a later host's token in the getter.
+    const identity = { ...JSON.parse(input.recovery.identity), ownerToken: this.scheduleHostOwnership().ownerToken };
     const executor = this;
     return { ...handle,
       get nativeId() { return handle.nativeId; },
@@ -803,7 +838,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         binding: createHash('sha256').update(JSON.stringify([this.cleanupHosts.get(child), sessionId, cwd, epoch, settings])).digest('hex'),
         sessionId, cwd, current: valid,
         mutationPending: () => adapter.cleanupMutationPending,
-        retirementConfirmed: () => valid() && adapter.cleanupRetirementReady && lease!.retirementConfirmed(),
+        retirementConfirmed: ownerToken => valid() && adapter.cleanupRetirementReady && lease!.retirementConfirmed(ownerToken),
         inventory: () => adapter.reviewedInventory(valid), remove: target => adapter.reviewedDelete(target, valid),
       }), inTurn);
     } finally {
@@ -848,7 +883,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       timezone = await this.readNativeScheduleTimezone();
       if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
       if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
-      if (input.recovery) this.scheduleHostOwnership().reserve(true);
+      if (input.recovery) this.scheduleHostOwnership().reserveForNewJob(this.claudeProcess!.pid!, this.claudeCommand);
     } catch (error) {
       // No adapter admission or native schedule mutation has started here.
       throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule preflight refused admission.');

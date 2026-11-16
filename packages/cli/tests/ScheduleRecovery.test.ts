@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ScheduleService, SCHEDULE_CATALOG_FILE, type ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
-import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleEvent, type NativeScheduleHandle, type NativeScheduleInput,
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, NativeScheduleRecoverySettledError, type NativeScheduleEvent, type NativeScheduleHandle, type NativeScheduleInput,
   type NativeScheduleProvider, type NativeScheduleRecovery, type ScheduleOwner, type ScheduleRecord } from '../src/scheduling/types';
 
 // Keep real filesystem persistence while allowing a controlled receipt-write barrier.
@@ -380,6 +380,98 @@ describe('durable provider-neutral schedule recovery', () => {
     expect(next.hasActiveSchedules()).toBe(true); expect(native.calls).toBe(0);
     await expect(next.cancel(owner, 'job-a')).rejects.toThrow('unconfirmed');
     expect((await catalog()).records[0].cancelRequested).toBe(true);
+  });
+
+  it.each(['creating', 'interrupted', 'failed'] as const)('quarantines consumed future-only %s checkpoints across repeated restarts', async state => {
+    const first = await start(); await first.destroy();
+    const data = await catalog();
+    Object.assign(data.records[0], { state, error: 'Original uncertainty retained' });
+    Object.assign(data.records[0].recovery, { futureOnly: true, status: 'blocked' });
+    delete data.records[0].recovery.handoff;
+    await write(data);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next = make(); await next.initialize(); await next.recover();
+      expect((await next.list(owner))[0]).toMatchObject({ state: 'failed', error: 'Original uncertainty retained' });
+      expect(next.hasUnresolvedRecovery()).toBe(false); expect(next.requiresShutdownHandoff()).toBe(false);
+      expect(next.canSuspendForRestart()).toBe(true); await next.destroy();
+    }
+    expect(native.calls).toBe(0);
+  });
+  it('does not classify a healthy active row with blocked occurrence status as a failure', async () => {
+    const first = await start(); await first.destroy(); const data = await catalog();
+    data.records[0].state = 'active'; Object.assign(data.records[0].recovery, { futureOnly: true, status: 'blocked' });
+    await write(data); const next = make(); await next.initialize();
+    expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', recovery: { status: 'pending' } });
+    await next.recover(); expect((await next.list(owner))[0].state).toBe('active');
+  });
+  it('releases only the exact late no-handle settlement and never retries a quarantined attempt', async () => {
+    const first = await start(); await first.destroy(); const data = await catalog();
+    data.records[0].recovery.futureOnly = true; await write(data);
+    const finish = deferred<void>(), release = vi.fn();
+    native.hook = async () => { await finish.promise; throw new NativeScheduleRecoverySettledError('Read-only attempt ended'); };
+    const next = make({ recoveryTimeoutMs: 20, acquireRecovery: () => release }); await next.initialize();
+    await next.recover(); expect(release).not.toHaveBeenCalled(); expect(next.hasUnresolvedRecovery()).toBe(true);
+    finish.resolve(); await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    await next.recover(); expect(native.calls).toBe(1);
+    expect((await next.list(owner))[0].state).toBe('failed'); expect(next.hasUnresolvedRecovery()).toBe(false);
+  });
+  it.each([false, true])('defers untouched siblings across admission contention and repeated restart (newer lock=%s)', async newerLock => {
+    native = new NativeInventory('reconstruct');
+    native.recovery.futureOnly = true;
+    const first = await start(); await first.create(owner, input('job-b'));
+    await first.suspendForRestart(); await first.destroy();
+    const original = (await catalog()).records[1].recovery;
+    const finish = deferred<void>();
+    const reconcile = native.recovery.reconcile;
+    const attempted: string[] = [];
+    native.recovery.reconcile = async (record, context, emit) => {
+      attempted.push(record.id);
+      if (record.id === 'job-a') { await finish.promise; throw new NativeScheduleRecoverySettledError('Exact failed turn ended'); }
+      return reconcile(record, context, emit);
+    };
+    let held = false, foreground = false;
+    const options = { recoveryTimeoutMs: 20, canRecover: () => !foreground,
+      acquireRecovery: () => {
+        if (held) throw new Error('Recovery thread admission unavailable.');
+        held = true; return () => { held = false; };
+      } };
+    let next = make(options); await next.initialize(); await next.recover();
+    expect(attempted).toEqual(['job-a']); expect(held).toBe(true);
+    expect((await next.list(owner))[1]).toMatchObject({ state: 'interrupted', recovery: original });
+    foreground = newerLock;
+    finish.resolve();
+    await vi.waitFor(() => expect(held).toBe(false));
+    if (newerLock) {
+      expect(attempted).toEqual(['job-a']);
+      for (let restart = 0; restart < 2; restart++) {
+        await next.destroy(); next = make(options); await next.initialize(); await next.recover();
+        expect((await next.list(owner))[1]).toMatchObject({ state: 'interrupted', recovery: original });
+        expect(attempted).toEqual(['job-a']);
+      }
+      foreground = false; await next.recover();
+    }
+    await vi.waitFor(async () => expect((await next.list(owner))[1].state).toBe('active'));
+    expect(attempted).toEqual(['job-a', 'job-b']);
+    expect((await next.list(owner))[0]).toMatchObject({ state: 'failed', recovery: { status: 'blocked' } });
+    await next.recover(); expect(attempted).toEqual(['job-a', 'job-b']);
+  });
+
+  it('preserves late results and durable ACK obligations after future-only recovery fails', async () => {
+    const first = await start(); await first.destroy(); const data = await catalog();
+    data.records[0].recovery.futureOnly = true; await write(data);
+    const receipt = deferred<NativeScheduleHandle>(); let emit!: (event: NativeScheduleEvent) => void;
+    native.hook = async (_record, _context, callback) => { emit = callback; emit({ type: 'started', occurrenceId: 'admitted' }); return receipt.promise; };
+    deliver.mockRejectedValue(new Error('ACK not received'));
+    const next = make({ recoveryTimeoutMs: 20 }); await next.initialize(); await next.recover();
+    emit({ type: 'completed', occurrenceId: 'admitted', success: true, output: 'Late original result' });
+    await vi.waitFor(async () => expect((await catalog()).pending).toHaveLength(1));
+    expect(next.hasPendingResults()).toBe(true); expect(next.canSuspendForRestart()).toBe(false);
+    receipt.resolve(native.handle('job-a')); await vi.waitFor(() => expect(native.stops).toBeGreaterThan(0));
+    await next.destroy(); const restored = make(); await restored.initialize();
+    expect((await restored.list(owner))[0].state).toBe('failed'); expect(restored.hasPendingResults()).toBe(true);
+    deliver.mockResolvedValue(undefined); await restored.retryDeliveries();
+    expect((await catalog()).pending).toHaveLength(0);
+    expect((await catalog()).records[0].completedOccurrences).toContain('admitted');
   });
 
   it('does not interpret a saved absolute deadline as a new delay', async () => {

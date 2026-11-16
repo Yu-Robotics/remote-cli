@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.252] - 2026-11-16
+
+### Fixed
+- Quarantine failed Claude schedule restoration and consumed recovery checkpoints without retrying uncertain jobs. Join the exact failed management turn, or recycle an isolated stalled management host while preserving its original native session. Keep admitted work, late receipts and result acknowledgements protected.
+- Allow explicit new schedules in the original session after same-boot host exclusion, including legacy ownership receipts. Record native host identity and preserve dirty predecessor diagnostics separately; new admission does not certify historical task completion or authorize replay.
+- Register response recipients before schedule recovery admission checks so fenced commands receive their response. Failed-only history no longer blocks update or shutdown after live recovery work settles.
+- Preserve clean pending siblings when an earlier restoration still owns thread admission, and retry them after exact settlement subject to current admission checks.
+- Bind recovery and cleanup to the job's ownership incarnation across clean handoffs, while retaining archived predecessor uncertainty for older jobs.
+
+### Tests
+- Add public MessageHandler and synthetic native adapter coverage for recovery timeout, late terminal, bounded process recycle, ordinary chat and fresh scheduling in the same session and boot; cover durable results, repeated restart, legacy receipts, process identity and live-owner conflicts.
+
 ## [1.6.251] - 2026-11-16
 
 ### Fixed

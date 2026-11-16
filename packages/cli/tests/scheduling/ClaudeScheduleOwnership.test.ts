@@ -110,6 +110,68 @@ describe('Claude schedule predecessor ownership', () => {
     const successor = guard(); expect(successor.cancellationProof()).toBe(true);
     host = 'another-fixture-host'; expect(() => successor.cancellationProof()).toThrow('another machine');
   });
+  it.each([false, true])('rearms new work after a dirty receipt without certifying old work (legacy=%s)', legacy => {
+    dependencies.processes = () => [{ pid: 101, birth: 'one', command: 'fixture-native --resume fixture-session' }];
+    const first = guard();
+    if (legacy) first.reserve(true); else first.reserveForNewJob(101, 'fixture-native');
+    const before = fs.readFileSync(first.filename, 'utf8');
+    first.close();
+    dependencies.processes = () => [{ pid: 102, birth: 'two', command: 'fixture-native --resume fixture-session' }];
+    const second = guard(); second.reserveForNewJob(102, 'fixture-native');
+    expect(JSON.parse(fs.readFileSync(second.filename, 'utf8'))).toMatchObject({ version: 2, clean: false,
+      predecessorUncertain: true, nativeHost: { pid: 102, birth: 'two' } });
+    const token = JSON.parse(before).token;
+    expect(fs.readFileSync(`${first.filename}.retired-${token}`, 'utf8')).toBe(before);
+    expect(second.cancellationProof()).toBe(false);
+    expect(() => second.assertRebootRecovery()).toThrow('later boot');
+    const lease = second.reviewedRemovalLease(); expect(lease.retirementConfirmed()).toBe(false); lease.close();
+    const currentToken = second.ownerToken;
+    expect(second.cancellationProof(currentToken)).toBe(true);
+    second.hostClosed(); second.confirmClean(); second.close();
+    expect(() => guard().reserve(false)).toThrow('uncertain predecessor');
+    const third = guard(); third.reserve(false, currentToken); third.bindHost(102);
+    expect(third.cancellationProof()).toBe(false);
+    expect(third.ownerToken).toBe(currentToken);
+    expect(third.cancellationProof(currentToken)).toBe(true);
+    expect(third.cancellationProof(token)).toBe(false);
+    expect(() => third.reserve(true, token)).toThrow('uncertain predecessor');
+  });
+  it('rejects live exact hosts and foreign namespaces before archiving or changing a receipt', () => {
+    dependencies.processes = () => [{ pid: 101, birth: 'one', command: 'fixture-native' }];
+    const first = guard(); first.reserveForNewJob(101, 'fixture-native'); first.close();
+    const before = fs.readFileSync(first.filename, 'utf8');
+    dependencies.processes = () => [{ pid: 101, birth: 'one', command: 'fixture-native' },
+      { pid: 102, birth: 'two', command: 'fixture-native --resume fixture-session' }];
+    expect(() => guard().reserveForNewJob(102, 'fixture-native')).toThrow('still alive');
+    dependencies.identity = () => ({ host, boot, namespace: 'foreign-namespace' });
+    expect(() => guard().reserveForNewJob(102, 'fixture-native')).toThrow('namespace');
+    expect(fs.readFileSync(first.filename, 'utf8')).toBe(before);
+    expect(fs.readdirSync(root).some(name => name.includes('.retired-'))).toBe(false);
+  });
+  it('keeps a crash before diagnostic publication usable without repairing the receipt', () => {
+    dependencies.processes = () => [{ pid: 101, command: 'fixture-native' }];
+    const first = guard(); first.reserve(true); first.close();
+    const second = guard();
+    const write = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => { throw new Error('Synthetic crash'); });
+    expect(() => second.reserveForNewJob(101, 'fixture-native')).toThrow('Synthetic crash');
+    write.mockRestore();
+    second.reserveForNewJob(101, 'fixture-native');
+    second.reserveForNewJob(101, 'fixture-native');
+    expect(() => guard().reserveForNewJob(101, 'fixture-native')).toThrow('Another client');
+  });
+
+  it('does not retain an in-memory host binding after its durable publication fails', () => {
+    dependencies.processes = () => [{ pid: 101, birth: 'one', command: 'fixture-native' }];
+    const first = guard(); first.reserve(true);
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => { throw new Error('Synthetic binding write failure'); });
+    expect(() => first.bindHost(101)).toThrow('binding write failure');
+    expect(() => first.bindHost(101)).toThrow('reservation is unavailable');
+    expect(JSON.parse(fs.readFileSync(first.filename, 'utf8')).version).toBe(1);
+    rename.mockRestore();
+    first.reserveForNewJob(101, 'fixture-native');
+    expect(JSON.parse(fs.readFileSync(first.filename, 'utf8'))).toMatchObject({ version: 2, nativeHost: { pid: 101 } });
+  });
+
   it('keeps different native sessions independent', () => {
     const a = guard(), b = guard('new-fixture-session'); a.reserve(true); b.reserve(true);
     expect(a.filename).not.toBe(b.filename);

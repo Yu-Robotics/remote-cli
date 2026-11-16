@@ -10,7 +10,7 @@ export interface ScheduleCleanupRecord extends ScheduleOwner {
   cwd: string;
   nativeId?: string;
   reason: CleanupReason;
-  attribution?: { sessionId: string; marker?: string; promptHash: string; rule: ScheduleRule };
+  attribution?: { ownerToken?: string; sessionId: string; marker?: string; promptHash: string; rule: ScheduleRule };
 }
 export function cleanupDetail(reason: CleanupReason): string {
   if (reason === 'unattributed') return 'History removed; native cleanup unresolved: original session/definition attribution is missing. Review native tasks in the original bound session and delete exact selected definitions. No account/session search or global absence is implied.';
@@ -34,7 +34,8 @@ export function cleanupRecord(record: ScheduleRecord, reason: CleanupReason): Sc
       && !/[\x00-\x1f\x7f]/.test(identity.sessionId)
       && (record.backend !== 'claude' || /^[a-f0-9-]{36}$/.test(identity.marker ?? ''))) {
       result.attribution = { sessionId: identity.sessionId, promptHash: promptHash(record.prompt), rule: structuredClone(record.rule),
-        ...(record.backend === 'claude' ? { marker: identity.marker } : {}) };
+        ...(record.backend === 'claude' ? { marker: identity.marker,
+          ...(/^[a-f0-9-]{36}$/.test(identity.ownerToken ?? '') && { ownerToken: identity.ownerToken }) } : {}) };
     }
   } catch { /* Missing or malformed legacy attribution is not invented. */ }
   return result;

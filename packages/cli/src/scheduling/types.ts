@@ -125,6 +125,10 @@ export interface NativeScheduleProvider {
 /** Provider proved refusal before starting native admission or mutation. Not absence evidence. */
 export class NativeScheduleNotAdmittedError extends Error {}
 
+/** The exact failed recovery attempt settled without live admission or mutation.
+ * Historical definitions and predecessor obligations may still be uncertain. */
+export class NativeScheduleRecoverySettledError extends Error {}
+
 /** Authoritative read-only inventory found no definition; no mutation was attempted. */
 export class NativeScheduleAbsentError extends Error {}
 

@@ -688,6 +688,7 @@ export class MessageHandler {
   private async handleCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
     const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
     const content = message.content?.trim() ?? '';
+    this.messageOpenIds.set(message.messageId, message.openId);
     if ((this.automaticUpdateInProgress || this.automaticUpdateScheduleThreads.has(threadId)) && content === '/schedule list') {
       this.messageOpenIds.set(message.messageId, message.openId);
       await this.handleScheduleCommand(message, threadId);
@@ -3995,9 +3996,9 @@ You can also use natural language commands to control Claude Code CLI.`,
               } catch { return false; }
             }).map(record => record.id);
             if (!current()) throw new Error('Cleanup owner changed before catalog persistence.');
-            await service.recordReviewedCleanup(owner, attributable, absent, () => current() && host.current()
-              && records.filter(record => attributable.includes(record.id)).every(record => record.cwd === host.cwd)
-              && host.retirementConfirmed?.() === true);
+            await service.recordReviewedCleanup(owner, attributable, absent, record => current() && host.current()
+              && record.cwd === host.cwd
+              && host.retirementConfirmed?.(JSON.parse(record.recovery!.identity).ownerToken) === true);
           });
       }, !!inTurnCurrent);
     } finally { this.scheduleManagement.delete(threadId); }

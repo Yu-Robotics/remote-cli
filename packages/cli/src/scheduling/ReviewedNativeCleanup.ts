@@ -11,7 +11,7 @@ export interface NativeCleanupSession {
   sessionId: string;
   /** Framework-captured location and retirement proof, never model arguments. */
   cwd?: string;
-  retirementConfirmed?(): boolean;
+  retirementConfirmed?(ownerToken?: string): boolean;
   /** Unsettled mutation receipts retain their operational record. */
   mutationPending?(): boolean;
   current(): boolean;

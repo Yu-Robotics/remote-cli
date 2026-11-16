@@ -25,6 +25,7 @@ describe('CLI test scheduling', () => {
   });
 
   it.each([
+    'tests/ClaudePersistentExecutor.scheduling.test.ts',
     'tests/ScheduleService.test.ts',
     'tests/MessageHandler.schedule.test.ts',
     'tests/SessionHostRuntime.test.ts',

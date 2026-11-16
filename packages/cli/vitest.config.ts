@@ -33,6 +33,7 @@ export const realGitTestFiles = [
 // Forking from another test thread can transiently inherit an open lock until
 // exec, so release/reacquire assertions require an independent process.
 export const nativeOwnershipTestFiles = [
+  'tests/ClaudePersistentExecutor.scheduling.test.ts',
   'tests/ScheduleService.test.ts',
   'tests/MessageHandler.schedule.test.ts',
   'tests/SessionHost.test.ts',

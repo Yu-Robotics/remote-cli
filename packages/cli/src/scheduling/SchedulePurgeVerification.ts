@@ -15,7 +15,7 @@ export async function verifySchedulePurge<T>(record: Readonly<ScheduleRecord | S
     'Original native session/definition attribution is missing. Review and delete selected native definitions in the original bound session; an empty different session cannot prove native absence.');
   if (record.backend !== 'claude') return unresolved('predecessor_unknown',
     'This backend requires its original live cancellation handle or a saved confirmed cleanup/clean-handoff receipt. Current-session inventory cannot prove predecessor retirement.');
-  let identity: { marker?: string; sessionId?: string; cwd?: string; threadId?: string };
+  let identity: { ownerToken?: string; marker?: string; sessionId?: string; cwd?: string; threadId?: string };
   try { identity = JSON.parse(record.recovery.identity); }
   catch { return unresolved('unattributed', 'Original native session attribution is invalid. Preserve the original session for cleanup review.'); }
   if (!identity || !/^[a-f0-9-]{36}$/.test(identity.marker ?? '') || !identity.sessionId
@@ -32,9 +32,9 @@ export async function verifySchedulePurge<T>(record: Readonly<ScheduleRecord | S
   const marker = `[remote-cli:${identity.marker}]`;
   if (entries.some(entry => entry.id === record.nativeId || entry.prompt.includes(marker))) return unresolved('native_absence_unknown',
     'The original native ID or marker is still present. Use cleanup review/delete for the exact definition, then retry these managed IDs; siblings are never swept.');
-  if (!host.retirementConfirmed?.()) return unresolved('predecessor_unknown',
+  if (!host.retirementConfirmed?.(identity.ownerToken)) return unresolved('predecessor_unknown',
     'Fresh original-session inventory confirms definition absence, but predecessor or admitted work is unconfirmed. Cancellation intent is saved; native cleanup remains unresolved until framework retirement proof is available.');
-  return accept({ status: 'verified', isCurrent: () => valid() && !host.mutationPending?.() && host.retirementConfirmed?.() === true });
+  return accept({ status: 'verified', isCurrent: () => valid() && !host.mutationPending?.() && host.retirementConfirmed?.(identity.ownerToken) === true });
 }
 
 /** A digest preserves exact deletion attribution after user text has been erased.
@@ -75,6 +75,6 @@ async function verifyCleanup<T>(record: Readonly<ScheduleCleanupRecord>, host: N
     const after = await inventory();
     if (identity(after) !== identity(entries.filter(entry => entry.id !== target.id))) return unresolved('native_absence_unknown');
   }
-  if (!host.retirementConfirmed?.()) return unresolved('predecessor_unknown');
-  return accept({ status: 'verified', isCurrent: () => valid() && !host.mutationPending?.() && host.retirementConfirmed?.() === true });
+  if (!host.retirementConfirmed?.(a.ownerToken)) return unresolved('predecessor_unknown');
+  return accept({ status: 'verified', isCurrent: () => valid() && !host.mutationPending?.() && host.retirementConfirmed?.(a.ownerToken) === true });
 }

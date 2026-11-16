@@ -302,7 +302,22 @@ describe('ScheduleService purge', () => {
     expect(f.create).not.toHaveBeenCalled();
   });
 
-  it.each(['owner', 'duplicate', 'version', 'reason', 'text', 'attribution', 'hash', 'rule', 'marker'])('rejects malformed cleanup persistence: %s', async field => {
+  it('preserves the deletion-only owner incarnation across catalog reload', async () => {
+    const record = row('owned-history', 'failed');
+    const ownerToken = '22222222-2222-4222-8222-222222222222';
+    record.recovery = { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', status: 'blocked', futureOnly: true,
+      identity: JSON.stringify({ sessionId: 'original', threadId: owner.threadId, cwd: root,
+        marker: '11111111-1111-4111-8111-111111111111', ownerToken }) };
+    const f = await fixture({}, [record]);
+    await f.service.purge(owner, { all: true });
+    expect((await f.read()).cleanup[0].attribution.ownerToken).toBe(ownerToken);
+    const restored = await reload(f);
+    expect((await restored.service.listCleanup(owner))[0].id).toBe('owned-history');
+    expect((restored.service as any).cleanup.get('owned-history').attribution.ownerToken).toBe(ownerToken);
+    expect(restored.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['owner', 'duplicate', 'version', 'reason', 'text', 'attribution', 'hash', 'rule', 'marker', 'ownerToken'])('rejects malformed cleanup persistence: %s', async field => {
     const f = await fixture({}, [row('legacy')]); await f.service.purge(owner, { all: true });
     const stored = await f.read(); const item = stored.cleanup[0];
     if (field === 'owner') item.generation = 'foreign';
@@ -310,7 +325,8 @@ describe('ScheduleService purge', () => {
     if (field === 'version') stored.version = 4;
     if (field === 'reason') item.reason = 'verified';
     if (field === 'text') item.prompt = 'Forbidden historical text';
-    if (['attribution', 'hash', 'rule', 'marker'].includes(field)) item.attribution = {
+    if (['attribution', 'hash', 'rule', 'marker', 'ownerToken'].includes(field)) item.attribution = {
+      ...(field === 'ownerToken' && { ownerToken: 'invalid' }),
       sessionId: field === 'attribution' ? '' : 'original', promptHash: field === 'hash' ? 'bad' : 'a'.repeat(64),
       marker: field === 'marker' ? 'bad' : '11111111-1111-4111-8111-111111111111',
       rule: field === 'rule' ? { kind: 'cron', expression: 'bad', timezone: 'UTC' } : input('a').rule };
@@ -339,6 +355,17 @@ describe('ScheduleService purge', () => {
     expect((await f.read()).records[0]).not.toHaveProperty('cleanupConfirmed');
     const restored = await reload(f);
     expect(await restored.service.purge(owner, { all: true })).toMatchObject({ removedIds: ['unknown'], nativeCleanupUnresolved: [{ reason: 'native_absence_unknown' }] });
+  });
+
+  it('checks reviewed cleanup retirement separately for each original record', async () => {
+    const f = await fixture({}, [row('old-owner', 'interrupted'), row('current-owner', 'interrupted')]);
+    const proof = vi.fn((record: Readonly<ScheduleRecord>) => record.id === 'current-owner');
+    await f.service.recordReviewedCleanup(owner, ['old-owner', 'current-owner'], true, proof);
+    expect(proof).toHaveBeenCalledTimes(2);
+    const restored = await reload(f);
+    expect((await restored.service.list(owner)).map(record => ({ id: record.id, state: record.state, clean: record.cleanupConfirmed })))
+      .toEqual([{ id: 'old-owner', state: 'interrupted', clean: undefined },
+        { id: 'current-owner', state: 'cancelled', clean: true }]);
   });
 
   it('keeps queued results across restart after reviewed cleanup until explicit history purge', async () => {

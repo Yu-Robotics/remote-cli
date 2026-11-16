@@ -786,15 +786,47 @@ a concurrent same-boot retry. Exact native IDs, full prompts, cron rules and
 session-only persistence must match; unrelated native definitions are not deleted.
 Wakes observed during reconciliation are blocked before admission.
 
-This is deliberately limited: a CLI-only crash in the same boot remains blocked,
-even if its PID is missing or reused, because escaped native descendants may still
-be executing. A missing native definition after an unclean restart is not recreated:
+Automatic restoration after a CLI-only crash in the same boot remains blocked:
+a missing or reused PID cannot prove that old admitted work or escaped descendants
+have ended. A missing native definition after an unclean restart is not recreated:
 expiry or deletion cannot be distinguished. Unknown past effects are not retried,
 missed firings are not replayed, and uncertain one-shots remain interrupted. Legacy
 records without this ownership evidence require the existing clean handoff path.
 The ownership APIs have Linux/macOS/Windows implementations; this change's native
 acceptance ran only on Linux with a simulated boot identity transition. It is not
 proof of a real machine-reboot recovery or of native macOS/Windows behavior.
+
+From CLI 1.6.252, failed Claude restoration becomes inactive and retains its
+original checkpoint, native ID and diagnostic. Interrupted blocked rows and a crash
+during a consumed restoration attempt do not restart that attempt on every launch;
+a healthy active job with a temporarily blocked occurrence is not a failure.
+A cleanly suspended sibling waiting for thread admission keeps its recovery intent
+across restarts. Settlement of the failed attempt retries that sibling when current
+thread admission permits; it never retries the failed job.
+Ordinary chat resumes in the same native session after the exact failed management
+turn settles. A stalled management-only host can be recycled after a bounded wait;
+live siblings, admitted tasks and uncertain mutations prevent that recycle. Session
+history and backend selection are preserved. Late results and pending Router
+acknowledgements retain their normal durable delivery path.
+
+To replace failed intent, inspect `/schedule list`, use `/schedule cleanup review`
+and its exact-ID confirmation to remove obsolete native definitions, then create a
+new schedule explicitly. No pointer deletion, receipt editing, `/clear`, or machine
+reboot is required. New admission verifies exclusive current native-host ownership,
+records its process identity, and retains the old dirty receipt as a diagnostic.
+New jobs retain their own ownership proof across clean handoffs, allowing safe
+recovery and cancellation without certifying older uncertain jobs.
+Legacy receipts use a read-only process inventory: another matching session host,
+a native host without attributable session arguments, or incomplete inventory
+still blocks admission until that conflict is resolved. This verifies host exclusion;
+it does not certify completion of old external work. Empty CronList output alone
+never supplies that proof. Failed-only history does not block update or shutdown
+once live attempts settle; unacknowledged results and actual live work still do.
+These paths have synthetic Linux tests; actual native backend acceptance and native
+macOS/Windows runs remain separate verification requirements.
+Version 1.6.252 writes new ownership receipts and optional cleanup-owner attribution.
+Older clients cannot read all of this state; do not downgrade a populated scheduling
+state directory or remove ownership fields to make an older client accept it.
 
 From CLI 1.6.240, explicit cancellation can inspect an interrupted Claude job in
 its original native session even without a live schedule handle. Use the full
@@ -973,9 +1005,9 @@ A timeout does not force-kill work or claim success. Failed installation and man
 updates restore cleanly suspended jobs in the running client. If only Router
 readiness is missing, restoration continues on reconnect after installation has
 finished; reconnect during installation cannot restart native timing. An uncertain handoff
-or restoration retains admission and reports failure; operator inspection and an
-explicit service stop/restart may be needed. Same-boot dirty ownership stays blocked;
-a service restart alone is not proof of predecessor loss.
+retains admission and reports failure. Failed Claude restoration follows the
+quarantine and settlement behavior above; a service restart alone never authorizes
+replaying uncertain old jobs. New explicit jobs use separate current-host checks.
 Non-interactive clients retain supervisor restart behavior. Foreground start mode
 still activates the installed version only at the next manual start. No shell clock,
 transcript copy, blind CREATE retry or backend switch is used as fallback. Claude
