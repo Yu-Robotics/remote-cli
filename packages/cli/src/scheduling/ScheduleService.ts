@@ -363,6 +363,9 @@ export class ScheduleService {
             : 'Native recovery timed out; ownership retained, do not recreate.')); },
             this.options.recoveryTimeoutMs ?? 30_000);
         })]);
+        // Native recovery and inventory validation settled. A later deadline
+        // must not abort the adopted handle while its active checkpoint is saved.
+        clearTimeout(timer); timer = undefined;
         text(handle.nativeId);
         // The provider's reconcile contract includes inventory validation; list is
         // additionally required to verify the returned handle before activating it.

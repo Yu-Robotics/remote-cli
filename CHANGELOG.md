@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Register response recipients before schedule recovery admission checks so fenced commands receive their response. Failed-only history no longer blocks update or shutdown after live recovery work settles.
 - Preserve clean pending siblings when an earlier restoration still owns thread admission, and retry them after exact settlement subject to current admission checks.
 - Bind recovery and cleanup to the job's ownership incarnation across clean handoffs, while retaining archived predecessor uncertainty for older jobs.
+- Clear the native recovery deadline before persisting successful activation so slow checkpoint writes cannot strand an already recovered job.
 
 ### Tests
 - Add public MessageHandler and synthetic native adapter coverage for recovery timeout, late terminal, bounded process recycle, ordinary chat and fresh scheduling in the same session and boot; cover durable results, repeated restart, legacy receipts, process identity and live-owner conflicts.

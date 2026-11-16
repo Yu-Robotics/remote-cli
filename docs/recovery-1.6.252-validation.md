@@ -1,5 +1,27 @@
 # Schedule recovery validation for 1.6.252
 
+## Release CI follow-up
+
+The first release CI candidate exposed a real deadline race on macOS: native
+recovery and inventory validation had succeeded, but the recovery timer remained
+armed while the active checkpoint was written. Expiry during that write left an
+active job with an aborted runtime, so unresolved-recovery checks stayed true.
+A deterministic regression advances the deadline inside the activation write. It
+fails on the initial candidate and passes when the timer is cleared immediately
+after native recovery and inventory validation settle. Actual pending recovery
+continues to use the existing timeout and exact-settlement guards.
+
+This follow-up retains release version 1.6.252, which had not been published.
+The README behavior remains unchanged; this closes a race in that behavior.
+The public-chat fixture applies its short failure deadline only to the intended
+failed attempt, then allows the untouched sibling normal setup time and waits for
+its admission release. The separate deterministic checkpoint test still forces
+expiry at the previously failing persistence boundary.
+
+Follow-up Linux verification passed both builds and 224 tests across four recovery
+suites. `ScheduleService` line coverage was 92.19% and branch coverage was 85.86%
+in this focused run. Cross-platform publication gates must run again on this delta.
+
 ## Review-fix scope
 
 This review-fix checkout starts at `271357c7e737e7a4e6ce9c3297ff5951f0c437d7`.

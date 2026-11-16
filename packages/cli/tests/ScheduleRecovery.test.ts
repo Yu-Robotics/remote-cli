@@ -397,6 +397,27 @@ describe('durable provider-neutral schedule recovery', () => {
     }
     expect(native.calls).toBe(0);
   });
+  it('does not expire successful recovery while persisting its active checkpoint', async () => {
+    const next = await restart(await start(), { recoveryTimeoutMs: 1000 });
+    const persist = (next as any).persist.bind(next);
+    let activationWrites = 0;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(next as any, 'persist').mockImplementation(async () => {
+      if ((next as any).records.get('job-a').state === 'active') {
+        activationWrites++;
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      return persist();
+    });
+    try {
+      await next.recover();
+      expect(activationWrites).toBeGreaterThan(0);
+      expect((await next.list(owner))[0]).toMatchObject({ state: 'active', recovery: { status: 'eligible' } });
+      expect(next.hasUnresolvedRecovery()).toBe(false);
+      expect(native.stops).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('does not classify a healthy active row with blocked occurrence status as a failure', async () => {
     const first = await start(); await first.destroy(); const data = await catalog();
     data.records[0].state = 'active'; Object.assign(data.records[0].recovery, { futureOnly: true, status: 'blocked' });

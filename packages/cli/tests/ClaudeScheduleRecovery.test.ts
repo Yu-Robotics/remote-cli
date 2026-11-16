@@ -463,10 +463,14 @@ describe('Claude production orderly recovery', () => {
         }
         await send('Before settlement'); expect(response().success).toBe(false);
         expect(response().openId).toBe(owner.openId);
+        // Only the first restore is intentionally timed out. Give the untouched
+        // sibling normal setup time on slower filesystem and coverage runners.
+        if (sibling) (service as any).options.recoveryTimeoutMs = 2000;
         if (lateTerminal) release();
         await vi.waitFor(() => expect(state.scheduleRecoveryThreads.size).toBe(0));
         if (sibling) {
           await vi.waitFor(async () => expect((await service.list(owner))[1].state).toBe('active'));
+          await vi.waitFor(() => expect(state.scheduleRecoveryThreads.size).toBe(0));
           expect((await service.list(owner))[0].state).toBe('failed');
         }
         onManagement = undefined;
