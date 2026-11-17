@@ -14,11 +14,12 @@ describe('ThreadManager', () => {
   let tmpDir: string;
   let manager: ThreadManager;
   let previousHome: string | undefined;
+  let previousProfile: string | undefined;
 
   beforeEach(async () => {
     tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-manager-test-')));
-    previousHome = process.env.HOME;
-    process.env.HOME = tmpDir;
+    previousHome = process.env.HOME; previousProfile = process.env.USERPROFILE;
+    process.env.HOME = tmpDir; process.env.USERPROFILE = tmpDir;
     manager = await ThreadManager.initialize(tmpDir);
   });
 
@@ -26,6 +27,7 @@ describe('ThreadManager', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
   });
 
   describe('initialization', () => {
@@ -202,6 +204,34 @@ describe('ThreadManager', () => {
   });
 
   describe('deleteThread', () => {
+    it.each([true, false])('archives inactive ACP selection on explicit clear and refuses later erasure (retired=%s)', async retired => {
+      const thread = await manager.createThread('inactive-agy', tmpDir, 'claude');
+      const directory = path.join(tmpDir, '.remote-cli', 'agy-sessions'); await fs.mkdir(directory, { recursive: true });
+      const pointer = path.join(directory, `${thread.id}.json`), session = { id: 'synthetic-session', transport: 'acp', retired };
+      await fs.writeFile(pointer, JSON.stringify(session));
+      const history = path.join(tmpDir, '.remote-cli', 'agy-homes', thread.id, 'history');
+      await fs.mkdir(path.dirname(history), { recursive: true }); await fs.writeFile(history, 'native history');
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('retirement is unconfirmed');
+      await manager.clearBackendSessionPointers(thread.id);
+      await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
+      const archive = pointer + '.detached-acp';
+      const [name] = await fs.readdir(archive); expect(JSON.parse(await fs.readFile(path.join(archive, name), 'utf8')).session).toEqual(session);
+      manager = await ThreadManager.initialize(tmpDir);
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('Detached');
+      expect(await fs.readFile(history, 'utf8')).toBe('native history');
+      expect(manager.getThread(thread.id)).toBeDefined();
+    });
+
+    it('does not discard inactive schedule ownership during pointer reset', async () => {
+      const thread = await manager.createThread('inactive-owned', tmpDir, 'claude');
+      const directory = path.join(tmpDir, '.remote-cli', 'agy-sessions'); await fs.mkdir(directory, { recursive: true });
+      const pointer = path.join(directory, `${thread.id}.json`);
+      await fs.writeFile(pointer, JSON.stringify({ id: 'synthetic-session', transport: 'acp' }));
+      await fs.writeFile(pointer + '.native-schedules', JSON.stringify({ sessionId: 'synthetic-session', hostId: 'synthetic-host', retired: true }));
+      await expect(manager.clearBackendSessionPointers(thread.id)).rejects.toThrow('schedule ownership');
+      expect(await fs.stat(pointer)).toBeDefined();
+    });
+
     it('retains inactive AGY data until exact host retirement, then permits explicit deletion', async () => {
       const thread = await manager.createThread('agy-retained', tmpDir, 'claude');
       const directory = path.join(tmpDir, '.remote-cli', 'agy-sessions');

@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { assertNativeScheduleBackend, isNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../src/scheduling/ScheduleCapabilities';
 
 describe('native scheduling eligibility', () => {
-  it('describes checkpointed AGY recovery without granting legacy or dirty-exit admission', () => {
+  it('describes abrupt AGY interruption without granting legacy admission', () => {
     const detail = NATIVE_SCHEDULE_CAPABILITIES.agy.detail;
-    expect(detail).toContain('Fresh or clean-checkpointed original ACP conversations');
-    expect(detail).toContain('Saved stream-json conversations without a trusted checkpoint');
-    expect(detail).toContain('exact host retirement before every possible first wake');
-    expect(detail).toContain('Due work, dirty exits and ambiguous operations remain blocked');
+    expect(detail).toContain('Fresh original ACP conversations');
+    expect(detail).toContain('Existing stream-json conversations');
+    expect(detail).toContain('Scheduling recovery after any exit is unsupported');
+    expect(detail).toContain('Uncertain work retains ownership');
     expect(detail).not.toMatch(/\d+\.\d+\.\d+/);
     expect(() => assertNativeScheduleBackend('agy')).not.toThrow();
   });
@@ -25,12 +25,12 @@ describe('native scheduling eligibility', () => {
     expect(isNativeScheduleBackend('claude')).toBe(true);
     expect(isNativeScheduleBackend(null)).toBe(false);
     expect(SCHEDULE_CAPABILITIES).toContain('runtime checks required');
-    expect(SCHEDULE_CAPABILITIES).toContain('Claude jobs with verified native runtime capabilities');
+    expect(SCHEDULE_CAPABILITIES).toContain('automatic restoration is not provided');
     expect(SCHEDULE_CAPABILITIES).not.toContain('2.1.311');
-    expect(SCHEDULE_CAPABILITIES).toContain('Eligible waiting jobs permit verified handoff');
-    expect(SCHEDULE_CAPABILITIES).toContain('Running or unconfirmed work still blocks upgrades');
-    expect(SCHEDULE_CAPABILITIES).toContain('Expired one-shots are not run late');
-    expect(NATIVE_SCHEDULE_CAPABILITIES.dsh.detail).toContain('Dirty crashes and uncertain native work remain blocked');
+    expect(SCHEDULE_CAPABILITIES).toContain('Every exit is treated as abrupt');
+    expect(SCHEDULE_CAPABILITIES).toContain('Active work, unsettled native mutations and pending results remain independent safety gates');
+    expect(SCHEDULE_CAPABILITIES).toContain('runs expired one-shots late');
+    expect(NATIVE_SCHEDULE_CAPABILITIES.dsh.detail).toContain('never automatically restored');
     expect(SCHEDULE_CAPABILITIES).toContain('Claude, fresh AGY ACP and DSH tasks share their original native conversation and later chat messages');
     expect(NATIVE_SCHEDULE_CAPABILITIES.claude.detail).toContain('timezone must match the native session');
   });

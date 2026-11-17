@@ -96,6 +96,40 @@ describe('DshAcpClient', () => {
     } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
   });
 
+  it('keeps native create, occurrence delivery and exact cancellation without recovery IPC or shutdown RPC', async () => {
+    const client = create(); await client.initialize();
+    const input = { id: 'synthetic-job', cwd: home, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron' as const, expression: '* * * * *', timezone: 'UTC' } };
+    const emit = vi.fn();
+    const requests = () => fixture.frames.filter(frame => frame.method === '_remote_cli/session_schedule_command');
+    await expect(client.createNativeSchedule('dsh-session', input, emit, () => false)).rejects.toThrow('context changed');
+    expect(requests()).toEqual([]);
+    const receipt = (request: any, result: object) => fixture.child.push({ jsonrpc: '2.0',
+      method: '_remote_cli/session_schedule_event', params: { version: 2, scope: request.params.scope,
+        kind: 'receipt', requestId: request.params.requestId, result } });
+    const creating = client.createNativeSchedule('dsh-session', input, emit);
+    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('inspect'));
+    receipt(requests().at(-1), { ready: true, sessionId: 'dsh-session' });
+    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('create'));
+    receipt(requests().at(-1), { nativeId: 'synthetic-native', sessionId: 'dsh-session' });
+    const handle = await creating;
+    for (const event of [{ type: 'started', occurrenceId: 'synthetic-occurrence' },
+      { type: 'completed', occurrenceId: 'synthetic-occurrence', success: true, output: 'Synthetic result' }]) {
+      fixture.child.push({ jsonrpc: '2.0', method: '_remote_cli/session_schedule_event', params: {
+        version: 2, scope: requests()[0].params.scope, kind: 'event', id: input.id, sessionId: 'dsh-session', event } });
+    }
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(2));
+    expect(emit.mock.calls[1][0]).toMatchObject({ type: 'completed', success: true, output: 'Synthetic result' });
+    const cancelling = handle.cancel();
+    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('cancel'));
+    expect(requests().at(-1).params.id).toBe(input.id);
+    receipt(requests().at(-1), { deleted: true }); await cancelling;
+    expect(handle.nativeDefinitionAbsent).toBe(true);
+    client.destroy(); await client.waitForExit();
+    expect(handle.nativeDefinitionAbsent).toBe(false);
+    expect(requests().map(frame => frame.params.operation)).toEqual(['inspect', 'create', 'cancel']);
+  });
+
   it('adds a managed history overlay without changing tool HOME or the ordinary privacy overlay', async () => {
     const historyPatch = '- id: session-persistence-jsonl\n  config:\n    root: "synthetic-owned-root"\n';
     expect(() => new DshAcpClient('synthetic-dsh', home, {}, 1000, false, historyPatch)).toThrow('managed worker');

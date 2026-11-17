@@ -97,7 +97,7 @@ describe('settings cards command integration', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
-  it('keeps existing settings and directory cards fenced after the global update lock is released', async () => {
+  it('keeps busy-thread settings and directory cards fenced after the global update lock is released', async () => {
     const model = await f.open('model');
     const effort = await f.open('effort');
     const backend = await f.open('backend');
@@ -105,9 +105,9 @@ describe('settings cards command integration', () => {
     const otherBackend = f.responses().at(-1)!.settingsMenu;
     const directory = await directoryMenu();
     const handler = f.handler as any;
-    handler.automaticUpdateScheduleThreads.set('thread-a', handler.scheduleGeneration('thread-a'));
-    handler.automaticUpdateFailed = true;
-    await expect(f.handler.endAutomaticUpdate(true)).rejects.toThrow('affected thread admission is retained');
+    handler.automaticUpdateInProgress = true;
+    f.busy.add('thread-a');
+    await f.handler.endAutomaticUpdate();
     expect(handler.automaticUpdateInProgress).toBe(false);
     expect((await f.action(model)).success).toBe(false);
     expect((await f.action(effort, { value: 'high' })).success).toBe(false);

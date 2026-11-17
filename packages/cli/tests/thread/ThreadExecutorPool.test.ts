@@ -53,6 +53,15 @@ describe('ThreadExecutorPool', () => {
     else process.env.HOME = previousHome;
   });
 
+  it('passes only the catalog path for native resume refusal without starting an executor during setup', () => {
+    const id = manager.getDefaultThread().id;
+    const catalog = path.join(tmpDir, 'schedules', 'schedule-catalog.json');
+    pool.setScheduleCatalog(threadId => threadId === id ? catalog : undefined);
+    expect(mockExecutorFactory).not.toHaveBeenCalled();
+    pool.getExecutor(id);
+    expect(mockExecutorFactory.mock.calls[0][6]).toEqual({ speed: undefined, scheduleCatalog: catalog });
+  });
+
   it('admits only explicit settled-setting retry while retaining work and shutdown fences', () => {
     const id = manager.getDefaultThread().id;
     const executor = pool.getExecutor(id);

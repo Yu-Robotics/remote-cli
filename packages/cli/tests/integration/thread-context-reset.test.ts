@@ -87,8 +87,8 @@ describe('thread-wide conversation reset', () => {
   };
   const seedDirect = async () => {
     for (const backend of DELEGATION_BACKENDS) {
-      await write(pointer(backend, threadId), 'old direct conversation');
-      await write(pointer(backend, siblingId), 'sibling conversation');
+      await write(pointer(backend, threadId), backend === 'agy' ? JSON.stringify({ id: 'old-direct-conversation' }) : 'old direct conversation');
+      await write(pointer(backend, siblingId), backend === 'agy' ? JSON.stringify({ id: 'sibling-conversation' }) : 'sibling conversation');
     }
     await write(pointer('dsh', threadId).replace('.json', '.handoff.json'), 'old compact summary');
   };
@@ -132,6 +132,21 @@ describe('thread-wide conversation reset', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
+  });
+
+  it('explicit clear archives an inactive ACP selection without executing or erasing the original conversation', async () => {
+    const session = { id: 'synthetic-old-agy', transport: 'acp', retired: true };
+    await write(pointer('agy', threadId), JSON.stringify(session));
+    const history = await write(path.join(home, '.remote-cli', 'agy-homes', threadId, 'history'), 'Original native history');
+    expect(pool.getExistingExecutor(threadId)).toBeUndefined();
+    expect(await send('/clear')).toMatchObject({ success: true });
+    expect(factory).not.toHaveBeenCalled();
+    const archive = pointer('agy', threadId) + '.detached-acp';
+    const [name] = await fs.readdir(archive);
+    expect(JSON.parse(await fs.readFile(path.join(archive, name), 'utf8')).session).toEqual(session);
+    expect(await fs.readFile(history, 'utf8')).toBe('Original native history');
+    await reload(); expect(await send('ordinary fresh chat')).toMatchObject({ success: true });
+    expect(factory).toHaveBeenCalledOnce();
   });
 
   it.each(['/clear', '/new'])('queues A and B for permanent deletion on %s without touching main, siblings or newer generations', async command => {
@@ -236,7 +251,7 @@ describe('thread-wide conversation reset', () => {
     expect(factory).toHaveBeenCalledTimes(1);
     for (const backend of DELEGATION_BACKENDS) {
       expect(existsSync(pointer(backend, threadId))).toBe(false);
-      expect(await fs.readFile(pointer(backend, siblingId), 'utf8')).toBe('sibling conversation');
+      expect(await fs.readFile(pointer(backend, siblingId), 'utf8')).toBe(backend === 'agy' ? JSON.stringify({ id: 'sibling-conversation' }) : 'sibling conversation');
     }
     expect(existsSync(pointer('dsh', threadId).replace('.json', '.handoff.json'))).toBe(false);
     for (const value of lanes) {
@@ -342,7 +357,7 @@ describe('thread-wide conversation reset', () => {
       expect(await fs.readFile(archive, 'utf8')).toBe('preserved fixture');
       expect(await fs.readFile(path.join(project, 'source.txt'), 'utf8')).toBe('original source\n');
       expect(threads.getThread(siblingId)).toEqual(siblingMetadata);
-      for (const backend of DELEGATION_BACKENDS) expect(await fs.readFile(pointer(backend, siblingId), 'utf8')).toBe('sibling conversation');
+      for (const backend of DELEGATION_BACKENDS) expect(await fs.readFile(pointer(backend, siblingId), 'utf8')).toBe(backend === 'agy' ? JSON.stringify({ id: 'sibling-conversation' }) : 'sibling conversation');
       expect(await delegation.workspaceManager.describe(task.taskId)).toEqual(artifact);
       expect((await delegation.laneStore.lanesForThread(threadId))[0])
         .toMatchObject({ state: 'dirty', workspaceGeneration: 3, shutdownConfirmedGeneration: 0 });

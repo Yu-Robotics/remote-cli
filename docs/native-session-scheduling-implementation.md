@@ -50,8 +50,8 @@ restore jobs across CLI restarts or migrate legacy isolated jobs into a foregrou
 conversation. Claude uses non-durable native job creation; DSH directs the schedule
 domain to fresh process-owned storage while leaving ordinary native session
 history in its existing storage. The durable catalog retains interrupted states
-and completed pending results. Job restoration needs separate native identity and
-ownership reconciliation; preserving conversation history alone is insufficient.
+and completed pending results. Schedule restoration is permanently cancelled. Preserving conversation history
+alone is not execution permission.
 Resumed Claude sessions without the managed scheduling hook disable native task
 execution at launch, including restricted resumes and external compaction.
 Managed resumes validate native hook policy; owned terminal events also wake
@@ -82,3 +82,49 @@ resolution, documentation, synchronized version manifests, and focused combined
 regressions. No real model inference, Feishu sends, production restart, publication,
 or deployment is part of this change. Native macOS and Windows execution remains
 unverified for this revision.
+
+## Host loss and cleanup admission (1.6.257)
+
+Catalog versions 1–6 remain readable and writes remain v6. Startup marks only live
+creating/active/running rows interrupted; existing errors, original ownership,
+cleanup selectors and completed outbox results survive. No startup native CRUD or
+model request and no exit-time scheduling RPC, checkpoint or handoff is performed.
+An admitted CREATE may return after service destruction. The catalog kernel gate
+stays owned only until that already-pending receipt settles so its exact native ID
+and cleanup identity can be saved. Shutdown does not wait for it; OS process death
+releases the gate. This is not a retained host or schedule continuation.
+
+Historical uncertainty and live admission are distinct. Interrupted AGY/DSH rows
+without a supported exact retained-cancellation route neither consume live capacity
+nor trigger unavailable native management for list/purge. Their cancellation intent
+and unresolved cleanup ledger are preserved; no absence or success is inferred.
+DSH emits an awaited attribution event before native CREATE and returns the same
+cleanup identity on success. The legacy `dsh-session-orderly-v1` / `reconstruct`
+discriminators now identify deletion provenance only. They never grant restoration.
+Both retained rows and purged cleanup entries fence their original session; genuinely
+unattributed legacy entries remain unknown. Permanent session markers are retained.
+
+Saved AGY ACP chat cannot safely resume even without a schedule-owner journal.
+Native pending reminders are not reliably enumerable or vetoable before inference.
+Explicit `/clear` may detach only an owner-free selection with no checkpoint lock:
+it durably archives the selection and unconfirmed-retirement evidence, preserves
+native history and legacy checkpoint evidence, and selects a fresh conversation.
+Automatic compaction cannot perform this detachment. The archive continues to block
+thread data erasure across subsequent sessions and restarts, including inactive
+backend cleanup. ThreadManager uses the same selection-detachment helper, so a
+reset without an instantiated AGY executor cannot bypass these guards. Scheduled ownership
+still blocks reset; use a new thread for chat. Existing owned-host retirement and
+in-turn purge ordering remain unchanged. No missing journal proves native absence.
+For an inactive AGY executor, any owner journal, including `retired: true`, blocks
+thread-wide `/clear` and `/cd` even on another backend. Use a new thread; the stored
+flag alone is not accepted as current-process retirement evidence.
+
+DSH failures before the refusal marker (including session startup and context
+validation) are reported as not admitted. Existing refusal compaction removes only
+that fresh attempt and retains its replay fence. Post-marker or ambiguous CREATE
+failures continue to retain the original session guard.
+
+Local catalog initialization does not depend on Router result capabilities. Older
+Routers do not receive unsupported result frames, and pending completed results stay
+in the outbox until a compatible connection. Corrupt catalogs remain fenced rather
+than being treated as absent. No protocol shape changes are introduced.

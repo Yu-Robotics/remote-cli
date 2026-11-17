@@ -62,51 +62,16 @@ describe('foreground native schedule bridge', () => {
         expect.objectContaining({ kind: 'foregroundEnd', stopReason: 'end_turn' })]);
     } finally { await f.close(); }
   });
-  it('releases future firings, drains a queued reminder and flushes before acknowledging handoff', async () => {
-    const f = await fixture(), events: any[] = [];
-    try {
-      const handle = await f.create('job', 'one', events);
-      let finish!: () => void;
-      f.agents.get('one')!.whenIdle.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
-      const releasing = handle.releaseForRestart!();
-      await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-      expect(f.ctx.schedule.delete).toHaveBeenCalledWith({ sessionId: 'one', id: handle.nativeId });
-      f.claim('one', 7, [handle.nativeId]); f.finish('one', 7, 'queued result');
-      expect(events.map(event => event.type)).toEqual(['started', 'completed']);
-      expect(f.ctx.sessions.flush).not.toHaveBeenCalled();
-      finish(); await releasing;
-      expect(f.ctx.sessions.flush).toHaveBeenCalledWith(f.agents.get('one')!.session);
-      expect(f.agents.get('one')!.cancel).not.toHaveBeenCalled();
-    } finally { await f.close(); }
-  });
-
-  it.each(['missing-idle', 'missing-flush', 'flush-failed', 'definition-remains', 'unjoined-turn'])(
-    'refuses a clean handoff when native evidence is %s', async fault => {
-      const f = await fixture();
-      try {
-        const handle = await f.create('job');
-        if (fault === 'missing-idle') (f.agents.get('one') as any).whenIdle = undefined;
-        if (fault === 'missing-flush') (f.ctx.sessions as any).flush = undefined;
-        if (fault === 'flush-failed') f.ctx.sessions.flush.mockResolvedValueOnce(false);
-        if (fault === 'definition-remains') f.ctx.schedule.delete.mockImplementationOnce(async ({ id }: any) => ({ id, deleted: true }));
-        if (fault === 'unjoined-turn') f.claim('one', 1, [handle.nativeId]);
-        await expect(handle.releaseForRestart!()).rejects.toThrow('operation failed');
-        expect(f.agents.get('one')!.cancel).not.toHaveBeenCalled();
-      } finally { await f.close(); }
-    });
-
-  it('joins repeated or already-retired release without deleting another session and rejects foreign ownership', async () => {
+  it('disposes without native schedule RPC, drain, or exit-time proof', async () => {
     const f = await fixture();
     try {
-      const job = await f.create('job'), sibling = await f.create('sibling', 'two');
-      await expect((f.client as any).request('two', 'release', { id: 'job' })).rejects.toThrow('operation failed');
-      await job.releaseForRestart!(); await job.releaseForRestart!();
-      expect(await sibling.list()).toBe(true);
-      await job.cancel(); await job.releaseForRestart!();
-      expect(f.agents.get('one')!.whenIdle).toHaveBeenCalledTimes(3);
-      f.ctx.schedule.catalog.mockResolvedValueOnce([{ id: job.nativeId, sessionId: 'one', title: 'job' }]);
-      await expect(job.releaseForRestart!()).rejects.toThrow('operation failed');
-      f.client.close(); await expect(sibling.releaseForRestart!()).rejects.toThrow('exited');
+      await f.create('job'); await f.create('sibling', 'two');
+      await expect((f.client as any).request('one', 'release', { id: 'job' })).rejects.toThrow('operation failed');
+      await f.bridge.dispose();
+      expect(f.ctx.schedule.delete).not.toHaveBeenCalled();
+      expect(f.ctx.sessions.flush).not.toHaveBeenCalled();
+      expect(f.agents.get('one')!.whenIdle).not.toHaveBeenCalled();
+      expect(f.agents.get('one')!.cancel).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
 

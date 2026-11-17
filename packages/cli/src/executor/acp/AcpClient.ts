@@ -52,7 +52,7 @@ export interface AcpTransport {
    * receipt. Revoked before load/configuration/cancel/delete, including failures. */
   sessionAdmission?(sessionId: string): object | undefined;
   createNativeSchedule?(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void): Promise<import('../../scheduling/types').NativeScheduleHandle>;
+    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void | Promise<void>, current?: () => boolean): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
   newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
   loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
@@ -121,6 +121,7 @@ export class AcpClient implements AcpTransport {
       }
     });
   }
+
 
   initialize(): Promise<unknown> {
     return this.sendRequest('initialize', { protocolVersion: 1, clientCapabilities: {} });

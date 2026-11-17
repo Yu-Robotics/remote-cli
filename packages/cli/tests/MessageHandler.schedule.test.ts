@@ -1,3 +1,4 @@
+import { agyScheduleHarness } from './scheduling/SyntheticAgyScheduleHost';
 import { ScheduleCards } from '../../router/src/feishu/ScheduleCards';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/promises';
@@ -26,7 +27,7 @@ vi.mock('../src/scheduling/DshNativeScheduleProvider', () => ({
 async function fixture() {
   const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), 'schedule-handler-')));
   await mkdir(path.join(cwd, '.remote-cli'));
-  vi.spyOn(os, 'homedir').mockReturnValue(cwd);
+  vi.spyOn(os, 'homedir').mockReturnValue(cwd); vi.stubEnv('HOME', cwd); vi.stubEnv('USERPROFILE', cwd);
   const threads: Thread[] = ['thread-a', 'thread-b'].map(id => ({ id, name: id, workingDirectory: cwd,
     sessionId: null, createdAt: 0, lastActiveAt: 0, delegation: false }));
   let backend = 'claude';
@@ -34,7 +35,7 @@ async function fixture() {
   let connected = true;
   let executorBusy = false;
   const executor = { createNativeSchedule: vi.fn((input: any, emit: any, _owner?: () => boolean, _admit?: () => boolean) => (input.backend === 'dsh' ? native.createDsh : native.create)(input, emit)),
-    withNativeScheduleOperation: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>) => {
+    withNativeScheduleOperation: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>, _inTurn?: boolean) => {
       if (!current()) throw new Error('Stale scheduling operation');
       return run();
     }), configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
@@ -116,7 +117,7 @@ describe('MessageHandler native schedule closed loop', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     f = await fixture();
   });
-  afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
+  afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
@@ -160,15 +161,13 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(job.handle.cancel).not.toHaveBeenCalled(); expect(job.handle.stop).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('awaits AGY native identity persistence through the production dispatcher (failure=%s)', async fail => {
+  it.each([false, true])('awaits AGY native occurrence persistence through the production dispatcher (failure=%s)', async fail => {
     f.setBackend('agy');
     const service = await (f.handler as any).initializeSchedules() as ScheduleService;
     const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-    await service.create(owner, { id: 'agy-rebound', backend: 'agy', cwd: f.cwd, prompt: 'Synthetic task',
+    await service.create(owner, { id: 'agy-occurrence', backend: 'agy', cwd: f.cwd, prompt: 'Synthetic task',
       rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
     const job = f.jobs[0];
-    const previousNativeId = job.handle.nativeId;
-    job.handle.nativeId = 'native-successor';
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let entered!: () => void;
@@ -182,7 +181,7 @@ describe('MessageHandler native schedule closed loop', () => {
     });
     try {
       const pending = (job.emit as (event: NativeScheduleEvent) => Promise<void>)({
-        type: 'rebound', previousNativeId, nativeId: job.handle.nativeId,
+        type: 'started', occurrenceId: 'synthetic-occurrence',
       });
       expect(pending).toBeInstanceOf(Promise);
       let finished = false;
@@ -190,14 +189,14 @@ describe('MessageHandler native schedule closed loop', () => {
       await persisting;
       expect(finished).toBe(false);
       const catalogFile = path.join((service as any).options.directory, SCHEDULE_CATALOG_FILE);
-      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].nativeId).toBe(previousNativeId);
+      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].state).toBe('active');
       release();
       expect(await observed).toBe(fail ? failure : undefined);
-      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].nativeId).toBe(fail ? previousNativeId : 'native-successor');
+      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].state).toBe(fail ? 'active' : 'running');
     } finally {
       release(); persistence.mockRestore();
       if (fail) {
-        await expect(service.destroy()).rejects.toBe(failure);
+        await expect(service.destroy()).resolves.toBeUndefined();
         // A fault deliberately retains the production catalog gate. Release only
         // this synthetic fixture's gate after verifying failed shutdown.
         (service as any).catalogGate?.close();
@@ -363,7 +362,7 @@ describe('MessageHandler native schedule closed loop', () => {
       expect(reply.purge.nativeCleanupUnresolved).toHaveLength(15);
     }
     const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
-    expect(catalog.version).toBe(5); expect(catalog.records).toEqual([]); expect(catalog.pending).toEqual([]);
+    expect(catalog.version).toBe(6); expect(catalog.records).toEqual([]); expect(catalog.pending).toEqual([]);
     expect(catalog.cleanup).toHaveLength(15); expect(catalog.purged).toHaveLength(15);
     expect(JSON.stringify(catalog)).not.toContain('Synthetic historical task');
     expect(JSON.stringify(catalog)).not.toContain('Synthetic queued result');
@@ -646,6 +645,86 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
   });
 
+  it('purges AGY through real in-turn native receipts, retains retirement evidence and isolates siblings', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
+    f.setBackend('agy'); await f.bind();
+    const h = agyScheduleHarness(f.cwd);
+    await h.bridge.qualify();
+    f.executor.createNativeSchedule.mockImplementation((input, emit, _current, admit) => h.bridge.create(input, emit, admit));
+    f.executor.withNativeScheduleOperation.mockImplementation((id, current, run, inTurn) => h.bridge.withOperation(id, current, run, !!inTurn));
+    Object.assign(f.executor, { nativeScheduleAction: (id: string) => h.bridge.action(id),
+      hasPendingScheduleMutation: () => h.bridge.cleanupMutationPending });
+    const raw = f.handler as any;
+    const service = await raw.initializeSchedules() as ScheduleService;
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: raw.scheduleGeneration('thread-a') };
+    await f.send('/schedule cron "* * * * *" --tz UTC -- Synthetic reminder');
+    await f.send('/schedule cron "* * * * *" --tz UTC -- Synthetic sibling');
+    const [selected, sibling] = await service.list(owner);
+    expect(h.tasks.size).toBe(2);
+    const scope = raw.scheduleToolOperations.scope.bind(raw.scheduleToolOperations);
+    vi.spyOn(raw.scheduleToolOperations, 'scope').mockImplementation((options: any) => scope({ ...options, waitMs: 10 }));
+    const actions: any[] = [];
+    try {
+      f.executor.execute.mockImplementationOnce(async () => {
+        h.bridge.beginForeground(); h.begin(); f.setExecutorBusy(true);
+        try {
+          expect(h.tool({ tool: 'remote_cli_schedule_purge', input: { requestId: 'agy-purge', scheduleIds: [selected.id] } }).decision).toEqual({ decision: 'allow' });
+          let result: any = await invoke('remote_cli_schedule_purge', { requestId: 'agy-purge', scheduleIds: [selected.id] });
+          for (let attempts = 0; result.status === 'pending' && attempts < 100; attempts++) {
+            if (result.nativeAction) { actions.push(result.nativeAction); h.respond(result.nativeAction); }
+            result = await invoke('remote_cli_schedule_operation', { requestId: 'agy-purge' });
+          }
+          // Native deletion is confirmed, but the running foreground is not an exit proof.
+          expect(result).toMatchObject({ status: 'succeeded', purge: { removedIds: [], errors: [],
+            pending: [{ id: selected.id, reason: 'operation_pending' }] } });
+          expect(h.tasks.has(selected.nativeId!)).toBe(false); expect(h.tasks.has(sibling.nativeId!)).toBe(true);
+          expect(await invoke('remote_cli_schedule_purge', { requestId: 'agy-purge', scheduleIds: [selected.id] })).toEqual(result);
+          expect(h.bridge.cleanupMutationPending).toBe(false);
+        } finally { h.stop(); h.bridge.endForeground(); f.setExecutorBusy(false); }
+        return { success: true };
+      });
+      await f.send('Purge the selected synthetic AGY schedule', 'thread-a', { isSlashCommand: false });
+      expect(f.responses().at(-1)).toMatchObject({ success: true });
+      expect(actions.map(action => action.input.Action)).toEqual(['list', 'kill', 'list']);
+      expect(actions.find(action => action.input.Action === 'kill').input.TaskId).toBe(selected.nativeId);
+      expect(service.needsNativePurge(owner, selected.id)).toBe(true);
+      expect(service.canCancel(owner, selected.id)).toBe(false);
+      // The same selected job still needs admission although its cancel card is hidden.
+      f.executor.withNativeScheduleOperation.mockClear();
+      await f.send('/schedule purge ' + selected.id);
+      expect((await service.list(owner)).map(record => record.id)).toEqual([sibling.id]);
+      expect(f.executor.withNativeScheduleOperation).toHaveBeenCalledOnce();
+      expect(h.tasks.has(sibling.nativeId!)).toBe(true);
+      f.executor.withNativeScheduleOperation.mockClear();
+      await f.send('/schedule purge ' + selected.id);
+      expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+      await f.send('/schedule purge ' + selected.id + ' --forget-unresolved');
+      expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+    } finally { h.bridge.endForeground(); h.bridge.processClosed(true); }
+  });
+
+  it.each(['stale-context', 'unknown-host'] as const)('refuses AGY purge admission for %s without cancellation intent', async fault => {
+    f.setBackend('agy'); await f.bind();
+    const h = agyScheduleHarness(f.cwd); await h.bridge.qualify();
+    f.executor.createNativeSchedule.mockImplementation((input, emit, _current, admit) => h.bridge.create(input, emit, admit));
+    f.executor.withNativeScheduleOperation.mockImplementation((id, current, run, inTurn) => h.bridge.withOperation(id, current, run, !!inTurn));
+    await f.send('/schedule cron "* * * * *" --tz UTC -- Synthetic reminder');
+    const raw = f.handler as any, service = raw.schedules as ScheduleService;
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: raw.scheduleGeneration('thread-a') };
+    const [selected] = await service.list(owner);
+    try {
+      f.executor.withNativeScheduleOperation.mockImplementationOnce((id, current, run) => {
+        if (fault === 'stale-context') f.threads[0].models = { agy: 'changed-model' };
+        else h.current.mockReturnValue(false);
+        return h.bridge.withOperation(id, current, run, false);
+      });
+      await f.send('/schedule purge ' + selected.id);
+      expect(f.responses().at(-1)).toMatchObject({ success: false });
+      expect(h.tasks.size).toBe(1);
+      expect((await service.list(owner))[0].cancelRequested).not.toBe(true);
+    } finally { h.current.mockReturnValue(true); h.bridge.processClosed(true); }
+  });
+
   it('routes read-only cleanup review through the authenticated tool scope without deleting tasks', async () => {
     await f.bind(true, true);
     const rows = [{ id: 'native-only', prompt: 'Synthetic native-only task', cron: '* * * * *', durable: true }];
@@ -755,17 +834,12 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(admit!()).toBe(false);
   });
 
-  it.each([undefined, 'drain-all', 'skip-unadmitted'])('describes the negotiated recovery policy (%s) after creation', async policy => {
-    if (policy) Object.assign(f.executor, { nativeScheduleRecovery: {
-      provider: 'synthetic-recovery', strategy: 'reconstruct', handoffPolicy: policy,
-      describe: () => 'synthetic-original-owner', reconcile: vi.fn(),
-    } });
+  it('reports that live native schedules are never automatically restored', async () => {
     await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
     const response = f.responses().at(-1);
     expect(response.success).toBe(true);
-    expect(response.output).toContain(policy ? 'recover automatically after a confirmed orderly restart' : 'does not support automatic schedule recovery');
-    if (policy === 'skip-unadmitted') expect(response.output).toContain('may be skipped without replay');
-    if (policy === 'drain-all') expect(response.output).toContain('Queued and executing occurrences must finish');
+    expect(response.output).toContain('never automatically restored');
+    expect(response.output).not.toContain('orderly');
   });
 
   it('prepares slash creation on the foreground bridge reused by subsequent chat without a dedicated Claude provider', async () => {
@@ -792,11 +866,11 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
     const id = f.jobs[0].input.id;
     await f.restart();
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-recovery', strategy: 'reconstruct',
-      describe: () => 'fixture-identity', reconcile: vi.fn(), cancelRetained: vi.fn() } });
+    Object.assign(f.executor, { nativeScheduleCleanup: { provider: 'fixture-recovery', strategy: 'reconstruct',
+      describe: () => 'fixture-identity', cancelRetained: vi.fn() } });
     await f.bind(); f.executor.withNativeScheduleOperation.mockClear();
     await f.send(`/schedule cancel ${id}`);
-    expect(f.executor.withNativeScheduleOperation).toHaveBeenCalledWith(expect.any(String), expect.any(Function), expect.any(Function), false);
+    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect(f.responses().at(-1)).toMatchObject({ success: false });
     expect(f.responses().at(-1).error).toContain('ownership metadata');
     expect(native.create).toHaveBeenCalledOnce();
@@ -845,7 +919,7 @@ describe('MessageHandler native schedule closed loop', () => {
     f.executor.destroy.mockImplementation(async () => { retired = true; f.jobs[0].emit({ type: 'stopped', reason: 'Synthetic exact group exit', exitConfirmed: true }); });
     handle.stop.mockImplementation(async () => { expect(retired).toBe(true); });
     await f.handler.destroy();
-    expect(f.executor.destroy).toHaveBeenCalled();
+    expect(f.pool.destroyAll).toHaveBeenCalledWith({ deleteData: false, shutdown: true });
     expect(handle.stop).not.toHaveBeenCalled();
   });
   it('keeps tools available for unsupported backends without falling back or activating the catalog', async () => {
@@ -1003,8 +1077,8 @@ describe('MessageHandler native schedule closed loop', () => {
     });
     await f.send('Synthetic pending request', 'thread-a', { isSlashCommand: false });
     await destruction;
-    expect(f.jobs[0].handle.stop).toHaveBeenCalled();
-    expect((f.handler as any).schedules.hasActiveSchedules()).toBe(false);
+    if (boundary === 'shutdown') expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+    else { expect(f.jobs[0].handle.stop).toHaveBeenCalled(); expect((f.handler as any).schedules.hasActiveSchedules()).toBe(false); }
     expect(f.ws.send.mock.calls.some(([message]) => message.type === 'schedule_tool_card')).toBe(false);
   });
 
@@ -1211,7 +1285,7 @@ describe('MessageHandler native schedule closed loop', () => {
   });
 
   it('keeps never-used scheduling dormant across binding, reconnect, chat and ordinary controls', async () => {
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     const initialize = vi.spyOn(ScheduleService.prototype, 'initialize');
     const closeListeners = f.closeHandlers.size;
     await f.bind(true);
@@ -1245,7 +1319,7 @@ describe('MessageHandler native schedule closed loop', () => {
 
   it.each(['missing', 'undefined'])('ignores an optional %s config directory in non-scheduling clients', async mode => {
     (f.config as any).getConfigDir = mode === 'missing' ? undefined : () => undefined;
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     await f.bind();
     await f.reconnect();
     await Promise.all(recover.mock.results.map(result => result.value));
@@ -1258,218 +1332,51 @@ describe('MessageHandler native schedule closed loop', () => {
     f.handler.endAutomaticUpdate();
   });
 
-  it('reattaches opted-in native inventory at binding without a foreground message and keeps updates fenced', async () => {
-    const reconcile = vi.fn(async (record: any, context: any, emit: any) => {
-      expect(context.isCurrent()).toBe(true);
-      expect(record.execution).toBeDefined();
-      expect(record.recovery.identity).toBe('original-fixture-session');
-      f.jobs[0].emit = emit;
-      return f.jobs[0].handle;
-    });
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile } });
-    await f.bind();
-    await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Inspect synthetic build');
-    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => {}) });
-    await f.restart();
-    await f.handler.prepareScheduleStartup();
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-    const install = vi.fn(async () => {});
-    const updater = new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false });
-    vi.useFakeTimers();
-    await updater.handleRouterVersion('1.6.238');
-    expect(install).not.toHaveBeenCalled();
-    vi.clearAllTimers(); vi.useRealTimers();
-    await f.reconnect();
-    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
-    await (f.handler as any).recoverSchedules();
-    expect(native.create).toHaveBeenCalledOnce();
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); // Admission still requires an asynchronous native handoff.
-    await f.handler.endAutomaticUpdate();
-    f.jobs[0].emit({ type: 'started', occurrenceId: 'recovered-occurrence' });
-    f.jobs[0].emit({ type: 'completed', occurrenceId: 'recovered-occurrence', success: true, output: 'Recovered result' });
-    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
-    expect(f.scheduledResults()[0]).toMatchObject({ threadId: 'thread-a', openId: 'owner', output: 'Recovered result' });
-  });
-
-  it('hands off actual DSH adapters through handler/updater and restores after install-only update', async () => {
-    const hosts: Host[] = [];
-    f.setBackend('dsh');
-    const executor = new DshExecutor(new DirectoryGuard([f.cwd]), { initialWorkingDirectory: f.cwd, threadId: 'thread-a',
-      sessionBaseDir: path.join(f.cwd, 'native-sessions'), clientFactory: () => { const host = new Host([]); hosts.push(host); return host; } });
-    f.pool.getExecutor = () => executor as any; f.pool.getExistingExecutor = () => executor as any;
-    f.pool.isThreadBusy = () => executor.isBusy();
-    const configure = vi.spyOn(executor, 'configureManagedTools');
-    try {
-      await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic DSH reminder');
-      expect(f.responses().at(-1).success).toBe(true);
-      const connection = configure.mock.calls[0][0];
-      const install = vi.fn(async () => { expect(hosts[0].destroy).toHaveBeenCalledOnce(); });
-      await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false })
-        .handleRouterVersion('1.6.238');
-      expect(install).toHaveBeenCalledOnce(); expect(hosts).toHaveLength(2);
-      expect(hosts[1].loadSession).toHaveBeenCalled(); expect(hosts[1].prompt).not.toHaveBeenCalled();
-      expect(configure.mock.calls.at(-1)![0]).toEqual(connection);
-      await f.send('Foreground after update', 'thread-a', { isSlashCommand: false });
-      expect(hosts).toHaveLength(2); expect(hosts[1].prompt).toHaveBeenCalledOnce();
-      hosts[1].start(hosts[1].rows[0]); hosts[1].finish('Restored scheduled output');
-      await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
-      expect(f.scheduledResults()[0].threadId).toBe('thread-a');
-    } finally { await f.handler.destroy(); await executor.destroy(); await executor.waitForExit(); }
-  });
-
-  it('retains affected thread admission after an unconfirmed native handoff and never installs', async () => {
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile: vi.fn() } });
-    await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => { throw new Error('Native drain unresolved'); }) });
-    const install = vi.fn();
-    await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install }).handleRouterVersion('1.6.238');
-    expect(install).not.toHaveBeenCalled(); expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-    await f.send('Must remain fenced', 'thread-a', { isSlashCommand: false });
-    expect(f.executor.execute).not.toHaveBeenCalled(); expect(f.responses().at(-1).success).toBe(false);
-    await f.send('/session'); expect(f.responses().at(-1).success).toBe(false);
+  it.each(['agy', 'dsh'])('keeps interrupted %s list and purge catalog-only and lets an explicit clear reach the executor guard', async backend => {
+    f.setBackend(backend); await f.bind();
+    await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    const job = f.jobs[0];
+    await f.restart(); await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
+    f.executor.withNativeScheduleOperation.mockClear().mockRejectedValue(new Error('No live native host'));
     await f.send('/schedule list');
-    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Restart handoff unconfirmed') });
-    expect(f.responses().at(-1).scheduleMenu).toBeUndefined();
-  });
-
-  it('releases global admission but retains affected ownership when install-only restoration fails', async () => {
-    const reconcile = vi.fn(async () => {
-      throw new NativeScheduleCleanupError('Synthetic restoration failure', f.jobs[0].handle);
-    });
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile } });
-    await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => {}) });
-    const install = vi.fn();
-    await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false })
-      .handleRouterVersion('1.6.238');
-    expect(install).toHaveBeenCalledOnce();
-    await expect(f.handler.endAutomaticUpdate()).rejects.toThrow('admission is retained');
-    await f.send('Must remain fenced', 'thread-a', { isSlashCommand: false });
-    expect(f.executor.execute).not.toHaveBeenCalled(); expect(f.responses().at(-1).success).toBe(false);
-    expect((f.handler as any).automaticUpdateInProgress).toBe(false);
-    await f.send('Other thread after recovery failure', 'thread-b', { isSlashCommand: false });
-    expect(f.responses().at(-1).success).toBe(true);
-    await f.reconnect(); await (f.handler as any).recoverSchedules();
-    expect(reconcile).toHaveBeenCalledOnce();
-  });
-
-  it('does not start new recovery on reconnect after install-only finalization fails', async () => {
-    const hosts: Host[] = [];
-    f.setBackend('dsh');
-    const executor = new DshExecutor(new DirectoryGuard([f.cwd]), { initialWorkingDirectory: f.cwd, threadId: 'thread-a',
-      sessionBaseDir: path.join(f.cwd, 'native-sessions'), clientFactory: () => { const host = new Host([]); hosts.push(host); return host; } });
-    f.pool.getExecutor = () => executor as any; f.pool.getExistingExecutor = () => executor as any;
-    f.pool.isThreadBusy = () => executor.isBusy();
-    try {
-      await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-      const updater = new AutomaticUpdater('1.6.237', f.handler, { restartAfterUpdate: false, installVersion: async () => {
-        f.disconnect(); await f.reconnect(); await (f.handler as any).recoverSchedules();
-        expect(hosts).toHaveLength(1); // A reconnect cannot reconstruct jobs under an ongoing installer.
-        f.disconnect();
-      } });
-      await updater.handleRouterVersion('1.6.238');
-      expect(hosts).toHaveLength(1); expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-      await f.reconnect(); await (f.handler as any).recoverSchedules();
-      expect(hosts).toHaveLength(1);
-      expect((f.handler as any).automaticUpdateInProgress).toBe(false);
-      await f.send('Affected thread remains fenced', 'thread-a', { isSlashCommand: false });
-      expect(f.responses().at(-1).success).toBe(false);
-      expect(hosts[0].prompt).not.toHaveBeenCalled();
-    } finally { await f.handler.destroy(); await executor.destroy(); await executor.waitForExit(); }
-  });
-
-  it('contains a timed-out handoff and its late mutation without locking unrelated chat or retrying release', async () => {
-    const reconcile = vi.fn();
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile } });
-    await f.bind(true); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-    const menu = f.responses().at(-1).scheduleMenu;
+    expect(f.responses().at(-1).output).toContain('interrupted');
     const service = (f.handler as any).schedules as ScheduleService;
-    (service as any).options.recoveryTimeoutMs = 30;
-    let release!: () => void;
-    let entered!: () => void;
-    const enteredRelease = new Promise<void>(resolve => { entered = resolve; });
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const mutation = vi.fn();
-    const pendingRelease = vi.fn(async () => { entered(); await gate; mutation(); });
-    Object.assign(f.jobs[0].handle, { releaseForRestart: pendingRelease });
-    const install = vi.fn(); const beforeRestart = vi.fn();
-    vi.useFakeTimers();
-    try {
-      const updater = new AutomaticUpdater('1.6.247', f.handler, { installVersion: install,
-        beforeRestart, retryDelayMs: 10, failureRetryDelayMs: 20 });
-      const update = updater.handleRouterVersion('1.6.248');
-      await enteredRelease;
-      await vi.advanceTimersByTimeAsync(31);
-      await update;
-      expect(service.hasUnresolvedHandoff()).toBe(true);
-      expect((f.handler as any).automaticUpdateInProgress).toBe(false);
-      expect(install).not.toHaveBeenCalled();
-      expect(beforeRestart).not.toHaveBeenCalled();
-      for (const command of ['Synthetic chat', '/abort', '/clear', '/new', '/session', '/model other',
-        '/effort low', '/cd ' + f.cwd, '/backend default @', '/sandbox off', '/schedule cancel all']) {
-        await f.send(command, 'thread-a', { isSlashCommand: command.startsWith('/') });
-        expect(f.responses().at(-1).success, command).toBe(false);
-      }
-      await f.send('/thread delete thread-a', 'thread-b');
-      expect(f.manager.deleteThread).not.toHaveBeenCalled();
-      await f.send('/backend default', 'thread-b');
-      expect(f.responses().at(-1).success).toBe(false);
-      await action(menu, 'cancel');
-      expect(receipts().at(-1).success).toBe(false);
-      expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
-      expect(f.executor.abort).not.toHaveBeenCalled();
-      expect(f.pool.clearThreadContext).not.toHaveBeenCalled();
-      expect(f.pool.setWorkingDirectory).not.toHaveBeenCalled();
-      expect(f.executor.execute).not.toHaveBeenCalled();
-      await f.send('Unrelated chat continues', 'thread-b', { isSlashCommand: false });
-      expect(f.executor.execute).toHaveBeenCalledOnce();
-      expect(f.responses().at(-1).success).toBe(true);
-      await f.send('/schedule list');
-      expect(f.responses().at(-1).success).toBe(true);
-      expect(f.responses().at(-1).scheduleMenu).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(60);
-      expect(pendingRelease).toHaveBeenCalledOnce();
-      expect(install).not.toHaveBeenCalled();
-      release(); await pendingRelease.mock.results[0].value;
-      expect(mutation).toHaveBeenCalledOnce();
-      // The original service still owns the receipt. A late provider return is
-      // not a service-level clean handoff, retirement, or permission to install.
-      expect(service.hasUnresolvedHandoff()).toBe(true);
-      await vi.advanceTimersByTimeAsync(30);
-      expect(pendingRelease).toHaveBeenCalledOnce();
-      expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-      await f.reconnect(true); await (f.handler as any).recoverSchedules();
-      expect(reconcile).not.toHaveBeenCalled();
-      expect(install).not.toHaveBeenCalled();
-      expect(f.executor.destroy).not.toHaveBeenCalled();
-    } finally { release(); vi.clearAllTimers(); vi.useRealTimers(); }
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const id = (await service.list(owner))[0].id;
+    await f.send(`/schedule purge ${id}`);
+    expect(await service.listCleanup(owner)).toMatchObject([{ id, reason: 'unattributed' }]);
+    await f.send('/clear');
+    expect(f.pool.clearThreadContext).toHaveBeenCalled();
+    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+    expect(job.handle.list).not.toHaveBeenCalled(); expect(job.handle.cancel).not.toHaveBeenCalled();
   });
 
-  it('does not run native recovery after installer failure just to release global admission', async () => {
-    const reconcile = vi.fn();
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile } });
+  it('loads interrupted schedule status at binding without restoring or touching native inventory', async () => {
     await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => {}) });
-    vi.useFakeTimers();
+    await f.restart(); await f.handler.prepareScheduleStartup();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
+    await f.send('/schedule list');
+    expect(f.responses().at(-1).output).toContain('interrupted');
+    expect(native.create).toHaveBeenCalledOnce();
+    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled(); expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+    expect(f.jobs[0].handle.list).not.toHaveBeenCalled();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); f.handler.endAutomaticUpdate();
+  });
+
+  it.each([false, true])('updates with idle schedules without handoff or recovery (installer failure=%s)', async fail => {
+    Object.assign(f.executor, { nativeScheduleCleanup: { provider: 'fixture-persistent-v1', strategy: 'reattach',
+      describe: () => 'original-fixture-session' } });
+    await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    const install = vi.fn(async () => { if (fail) throw new Error('Synthetic installer failure'); });
+    const updater = new AutomaticUpdater('1.6.256', f.handler, { installVersion: install, restartAfterUpdate: false });
     try {
-      const install = vi.fn(async () => { throw new Error('Synthetic installer failure'); });
-      await new AutomaticUpdater('1.6.247', f.handler, { installVersion: install }).handleRouterVersion('1.6.248');
-      expect(install).toHaveBeenCalledOnce();
-      expect((f.handler as any).automaticUpdateInProgress).toBe(false);
-      expect(reconcile).not.toHaveBeenCalled();
-      await f.send('Other thread', 'thread-b', { isSlashCommand: false });
+      await updater.handleRouterVersion('1.6.257');
+      expect(install).toHaveBeenCalledOnce(); expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
+      expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+      await f.send('Foreground after install', 'thread-a', { isSlashCommand: false });
       expect(f.responses().at(-1).success).toBe(true);
-      await f.send('Affected thread', 'thread-a', { isSlashCommand: false });
-      expect(f.responses().at(-1).success).toBe(false);
-      expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-      await f.reconnect(); await (f.handler as any).recoverSchedules();
-      expect(reconcile).not.toHaveBeenCalled();
-    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+    } finally { clearTimeout((updater as any).retryTimer); }
   });
 
   it('does not re-admit updates after handler destruction when no schedules exist', async () => {
@@ -1477,42 +1384,34 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
   });
 
-  it('does not unblock upgrades before an older Router can negotiate recovery transport', async () => {
+  it('loads local interruption state with an older Router without waiting for unsupported result transport', async () => {
     await f.bind(); await f.send('/schedule after 5m -- Synthetic reminder'); await f.restart();
     await f.handler.prepareScheduleStartup();
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {} } } as any);
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    await (f.handler as any).loadScheduleCatalog();
+    expect((f.handler as any).scheduleCatalogPending).toBe(false);
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); f.handler.endAutomaticUpdate();
+    await f.send('/clear', 'thread-b');
+    expect(f.pool.clearThreadContext).toHaveBeenCalled();
+    expect(f.scheduledResults()).toEqual([]);
     expect(native.create).toHaveBeenCalledOnce();
   });
 
-  it('blocks foreground input throughout recovery inventory validation', async () => {
-    let finish!: (present: boolean) => void;
-    const inventory = new Promise<boolean>(resolve => { finish = resolve; });
-    let entered!: () => void;
-    const inventoryEntered = new Promise<void>(resolve => { entered = resolve; });
-    const reconcile = vi.fn(async () => {
-      entered();
-      return { ...f.jobs[0].handle, list: () => inventory };
-    });
-    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-v1', strategy: 'reattach',
-      describe: () => 'original-fixture-session', reconcile } });
+  it('keeps a completed outbox with an older Router and delivers only after capability negotiation', async () => {
     await f.bind(); await f.send('/schedule after 5m -- Synthetic reminder');
-    Object.assign(f.jobs[0].handle, { releaseForRestart: async () => {} });
-    await f.restart(); await f.reconnect();
-    const recovery = (f.handler as any).recoverSchedules() as Promise<void>;
-    try {
-      await Promise.race([inventoryEntered, recovery.then(() => {
-        throw new Error('Recovery completed without entering native inventory.');
-      })]);
-      expect(reconcile).toHaveBeenCalledOnce();
-      await f.send('Must not start before inventory', 'thread-a', { isSlashCommand: false });
-      expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('recovery is unresolved') });
-      expect(f.executor.execute).not.toHaveBeenCalled();
-    } finally {
-      finish(true);
-      await recovery;
-    }
-    await f.send('Synthetic new foreground', 'thread-a', { isSlashCommand: false }); expect(f.executor.execute).toHaveBeenCalledOnce();
+    f.disconnect(); f.jobs[0].emit({ type: 'completed', occurrenceId: 'done', success: true, output: 'Synthetic saved result' });
+    await vi.waitFor(() => expect(f.jobs[0].handle.stop).toHaveBeenCalled());
+    await f.restart(); await f.handler.prepareScheduleStartup();
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {} } } as any);
+    await (f.handler as any).loadScheduleCatalog();
+    expect((f.handler as any).scheduleCatalogPending).toBe(false);
+    expect((f.handler as any).schedules.hasPendingResults()).toBe(true);
+    expect(f.scheduledResults()).toEqual([]);
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
+    expect(f.scheduledResults()).toHaveLength(1);
+    expect((f.handler as any).schedules.hasPendingResults()).toBe(false);
+    expect(native.create).toHaveBeenCalledOnce();
   });
 
   it('startup inventory check leaves users without catalogs dormant and update-eligible', async () => {
@@ -1535,7 +1434,7 @@ describe('MessageHandler native schedule closed loop', () => {
     await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
     expect(f.scheduledResults()[0]).toMatchObject({ output: 'Persisted result', openId: 'owner', threadId: 'thread-a' });
     await f.reconnect();
-    await (f.handler as any).recoverSchedules();
+    await (f.handler as any).loadScheduleCatalog();
     expect(f.scheduledResults()).toHaveLength(1);
     expect(f.acknowledgements.size).toBe(1);
     expect(native.create).toHaveBeenCalledOnce();
@@ -1555,10 +1454,10 @@ describe('MessageHandler native schedule closed loop', () => {
       job.emit({ type: 'stopped', exitConfirmed: true, reason: 'Shutdown completed' });
     });
     await f.restart();
-    expect(job.handle.stop).toHaveBeenCalledOnce();
+    expect(job.handle.stop).not.toHaveBeenCalled();
     expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1);
     expect(f.scheduledResults()).toHaveLength(0);
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     await f.reconnect();
     expect(recover).toHaveBeenCalledOnce();
     // A wire response precedes durable ACK settlement. Join recovery before
@@ -1568,7 +1467,7 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.scheduledResults()[0]).toMatchObject({ output: 'Retained across shutdown', threadId: 'thread-a' });
     expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toEqual([]);
     await f.reconnect();
-    await (f.handler as any).recoverSchedules();
+    await (f.handler as any).loadScheduleCatalog();
     expect(f.scheduledResults()).toHaveLength(1);
     expect(f.jobs).toHaveLength(1);
   });
@@ -1578,7 +1477,7 @@ describe('MessageHandler native schedule closed loop', () => {
     await mkdir(directory, { recursive: true });
     const catalog = path.join(directory, SCHEDULE_CATALOG_FILE);
     await writeFile(catalog, 'invalid catalog');
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     await f.bind();
     await Promise.allSettled(recover.mock.results.map(result => result.value));
     await vi.waitFor(() => expect(console.warn).toHaveBeenCalledOnce());
@@ -1605,7 +1504,7 @@ describe('MessageHandler native schedule closed loop', () => {
       if (String(args[0]).endsWith(SCHEDULE_CATALOG_FILE)) { await gate; return {} as any; }
       return lstat(...args);
     }) as typeof fs.promises.lstat);
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     const initialize = vi.spyOn(ScheduleService.prototype, 'initialize');
     await f.bind();
     await f.send('Synthetic greeting', 'thread-a', { isSlashCommand: false });
@@ -1631,7 +1530,7 @@ describe('MessageHandler native schedule closed loop', () => {
       await gate;
       return initializeService.call(this);
     });
-    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
+    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
     await f.bind();
     await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
     const creating = f.send('/schedule after 2m -- Return a synthetic summary');

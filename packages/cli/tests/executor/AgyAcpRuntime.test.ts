@@ -103,14 +103,63 @@ const input = () => ({ backend: 'agy' as const, threadId: 'synthetic-thread', id
 const make = () => createExecutor(new DirectoryGuard([cwd]), { type: 'agy', agy: { model: 'synthetic-model' } }, cwd, 'synthetic-thread', undefined, 'high') as AgyExecutor;
 beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
-  native.home = home;
+  native.home = home; vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
   native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
   native.restore.mockClear(); native.configure.mockClear(); native.bind.mockClear();
   executor = make();
 });
-afterEach(async () => { native.exitConfirmed = true; await executor.destroy(); await fs.rm(home, { recursive: true, force: true }); vi.restoreAllMocks(); });
+afterEach(async () => { native.exitConfirmed = true; await executor.destroy(); await fs.rm(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  it.each([false, true])('refuses saved no-journal ACP chat but explicit clear preserves old history and erasure fences (retired=%s)', async retired => {
+    await executor.execute('hello'); await executor.destroy();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    const original = { id: 'synthetic-old-session', transport: 'acp', retired };
+    await fs.writeFile(pointer, JSON.stringify(original));
+    if (retired) await fs.writeFile(pointer + '.checkpoint', 'Legacy diagnostic evidence');
+    const history = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread', 'history.fixture');
+    await fs.writeFile(history, 'Original native history');
+    executor = make(); const count = native.clients.length;
+    await expect(executor.execute('unsafe resume')).rejects.toThrow('cannot safely resume');
+    await expect(executor.compactWhenFull()).rejects.toThrow('explicit /clear');
+    await expect(executor.deleteThreadData('synthetic-thread')).rejects.toThrow('unconfirmed');
+    expect(native.clients).toHaveLength(count);
+    await executor.resetContext(); expect(executor.getSessionId()).toBeNull();
+    expect(await fs.readFile(history, 'utf8')).toBe('Original native history');
+    const archive = pointer + '.detached-acp';
+    const files = await fs.readdir(archive); expect(files).toHaveLength(1);
+    expect(JSON.parse(await fs.readFile(path.join(archive, files[0]), 'utf8'))).toEqual({ session: original, retirement: 'unconfirmed', ...(retired ? { legacyCheckpoint: 'Legacy diagnostic evidence' } : {}) });
+    await executor.destroy(); executor = make();
+    await executor.execute('fresh chat'); expect(native.clients).toHaveLength(count + 1);
+    expect(executor.getSessionId()).not.toBe(original.id);
+    await expect(executor.deleteThreadData('synthetic-thread')).rejects.toThrow('Detached');
+    expect(await fs.readFile(history, 'utf8')).toBe('Original native history');
+  });
+
+  it('leaves the selected ACP pointer intact if explicit-detach evidence cannot be saved', async () => {
+    await executor.execute('hello'); await executor.destroy(); executor = make();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    const original = await fs.readFile(pointer, 'utf8');
+    await fs.writeFile(pointer + '.detached-acp', 'Synthetic storage obstruction');
+    await expect(executor.resetContext()).rejects.toThrow();
+    expect(await fs.readFile(pointer, 'utf8')).toBe(original);
+    await expect(executor.execute('unsafe resume')).rejects.toThrow('cannot safely resume');
+    expect(native.clients).toHaveLength(1);
+  });
+
+  it('keeps explicit ACP clear fenced by a checkpoint transition or retained schedule owner', async () => {
+    await executor.execute('hello'); await executor.destroy(); executor = make();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    await fs.writeFile(pointer + '.checkpoint.lock', 'synthetic lock');
+    await expect(executor.resetContext()).rejects.toThrow('checkpoint transition');
+    await fs.unlink(pointer + '.checkpoint.lock');
+    await fs.writeFile(pointer + '.native-schedules', JSON.stringify({ sessionId: 'synthetic-session', hostId: 'synthetic-host', retired: false }));
+    await executor.destroy(); executor = make();
+    await expect(executor.resetContext()).rejects.toThrow('unconfirmed');
+    expect(executor.getSessionId()).toBe('synthetic-session');
+    expect(native.clients).toHaveLength(1);
+  });
+
   it('keeps factory/chat/schedule on the same original host, retaining settings and private HOME', async () => {
     const stream = vi.fn(), display = vi.fn();
     expect(native.clients).toHaveLength(0);
@@ -138,11 +187,13 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
     const work = executor.withNativeScheduleOperation('op', () => true, () => executor.createNativeSchedule(input(), () => {}), true);
     await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('manage_task'));
+    expect(executor.hasPendingScheduleMutation()).toBe(true);
     expect(executor.nativeScheduleAction('wrong')).toBeUndefined();
     last().tool(executor.nativeScheduleAction('op'));
     await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('schedule'));
     last().tool(executor.nativeScheduleAction('op'));
     const handle = await work;
+    expect(executor.hasPendingScheduleMutation()).toBe(false);
     expect(handle.nativeId).toBeTruthy(); expect(last().prompts).toEqual(['hold']);
     last().finish('Creation acknowledged'); last().release({ stopReason: 'end_turn' }); await foreground;
   });
@@ -166,104 +217,25 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await executor.destroy();
     expect(events.at(-1)).toMatchObject({ type: 'stopped', exitConfirmed: true });
     executor = make();
-    await expect(executor.execute('resume')).rejects.toThrow('unresolved queue');
+    await expect(executor.execute('resume')).rejects.toThrow('unconfirmed');
     expect(native.clients).toHaveLength(1);
   });
-  it('continues never-fired native schedules after confirmed cancellation in the exact original conversation', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const events: any[] = []; const handle = await executor.createNativeSchedule(input(), event => events.push(event));
-    const old = last(), original = executor.getSessionId(), nativeId = handle.nativeId;
-    const foreground = executor.execute('hold'); await vi.waitFor(() => expect(old.release).toBeTypeOf('function'));
-    expect(await executor.abort()).toBe(true); await foreground;
-    expect(old.closed).toBe(true); expect(native.clients).toHaveLength(2);
-    expect(executor.getSessionId()).toBe(original); expect(handle.nativeId).not.toBe(nativeId);
-    expect(events).toEqual([{ type: 'rebound', previousNativeId: nativeId, nativeId: handle.nativeId }]);
-    expect(executor.hasPendingCancellation()).toBe(false);
-    expect(executor.abortStatusMessage()).toContain('resumed automatically');
-    expect(last().prompts).toHaveLength(2); // real inventory and create only, no nudge
-    expect(await executor.abort()).toBe(false);
-    expect(executor.abortStatusMessage()).toContain('No foreground command');
-    expect(native.clients).toHaveLength(2);
-  });
-  it('does not report successful continuation before durable native rebinding succeeds', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    await executor.createNativeSchedule(input(), async event => {
-      if (event.type === 'rebound') throw new Error('Synthetic catalog write failure');
-    });
-    const old = last(), foreground = executor.execute('hold');
-    await vi.waitFor(() => expect(old.release).toBeTypeOf('function'));
-    await executor.abort(); await foreground;
-    expect(native.clients).toHaveLength(2);
-    expect(executor.hasPendingCancellation()).toBe(true);
-    expect(executor.abortStatusMessage()).not.toContain('resumed automatically');
-  });
-  it('keeps a missing cancellation terminal dirty instead of consuming recovery proof', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    await executor.createNativeSchedule(input(), () => {});
-    const old = last(), foreground = executor.execute('hold').catch(error => error);
-    await vi.waitFor(() => expect(old.release).toBeTypeOf('function'));
-    old.sendCancel = () => { old.token = undefined; };
-    (executor as any).acp.host.cancelTimeoutMs = 15;
-    await executor.abort(); expect(await foreground).toBeInstanceOf(Error);
-    expect(native.clients).toHaveLength(1); expect(executor.hasPendingCancellation()).toBe(true);
-    expect(JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.checkpoint'), 'utf8')).state).toBe('prepared');
-  });
-  it('does not reconstruct if group retirement or the cancellation terminal is unconfirmed', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    await executor.createNativeSchedule(input(), () => {});
-    const old = last(), foreground = executor.execute('hold');
-    await vi.waitFor(() => expect(old.release).toBeTypeOf('function'));
-    native.exitConfirmed = false;
-    await executor.abort(); await foreground;
-    expect(native.clients).toHaveLength(1); expect(executor.hasPendingCancellation()).toBe(true);
-    const file = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.checkpoint');
-    expect(JSON.parse(await fs.readFile(file, 'utf8')).state).toBe('prepared');
-  });
-  it('recovers a shared orderly checkpoint once and preserves sibling definitions', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const recovery = executor.nativeScheduleRecovery!;
-    const checkpoint = { provider: recovery.provider, strategy: recovery.strategy, identity: recovery.describe!(input()), status: 'eligible' as const };
-    const a = await executor.createNativeSchedule({ ...input(), recovery: checkpoint }, () => {});
-    const b = await executor.createNativeSchedule({ ...input(), id: 'job-b', recovery: checkpoint }, () => {});
-    const original = executor.getSessionId();
-    await Promise.all([a.releaseForRestart!(), b.releaseForRestart!()]); await recovery.finishRestart!();
-    await executor.destroy(); executor = make();
-    const context = { notBefore: Date.now(), signal: new AbortController().signal, isCurrent: () => true };
-    const record = { ...input(), openId: 'synthetic-owner', generation: 'epoch', createdAt: 0, state: 'interrupted' as const,
-      execution: { model: input().model, effort: input().effort }, recovery: { ...checkpoint, identity: a.recoveryIdentity!, handoff: 'clean' as const } };
-    const restored = await executor.nativeScheduleRecovery!.reconcile(record, context, () => {});
-    const sibling = await executor.nativeScheduleRecovery!.reconcile({ ...record, id: 'job-b' }, context, () => {});
-    expect(executor.getSessionId()).toBe(original); expect(last().tasks.size).toBe(2);
-    expect(restored.nativeId).not.toBe(sibling.nativeId);
-    await expect(executor.nativeScheduleRecovery!.reconcile(record, context, () => {})).rejects.toThrow('proof');
-  });
-  it('allows a later orderly retry after refusing a still-active foreground before mutation', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
+  it('never reconstructs scheduled ACP work or produces an exit checkpoint', async () => {
     const handle = await executor.createNativeSchedule(input(), () => {});
-    const old = last(), foreground = executor.execute('hold');
-    await vi.waitFor(() => expect(old.release).toBeTypeOf('function'));
-    await expect(handle.releaseForRestart!()).rejects.toThrow('busy');
-    old.finish(); old.release({ stopReason: 'end_turn' }); await foreground;
-    await expect(handle.releaseForRestart!()).resolves.toEqual({ nativeDefinitionAbsent: true });
-    expect(old.closed).toBe(true);
+    const original = executor.getSessionId(), old = last(), prompts = [...old.prompts];
+    await executor.destroy();
+    expect(old.prompts).toEqual(prompts);
+    await expect(fs.stat(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.checkpoint'))).rejects.toMatchObject({ code: 'ENOENT' });
+    executor = make();
+    await expect(executor.execute('must not replay')).rejects.toThrow('cannot safely resume');
+    expect(executor.getSessionId()).toBe(original); expect(native.clients).toHaveLength(1);
   });
-  it('restores ordinary ACP context after every task was proved cancelled before its first wake', async () => {
+  it('keeps cancelled original ACP history without claiming automatic resume safety', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const handle = await executor.createNativeSchedule(input(), () => {});
-    await handle.cancel(); expect(handle.retirementConfirmed).toBe(true);
+    const handle = await executor.createNativeSchedule(input(), () => {}); await handle.cancel();
     const original = executor.getSessionId(); await executor.destroy(); executor = make();
-    await executor.execute('continue after cancelled tasks');
-    expect(executor.getSessionId()).toBe(original); expect(native.clients).toHaveLength(2);
-    await expect(fs.stat(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.native-schedules'))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-  it('migrates a saved checkpointed no-job ACP conversation without a new session or model nudge', async () => {
-    await executor.execute('remember synthetic context'); const original = executor.getSessionId();
-    await executor.destroy(); executor = make();
-    const pending = executor.execute('continue original context'); await pending;
-    expect(executor.getSessionId()).toBe(original);
-    expect(last().rows.some((row: TranscriptRecord) => row.content === 'Synthetic result')).toBe(true);
-    expect(last().prompts).toEqual(['continue original context']);
-    expect(native.clients).toHaveLength(2);
+    await expect(executor.execute('must not assume native hook safety')).rejects.toThrow('cannot safely resume');
+    expect(executor.getSessionId()).toBe(original); expect(native.clients).toHaveLength(1);
   });
   it('preserves ordinary chat abort compatibility when no schedules have ever been created', async () => {
     const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
@@ -311,6 +283,75 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(last().closed).toBe(true); expect(last().prompts).toEqual([]);
     expect(executor.getSessionId()).toBeNull(); expect(native.restore).toHaveBeenCalledOnce();
   });
+  it.each(['delete', 'reset', 'directory'] as const)('joins the owned host before %s after cancellation before the first wake', async operation => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
+    const handle = await executor.createNativeSchedule(input(), () => {});
+    await handle.cancel();
+    expect(handle.nativeDefinitionAbsent).toBe(true); expect(handle.retirementConfirmed).toBe(true);
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    const privateHome = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread');
+    const nextDirectory = path.join(cwd, 'next'); await fs.mkdir(nextDirectory);
+    let entered!: () => void, release!: () => void;
+    const joining = new Promise<void>(resolve => { entered = resolve; });
+    const exit = new Promise<void>(resolve => { release = resolve; });
+    last().waitForManagedProcessGroupExit = async () => { entered(); await exit; };
+    const run = operation === 'delete' ? executor.deleteThreadData('synthetic-thread')
+      : operation === 'reset' ? executor.resetContext() : executor.setWorkingDirectory(nextDirectory);
+    try {
+      await joining;
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8')).id).toBe('synthetic-session');
+      expect(JSON.parse(await fs.readFile(pointer + '.native-schedules', 'utf8')).retired).toBe(false);
+      expect((await fs.stat(privateHome)).isDirectory()).toBe(true);
+      expect(executor.getCurrentWorkingDirectory()).toBe(cwd);
+    } finally { release(); await run; }
+    expect(native.restore).toHaveBeenCalledOnce();
+    expect(executor.getSessionId()).toBeNull();
+    await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(pointer + '.native-schedules')).rejects.toMatchObject({ code: 'ENOENT' });
+    if (operation === 'directory') expect(executor.getCurrentWorkingDirectory()).toBe(nextDirectory);
+    if (operation === 'delete') {
+      await expect(fs.stat(privateHome)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(executor.deleteThreadData('synthetic-thread')).resolves.toBeUndefined();
+    }
+  });
+
+  it.each(['delete', 'reset'] as const)('rechecks a checkpoint fence acquired during owned retirement before %s erases data', async operation => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
+    const handle = await executor.createNativeSchedule(input(), () => {}); await handle.cancel();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    last().waitForManagedProcessGroupExit = async () => { await fs.mkdir(pointer + '.checkpoint.lock'); };
+    try {
+      await expect(operation === 'delete' ? executor.deleteThreadData('synthetic-thread') : executor.resetContext()).rejects.toThrow('checkpoint transition');
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8')).id).toBe('synthetic-session');
+      expect(JSON.parse(await fs.readFile(pointer + '.native-schedules', 'utf8')).retired).toBe(true);
+      expect((await fs.stat(path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread'))).isDirectory()).toBe(true);
+    } finally { await fs.rm(pointer + '.checkpoint.lock', { recursive: true, force: true }); }
+  });
+
+  it.each(['lock', 'foreign-owner', 'unknown-host', 'live-sibling', 'unconfirmed-exit'] as const)(
+    'preserves AGY context deletion evidence for %s', async fault => {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
+      const handle = await executor.createNativeSchedule(input(), () => {});
+      await handle.cancel();
+      const raw = executor as any, runtime = raw.acp, owner = { ...raw.scheduleOwner };
+      const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+      if (fault === 'lock') await fs.mkdir(pointer + '.checkpoint.lock');
+      if (fault === 'foreign-owner') raw.scheduleOwner.sessionId = 'other-session';
+      if (fault === 'unknown-host') raw.acp = undefined;
+      if (fault === 'live-sibling') await executor.createNativeSchedule({ ...input(), id: 'sibling' }, () => {});
+      if (fault === 'unconfirmed-exit') native.exitConfirmed = false;
+      try {
+        await expect(executor.deleteThreadData('synthetic-thread')).rejects.toThrow();
+        expect(JSON.parse(await fs.readFile(pointer, 'utf8')).id).toBe('synthetic-session');
+        expect(JSON.parse(await fs.readFile(pointer + '.native-schedules', 'utf8')).retired).toBe(false);
+        expect(native.restore).not.toHaveBeenCalled();
+        if (fault !== 'unconfirmed-exit') expect(last().closed).toBe(false);
+      } finally {
+        await fs.rm(pointer + '.checkpoint.lock', { recursive: true, force: true });
+        raw.acp = runtime; raw.scheduleOwner = owner; native.exitConfirmed = true;
+      }
+    });
+
   it('permits explicit fresh-context reset only after exact group retirement, never a scheduled resume', async () => {
     await executor.createNativeSchedule(input(), () => {});
     await expect(executor.resetContext()).rejects.toThrow('unresolved ownership');
@@ -332,15 +373,27 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(executor.withNativeScheduleOperation('op', () => false, () => executor.createNativeSchedule(input(), () => {}), false)).rejects.toThrow();
     expect(last().prompts).toEqual([]);
     await executor.destroy(); executor = make();
-    await expect(executor.withNativeScheduleOperation('op', () => true, async () => {}, false)).resolves.toBeUndefined();
+    await expect(executor.withNativeScheduleOperation('op', () => true, async () => {}, false)).rejects.toThrow('fresh ACP');
     expect(last().session).toBe('synthetic-session');
   });
   it('refuses a saved ACP host with unknown retirement even without a schedule catalog', async () => {
     await executor.execute('hello');
     const replacement = make();
     await expect(replacement.execute('must not resume')).rejects.toThrow('unconfirmed');
-    await expect(replacement.resetContext()).rejects.toThrow('unconfirmed');
+    await replacement.resetContext();
+    await expect(replacement.deleteThreadData('synthetic-thread')).rejects.toThrow('Detached');
     await replacement.destroy(); expect(native.clients).toHaveLength(1);
+  });
+  it('never turns normal close or a legacy retired flag into successor chat permission', async () => {
+    await executor.execute('hello');
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    const original = await fs.readFile(pointer, 'utf8');
+    await executor.destroy(); expect(await fs.readFile(pointer, 'utf8')).toBe(original);
+    const legacy = JSON.parse(original); legacy.retired = true;
+    await fs.writeFile(pointer, JSON.stringify(legacy));
+    executor = make();
+    await expect(executor.execute('resume')).rejects.toThrow('unconfirmed');
+    expect(native.clients).toHaveLength(1); expect(executor.getSessionId()).toBe(legacy.id);
   });
   it('refuses stale or malformed journal data before starting a native process', async () => {
     await executor.destroy();

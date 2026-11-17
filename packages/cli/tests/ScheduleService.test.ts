@@ -30,7 +30,7 @@ class Provider implements NativeScheduleProvider {
   events = new Map<string, (event: NativeScheduleEvent) => void>();
   handles = new Map<string, NativeScheduleHandle>();
   admissions = new Map<string, () => boolean>();
-  recoveryFor?: NativeScheduleProvider['recoveryFor'];
+  cleanupFor?: NativeScheduleProvider['cleanupFor'];
   beforeResolve?: (id: string, event: (event: NativeScheduleEvent) => void) => Promise<void>;
   create = vi.fn(async (input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, canAdmitOccurrence?: () => boolean) => {
     this.events.set(input.id, onEvent);
@@ -72,6 +72,7 @@ describe('ScheduleService', () => {
   beforeEach(async () => {
     directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'schedule-service-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    vi.stubEnv('HOME', directory); vi.stubEnv('USERPROFILE', directory);
     provider = new Provider();
     deliver = vi.fn(async (_delivery: ScheduleDelivery) => {});
     current = vi.fn(() => true);
@@ -82,8 +83,48 @@ describe('ScheduleService', () => {
   });
   afterEach(async () => {
     await Promise.allSettled(services.map(service => service.destroy()));
-    vi.restoreAllMocks();
+    vi.restoreAllMocks(); vi.unstubAllEnvs();
     await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it.each([false, true])('saves a late CREATE cleanup identity while destruction never waits for native work (failure=%s)', async failure => {
+    provider.cleanupFor = () => ({ provider: 'fixture', strategy: 'reattach', describe: () => 'pending' });
+    const gate = deferred<void>();
+    provider.beforeResolve = async () => {
+      await gate.promise;
+      const handle = provider.handles.get('late')!;
+      Object.assign(handle, { cleanupIdentity: 'original-session' });
+      if (failure) throw new NativeScheduleCleanupError('Ambiguous native creation', handle);
+    };
+    const service = make(); await service.initialize();
+    const pending = service.create(owner, input('late'));
+    const result = pending.catch(error => error);
+    await vi.waitFor(() => expect(provider.handles.has('late')).toBe(true));
+    await service.destroy();
+    expect(provider.admissions.get('late')!()).toBe(false);
+    await expect(make().initialize()).rejects.toThrow('owns the schedule catalog');
+    gate.resolve(); await result;
+    expect((await read()).records[0]).toMatchObject({ state: 'creating', nativeId: 'native-late', recovery: { identity: 'original-session' } });
+    const next = make(); await next.initialize();
+    expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', nativeId: 'native-late' });
+    expect(provider.create).toHaveBeenCalledOnce();
+    expect(provider.handles.get('late')!.stop).not.toHaveBeenCalled();
+    expect(provider.handles.get('late')!.cancel).not.toHaveBeenCalled();
+  });
+
+  it('persists original-session attribution before CREATE and refuses late attribution after destruction', async () => {
+    provider.cleanupFor = () => ({ provider: 'fixture', strategy: 'reattach', describe: () => 'pending' });
+    provider.beforeResolve = async (_id, emit) => {
+      await emit({ type: 'attributed', cleanupIdentity: 'original-session' });
+      expect((await read()).records[0].recovery.identity).toBe('original-session');
+      throw new Error('Ambiguous CREATE failure');
+    };
+    const service = make(); await service.initialize();
+    await expect(service.create(owner, input())).rejects.toThrow('Ambiguous CREATE');
+    expect((await read()).records[0]).toMatchObject({ state: 'failed', recovery: { identity: 'original-session' } });
+    await service.destroy();
+    await expect(provider.events.get('schedule-a')!({ type: 'attributed', cleanupIdentity: 'late' })).rejects.toThrow('closed');
+    expect((await read()).records[0].recovery.identity).toBe('original-session');
   });
 
   it('compacts refused creation while preserving failed tool receipts and restart replay denial', async () => {
@@ -115,14 +156,12 @@ describe('ScheduleService', () => {
     expect(provider.create).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['generic', 'ambiguous', 'started', 'skipped'] as const)('retains %s evidence instead of compacting creation', async kind => {
-    if (kind === 'skipped') provider.recoveryFor = () => ({ provider: 'synthetic', strategy: 'reconstruct', handoffPolicy: 'skip-unadmitted',
-      describe: () => 'synthetic-identity', reconcile: vi.fn() });
+  it.each(['generic', 'ambiguous', 'started', 'completed'] as const)('retains %s evidence instead of compacting creation', async kind => {
     const service = make(); await service.initialize();
     const handle = { nativeId: 'uncertain-native', list: vi.fn(async () => true), cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     provider.create.mockImplementationOnce(async (_input, emit) => {
       if (kind === 'started') emit({ type: 'started', occurrenceId: 'observed' });
-      if (kind === 'skipped') emit({ type: 'skipped', occurrenceId: 'observed', reason: 'Synthetic skipped wake' });
+      if (kind === 'completed') emit({ type: 'completed', occurrenceId: 'observed', success: false, error: 'Synthetic failed wake' });
       if (kind === 'ambiguous') throw new NativeScheduleCleanupError('Synthetic ambiguous mutation', handle);
       if (kind === 'generic') throw new Error('Synthetic missing receipt');
       throw new NativeScheduleNotAdmittedError('Contradicted refusal');
@@ -139,7 +178,7 @@ describe('ScheduleService', () => {
 
   it('preserves a sibling outbox and ACK while removing only the refused attempt', async () => {
     const ack = deferred<void>(); deliver.mockImplementationOnce(() => ack.promise);
-    const service = make({ deferDelivery: true }); await service.initialize();
+    const service = make(); await service.initialize();
     await service.create(owner, input('sibling', true));
     provider.emit('sibling', { type: 'started', occurrenceId: 'sibling-result' });
     complete('sibling', 'sibling-result');
@@ -226,23 +265,6 @@ describe('ScheduleService', () => {
     await expect(service.create(owner, input())).rejects.toThrow('Refused');
     expect((await service.list(owner))[0].creationRefused).toBe(true);
     expect((await read()).purged).toEqual([]);
-  });
-
-  it('persists a native definition rebound before delivering the next occurrence', async () => {
-    const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
-    const handle = provider.handles.get('schedule-a')!;
-    Object.defineProperty(handle, 'nativeId', { value: 'native-successor', configurable: true });
-    provider.emit('schedule-a', { type: 'rebound', previousNativeId: 'native-schedule-a', nativeId: 'native-successor' });
-    provider.emit('schedule-a', { type: 'started', occurrenceId: 'successor-occurrence' });
-    complete('schedule-a', 'successor-occurrence'); await settled(service);
-    expect((await read()).records[0].nativeId).toBe('native-successor');
-    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ schedule: expect.objectContaining({ nativeId: 'native-successor' }), occurrenceId: 'successor-occurrence' }));
-  });
-
-  it('rejects rebound identity mismatches without changing the durable record', async () => {
-    const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
-    await expect((service as any).onEvent('schedule-a', { type: 'rebound', previousNativeId: 'foreign', nativeId: 'foreign-new' })).rejects.toThrow('ownership');
-    expect((await read()).records[0].nativeId).toBe('native-schedule-a');
   });
 
   it('rejects a second catalog writer before reading or overwriting cancellation intent', async () => {
@@ -344,8 +366,8 @@ describe('ScheduleService', () => {
 
   it.each(['Native inventory read failed', 'Native receipt timed out', 'Native ownership mismatch'])(
     'preserves active work, recovery metadata and admission after %s', async detail => {
-      provider.recoveryFor = () => ({ provider: 'synthetic-recovery', strategy: 'reattach',
-        describe: () => 'synthetic-session-identity', reconcile: vi.fn(async () => { throw new Error('Unexpected recovery'); }) });
+      provider.cleanupFor = () => ({ provider: 'synthetic-recovery', strategy: 'reattach',
+        describe: () => 'synthetic-session-identity' });
       const service = make(); await service.initialize();
       await service.create(owner, input('schedule-a', true)); await service.create(owner, input('sibling', true));
       await service.retainCleanupError(owner, 'schedule-a', new Error('Earlier cleanup remains unverified'));
@@ -354,7 +376,7 @@ describe('ScheduleService', () => {
       vi.mocked(handle.list).mockRejectedValueOnce(new Error(detail));
       await expect(service.refresh(owner)).rejects.toThrow(`Native inventory could not be verified for schedule-a: ${detail}`);
       expect(await read()).toEqual(before);
-      expect((await service.list(owner))[0]).toMatchObject({ state: 'active', recovery: { status: 'eligible' } });
+      expect((await service.list(owner))[0]).toMatchObject({ state: 'active', recovery: { status: 'blocked' } });
       expect(service.hasActiveSchedules(owner.threadId)).toBe(true);
       expect(provider.admissions.get('schedule-a')!()).toBe(true);
       // One uncertain definition must not stop observation or admission of its siblings.
@@ -399,8 +421,8 @@ describe('ScheduleService', () => {
   });
 
   it('preserves reviewed cleanup, cancellation and recovery fences without native reads', async () => {
-    provider.recoveryFor = () => ({ provider: 'synthetic-recovery', strategy: 'reattach',
-      describe: () => 'synthetic-session-identity', reconcile: vi.fn(async () => { throw new Error('Unexpected recovery'); }) });
+    provider.cleanupFor = () => ({ provider: 'synthetic-recovery', strategy: 'reattach',
+      describe: () => 'synthetic-session-identity' });
     const service = make(); await service.initialize();
     await service.create(owner, input('reviewed', true)); await service.create(owner, input('cancelled', true));
     await service.recordReviewedCleanup(owner, ['reviewed'], false);
@@ -496,26 +518,6 @@ describe('ScheduleService', () => {
     } finally { gate.resolve(true); await refresh; }
   });
 
-  it('does not apply an old absence result to a rebound native definition', async () => {
-    const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
-    const handle = provider.handles.get('schedule-a')!;
-    const entered = deferred<void>(), gate = deferred<boolean>();
-    vi.mocked(handle.list).mockImplementation(async () => { entered.resolve(); return gate.promise; });
-    const refresh = service.refresh(owner);
-    try {
-      await entered.promise;
-      Object.defineProperty(handle, 'nativeId', { value: 'native-successor', configurable: true });
-      provider.emit('schedule-a', { type: 'rebound', previousNativeId: 'native-schedule-a', nativeId: 'native-successor' });
-      await service.list(owner);
-      const before = await read();
-      gate.resolve(false); await refresh;
-      expect(await read()).toEqual(before);
-      expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nativeId: 'native-successor' });
-      expect(provider.admissions.get('schedule-a')!()).toBe(true);
-      expect(handle.cancel).not.toHaveBeenCalled(); expect(handle.stop).not.toHaveBeenCalled();
-    } finally { gate.resolve(true); await refresh; }
-  });
-
   it.each([false, true])('ignores late inventory results after ownership changes (readFailed=%s)', async readFailed => {
     const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
     const handle = provider.handles.get('schedule-a')!;
@@ -586,7 +588,7 @@ describe('ScheduleService', () => {
     await service.list(owner);
   });
 
-  it.each([true, false])('preserves shutdown outbox only for a current owner (%s)', async ownerCurrent => {
+  it.each([true, false])('preserves outbox at abrupt shutdown and validates its owner at startup (%s)', async ownerCurrent => {
     deliver.mockRejectedValue(new Error('Disconnected'));
     const service = make(); await service.initialize();
     await service.create(owner, input('recurring', true));
@@ -598,8 +600,8 @@ describe('ScheduleService', () => {
     });
     current.mockReturnValue(ownerCurrent);
     await service.destroy();
-    expect((await read()).pending).toHaveLength(ownerCurrent ? 1 : 0);
-    expect((await read()).records[0].state).toBe('interrupted');
+    expect((await read()).pending).toHaveLength(1);
+    expect((await read()).records[0].state).toBe('active');
     deliver.mockClear().mockResolvedValue(undefined);
     const restored = make(); await restored.initialize();
     await restored.retryDeliveries();
@@ -886,7 +888,7 @@ describe('ScheduleService', () => {
     await restarted.initialize();
     expect(restartedProvider.create).not.toHaveBeenCalled(); expect(deliver).toHaveBeenCalledTimes(1);
     expect((await restarted.list(owner)).map(record => record.state)).toEqual(['completed', 'interrupted', 'cancelled']);
-    expect((await restarted.list(owner))[1].error).toContain('not recreated');
+    expect((await restarted.list(owner))[1].error).toContain('not recreated or resumed');
     deliver.mockResolvedValue(undefined); await restarted.retryDeliveries(); await restarted.retryDeliveries();
     expect(deliver).toHaveBeenCalledTimes(2);
     expect((await read()).pending).toEqual([]);
@@ -1126,38 +1128,24 @@ describe('ScheduleService', () => {
     await vi.waitFor(() => expect(provider.handles.get('schedule-a')!.stop).toHaveBeenCalledTimes(1));
   });
 
-  it('waits for delayed handles on destroy and never creates replacement schedules', async () => {
+  it('does not wait for a native CREATE receipt or call native cleanup at shutdown', async () => {
     const gate = deferred<void>(); provider.beforeResolve = () => gate.promise;
     const service = make(); await service.initialize(); const creation = service.create(owner, input());
-    await vi.waitFor(() => expect(provider.create).toHaveBeenCalledTimes(1));
-    const destruction = service.destroy(); gate.resolve();
-    let creationSettled = false;
-    void creation.then(() => { creationSettled = true; });
-    await destruction;
-    expect(creationSettled).toBe(true);
-    await creation;
-    expect((await read()).records[0].state).toBe('interrupted');
-    expect(provider.create).toHaveBeenCalledTimes(1); expect(provider.handles.get('schedule-a')!.stop).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(provider.create).toHaveBeenCalledOnce());
+    await service.destroy();
+    expect((await read()).records[0].state).toBe('creating');
+    gate.resolve(); await creation;
+    expect((await read()).records[0].state).toBe('creating');
+    expect(provider.handles.get('schedule-a')!.stop).not.toHaveBeenCalled();
     await expect(service.create(owner, input('schedule-b'))).rejects.toThrow('closed');
   });
-
-  it('retries failed shutdown cleanup while keeping admission closed and successful siblings stopped', async () => {
+  it('never invokes native shutdown cleanup even when it would reject, retaining sibling evidence', async () => {
     const service = make(); await service.initialize();
     await service.create(owner, input()); await service.create(other, input('schedule-b', true));
-    const handle = provider.handles.get('schedule-a')!;
-    const sibling = provider.handles.get('schedule-b')!;
-    vi.mocked(handle.stop).mockRejectedValueOnce(new Error('Exit not confirmed'));
-    const first = service.destroy();
-    expect(service.destroy()).toBe(first);
-    await expect(first).rejects.toThrow('Exit not confirmed');
-    expect(service.hasActiveSchedules(owner.threadId)).toBe(true);
+    for (const handle of provider.handles.values()) vi.mocked(handle.stop).mockRejectedValue(new Error('Unconfirmed native exit'));
+    const before = await read(); await service.destroy(); await service.destroy();
+    expect(await read()).toEqual(before);
+    for (const handle of provider.handles.values()) expect(handle.stop).not.toHaveBeenCalled();
     await expect(service.create(owner, input('schedule-c'))).rejects.toThrow('closed');
-    await expect(service.destroy()).resolves.toBeUndefined();
-    expect(handle.stop).toHaveBeenCalledTimes(2);
-    expect(sibling.stop).toHaveBeenCalledOnce();
-    expect(service.hasActiveSchedules()).toBe(false);
-    await service.destroy();
-    expect(handle.stop).toHaveBeenCalledTimes(2);
-    expect(provider.create).toHaveBeenCalledTimes(2);
   });
 });

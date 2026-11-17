@@ -258,9 +258,6 @@ export async function startCommand(
           Promise.resolve().then(() => maintenance?.stop()),
           Promise.resolve().then(() => messageHandler.destroy()),
         ]);
-        // Orderly native handoff may still deliver results and wait for Router
-        // acknowledgements. Retain transport until that drain settles, including
-        // its failure path; never report an uncertain handoff as clean.
         results.push(...await Promise.allSettled([Promise.resolve().then(() => wsClient.disconnect())]));
         const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
         if (failure) throw failure.reason;

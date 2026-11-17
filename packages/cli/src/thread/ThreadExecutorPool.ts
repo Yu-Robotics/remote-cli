@@ -44,7 +44,7 @@ export type ExecutorFactory = (
   threadId?: string,
   model?: string,
   effort?: string,
-  runtime?: { speed?: string | null }
+  runtime?: { speed?: string | null; scheduleCatalog?: string }
 ) => IExecutor;
 
 /**
@@ -53,6 +53,8 @@ export type ExecutorFactory = (
  * Each thread has its own per-thread busy lock and error flag.
  */
 export class ThreadExecutorPool {
+  private scheduleCatalog?: (threadId: string) => string | undefined;
+  setScheduleCatalog(resolve: NonNullable<ThreadExecutorPool['scheduleCatalog']>): void { this.scheduleCatalog = resolve; }
   private executors = new Map<string, IExecutor>();
   private busy = new Map<string, boolean>();
   private errorFlag = new Map<string, boolean>();
@@ -96,14 +98,15 @@ export class ThreadExecutorPool {
         resolveThreadModel(thread, configuration),
         resolveThreadEffort(thread, configuration),
       ];
-      if (speed !== undefined) args.push({ speed });
+      const scheduleCatalog = this.scheduleCatalog?.(threadId);
+      if (speed !== undefined || scheduleCatalog) args.push({ speed, ...(scheduleCatalog && { scheduleCatalog }) });
       executor = this.factory(...args);
       this.executors.set(threadId, executor);
     }
     return executor;
   }
 
-  /** Recovery may inspect an existing executor without resuming a blocked binding. */
+  /** Cleanup may inspect an existing executor without resuming a blocked binding. */
   getExistingExecutor(threadId: string): IExecutor | undefined { return this.executors.get(threadId); }
 
   assertContextResettable(threadId: string): void {

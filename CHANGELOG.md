@@ -13,6 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.257] - 2026-11-17
+
+### Changed
+- Remove automatic schedule restoration and the cancelled recovery experiment: HTTP admission server, durable journals, DSH controller, recovery capability flags and startup reconstruction. Native schedules run in the live original conversation; host loss or restart marks unfinished work interrupted without replay.
+- Keep shutdown and updates free of schedule handoff, model/RPC checkpointing and result draining. Idle future definitions do not indefinitely block updates; active work, native mutations and pending results retain their safety gates.
+- Preserve catalog versions 1–6, exact cancellation and cleanup, history purge selectors, outbox acknowledgements, per-thread isolation and original native histories. Legacy ownership metadata authorizes cleanup only; unsettled queued native work still blocks unsafe resume. Historical AGY/DSH cleanup without a supported management route no longer consumes live quota. Persist exact DSH session attribution before CREATE, including ambiguous failures, without fencing unrelated fresh sessions.
+- Saved AGY ACP chat remains non-resumable even without a schedule-owner journal. Explicit `/clear` may detach an owner-free selection while retaining native history and unconfirmed-retirement evidence; thread data erasure remains blocked. No automatic reset or old-session execution is authorized.
+- Compact definitively refused DSH creation attempts before the session marker so startup failures do not fence ordinary chat. Inactive AGY owner journals, including retired ones, continue to block thread-wide reset and directory changes across backends; use a new thread.
+- Preserve late CREATE deletion identities during shutdown without waiting for native work, keep original interrupted diagnostics, and load catalog state with older Routers while withholding unsupported result delivery.
+- Preserve the reviewed AGY owned-host retirement ordering and in-turn purge fixes from 1.6.256. Keep the unrelated compact-summary handoff.
+
+### Tests
+- Cover live native scheduling adapters, restart interruption without reconstruction, no exit-time scheduling RPC, legacy catalogs, cancellation/purge/outbox and ordinary chat. Remove tests exclusive to the deleted recovery and exit-handoff implementations; retain lifecycle safety regressions.
+
+## [1.6.256] - 2026-11-17
+
+### Fixed
+- Retire the exact owned AGY host before deleting or resetting a thread whose schedules were cancelled before their first possible wake. Directory changes follow the same ordering; unknown predecessors, live siblings, checkpoint transitions, and unconfirmed exits still retain their evidence.
+- Give AGY schedule purge its native management scope during a foreground turn, preserving exact list/kill receipts, request identity, siblings, and unresolved retirement obligations. History-only cleanup does not start native work.
+
+### Tests
+- Add synthetic production runtime and handler/service/provider regressions for retirement ordering, in-turn purge, stale ownership, and isolated cleanup.
+
 ## [1.6.255] - 2026-11-17
 
 ### Fixed

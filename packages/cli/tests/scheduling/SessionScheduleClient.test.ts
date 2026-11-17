@@ -20,6 +20,15 @@ function fixture() {
 }
 afterEach(() => { vi.useRealTimers(); });
 describe('session schedule receipts', () => {
+  it('retains terminal replay fences for the entire native connection', async () => {
+    const f = fixture(); await f.created();
+    for (let i = 0; i < 40; i++) {
+      f.event({ type: 'started', occurrenceId: `occurrence-${i}` });
+      f.event({ type: 'completed', occurrenceId: `occurrence-${i}`, success: true, output: 'fixture' });
+    }
+    expect((f.client as any).jobs.get('job').completed.size).toBe(40);
+    f.client.close();
+  });
   it('exposes only a confirmed live deletion receipt and invalidates it on host close', async () => {
     const f = fixture(), handle = await f.created();
     expect(handle.nativeDefinitionAbsent).toBe(false);
@@ -31,7 +40,7 @@ describe('session schedule receipts', () => {
   it('validates scope/session, deduplicates occurrences, and rejects malformed output', async () => {
     const f = fixture(), emit = vi.fn();
     const handle = await f.created(emit);
-    expect(handle.releaseForRestart).toBeTypeOf('function');
+    expect('releaseForRestart' in handle).toBe(false);
     expect(f.client.receive({ version: 2, scope: 'foreign' })).toBe(false);
     f.event({ type: 'started', occurrenceId: 'one' }, 'other');
     expect(emit).not.toHaveBeenCalled();

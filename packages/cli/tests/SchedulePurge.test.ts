@@ -67,7 +67,7 @@ async function reload(f: Awaited<ReturnType<typeof fixture>>) {
   await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
   const create = vi.fn(async () => { throw new Error('Purged jobs must not be recreated'); });
   const service = new ScheduleService({ directory, provider: { create }, deliver: async () => {}, isOwnerCurrent: () => true, now: () => now });
-  services.push(service); await service.initialize(); await service.recover();
+  services.push(service); await service.initialize();
   return { service, create };
 }
 
@@ -208,7 +208,7 @@ describe('ScheduleService purge', () => {
     const f = await fixture({}, [row('legacy')]);
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Synthetic selection persistence failure'));
     await expect(f.service.freezePurgeSelection(owner, { all: true }, 'request', () => true)).rejects.toThrow('selection persistence');
-    expect((await f.read()).purgeRequests).toBeUndefined(); vi.restoreAllMocks();
+    expect((await f.read()).purgeRequests).toEqual([]); vi.restoreAllMocks();
     const directory = path.join(root, 'full-requests'); await fs.mkdir(directory);
     await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 5, records: [row('legacy')], pending: [], purged: [], cleanup: [],
       purgeRequests: Array.from({ length: 1000 }, (_, i) => ({ key: i.toString(16).padStart(64, '0'), digest: 'a'.repeat(64), ids: [] })) }));
@@ -240,7 +240,7 @@ describe('ScheduleService purge', () => {
     expect(await f.service.purge(owner, { all: true })).toMatchObject({ historyRemovedIds: ['legacy'],
       nativeCleanupUnresolved: [{ id: 'legacy' }], pending: [], errors: [] });
     const stored = await f.read();
-    expect(stored.version).toBe(5); expect(stored.pending).toEqual([]); expect(stored.records).toEqual([]);
+    expect(stored.version).toBe(6); expect(stored.pending).toEqual([]); expect(stored.records).toEqual([]);
     expect(JSON.stringify(stored)).not.toContain('Synthetic');
     expect(Object.keys(stored.cleanup[0]).sort()).toEqual(['backend', 'cwd', 'generation', 'historyRemoved', 'id', 'nativeId', 'openId', 'reason', 'threadId']);
     const restored = await reload(f);
@@ -264,7 +264,7 @@ describe('ScheduleService purge', () => {
     });
     expect((await f.service.purge(owner, { all: true })).errors[0].error).toContain('ledger write');
     expect((await f.read()).records).toHaveLength(1); expect((await f.read()).pending).toHaveLength(1);
-    expect((await f.read()).cleanup).toBeUndefined();
+    expect((await f.read()).cleanup).toEqual([]);
   });
 
   it('does not erase history when the framework scope expires during cancellation-intent persistence', async () => {
@@ -272,7 +272,7 @@ describe('ScheduleService purge', () => {
     const rename = fs.rename;
     vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => { await rename(from, to); current = false; });
     expect((await f.service.purge(owner, { all: true }, () => current)).errors[0].error).toContain('no longer current');
-    expect((await f.read()).records).toHaveLength(1); expect((await f.read()).cleanup).toBeUndefined();
+    expect((await f.read()).records).toHaveLength(1); expect((await f.read()).cleanup).toEqual([]);
   });
 
   it('keeps an unresolved ledger on stale proof, reason-write failure or absence-write failure', async () => {
@@ -595,21 +595,21 @@ describe('ScheduleService purge', () => {
     expect(verification).toHaveBeenCalledOnce();
   });
 
-  it('uses clean handoff proof or matching retained cancellation without recreating jobs', async () => {
+  it('ignores legacy clean flags and requires matching retained cancellation without recreation', async () => {
     const clean = row('clean', 'interrupted');
-    clean.recovery = { version: 1, provider: 'synthetic', strategy: 'reattach', identity: 'synthetic-identity',
+    clean.recovery = { version: 1, provider: 'synthetic', strategy: 'reattach', abrupt: true, identity: 'synthetic-identity',
       status: 'blocked', handoff: 'clean', nativeDefinitionAbsent: true };
     const retained = structuredClone(clean); retained.id = 'retained'; delete retained.recovery!.handoff; delete retained.recovery!.nativeDefinitionAbsent;
     const cancelRetained = vi.fn(async () => {});
-    const f = await fixture({ provider: { create: vi.fn(), recoveryFor: () => ({ provider: 'synthetic', strategy: 'reattach',
+    const f = await fixture({ provider: { create: vi.fn(), cleanupFor: () => ({ provider: 'synthetic', strategy: 'reattach', abrupt: true,
       describe: () => 'synthetic-identity', reconcile: vi.fn(), cancelRetained }) } }, [clean, retained]);
     expect(await f.service.purge(owner, { all: true })).toMatchObject({ removedIds: ['clean', 'retained'], errors: [] });
-    expect(cancelRetained).toHaveBeenCalledTimes(1);
+    expect(cancelRetained).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps two unselected active schedules recoverable after purging history and reloading', async () => {
+  it('keeps unselected interrupted history intact after purging another row and reloading', async () => {
     const records = ['a', 'b'].map(id => ({ ...row(id, 'active'), recovery: {
-      version: 1 as const, provider: 'synthetic', strategy: 'reattach' as const, identity: `original-${id}`,
+      version: 1 as const, provider: 'synthetic', strategy: 'reattach', abrupt: true as const, identity: `original-${id}`,
       status: 'eligible' as const, handoff: 'clean' as const, nativeDefinitionAbsent: true as const,
     } }));
     const f = await fixture({ withPurgeVerification: async (_record, _context, accept) => accept({ status: 'verified', isCurrent: () => true }) }, [...records, row('history')]);
@@ -618,54 +618,31 @@ describe('ScheduleService purge', () => {
     expect(await f.service.list(owner)).toEqual(siblings);
     const directory = path.join(root, 'recover-two'); await fs.mkdir(directory);
     await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify(await f.read()));
-    const emitters = new Map<string, (event: NativeScheduleEvent) => void>();
-    const reconcile = vi.fn(async (record, _context, emit) => {
-      emitters.set(record.id, emit);
-      return { nativeId: record.nativeId, list: async () => true, cancel: async () => {}, stop: async () => {} };
-    });
-    const deliver = vi.fn(async () => {});
-    const restored = new ScheduleService({ directory, now: () => now, canRecover: () => true, isOwnerCurrent: () => true, deliver,
-      provider: { create: vi.fn(), recoveryFor: () => ({ provider: 'synthetic', strategy: 'reattach', describe: () => '', reconcile }) } });
-    services.push(restored); await restored.initialize(); await restored.recover();
-    expect((await restored.list(owner)).map(record => [record.id, record.state])).toEqual([['a', 'active'], ['b', 'active']]);
-    expect(reconcile.mock.calls.map(([record]) => record.id)).toEqual(['a', 'b']);
-    for (const [id, emit] of emitters) { emit({ type: 'started', occurrenceId: id }); emit({ type: 'completed', occurrenceId: id, success: true }); }
-    await restored.list(owner); await restored.retryDeliveries();
-    expect(deliver).toHaveBeenCalledTimes(2);
+    const create = vi.fn();
+    const restored = new ScheduleService({ directory, now: () => now, isOwnerCurrent: () => true,
+      deliver: vi.fn(), provider: { create } });
+    services.push(restored); await restored.initialize();
+    expect(await restored.list(owner)).toEqual(siblings);
+    expect((await restored.list(owner)).map(record => record.state)).toEqual(['interrupted', 'interrupted']);
+    expect(create).not.toHaveBeenCalled();
+
   });
 
   it('reconciles a retained deletion error-after-commit only through fresh framework proof', async () => {
     const record = row('retained', 'interrupted');
-    record.recovery = { version: 1, provider: 'synthetic', strategy: 'reattach', identity: 'original', status: 'blocked' };
+    record.recovery = { version: 1, provider: 'synthetic', strategy: 'reattach', abrupt: true, identity: 'original', status: 'blocked' };
     let present = true;
     const cancelRetained = vi.fn(async () => { present = false; throw new Error('Synthetic lost deletion receipt'); });
     const verify = vi.fn(async (_record, _context, accept) => {
       expect(present).toBe(false);
       return accept({ status: 'verified', isCurrent: () => !present });
     });
-    const f = await fixture({ withPurgeVerification: verify, provider: { create: vi.fn(), recoveryFor: () => ({
-      provider: 'synthetic', strategy: 'reattach', describe: () => 'original', reconcile: vi.fn(), cancelRetained,
+    const f = await fixture({ withPurgeVerification: verify, provider: { create: vi.fn(), cleanupFor: () => ({
+      provider: 'synthetic', strategy: 'reattach', abrupt: true, describe: () => 'original', reconcile: vi.fn(), cancelRetained,
     }) } }, [record]);
     expect(await f.service.purge(owner, { ids: ['retained'] })).toMatchObject({ removedIds: ['retained'], errors: [] });
     expect(await f.service.purge(owner, { ids: ['retained'] })).toMatchObject({ alreadyRemovedIds: ['retained'] });
     expect(cancelRetained).toHaveBeenCalledOnce(); expect(verify).toHaveBeenCalledOnce();
-  });
-
-  it('retains a row while recovery is in flight and cleans its late handle on retry', async () => {
-    const record = row('recover', 'active');
-    record.recovery = { version: 1, provider: 'synthetic', strategy: 'reattach', identity: 'original', status: 'eligible' };
-    const gate = deferred<NativeScheduleHandle>(); const entered = deferred();
-    const handle = { nativeId: 'native-recover', nativeDefinitionAbsent: true, list: async () => false, cancel: async () => {}, stop: vi.fn(async () => {}) };
-    cleanups.push(() => gate.resolve(handle));
-    const f = await fixture({ canRecover: () => true, provider: { create: vi.fn(), recoveryFor: () => ({
-      provider: 'synthetic', strategy: 'reattach', describe: () => 'original',
-      reconcile: async () => { entered.resolve(); return gate.promise; },
-    }) } }, [record]);
-    const recovery = f.service.recover(); await entered.promise;
-    expect(await f.service.purge(owner, { ids: ['recover'] })).toMatchObject({ pending: [{ reason: 'operation_pending' }] });
-    gate.resolve(handle); await recovery;
-    expect(await f.service.purge(owner, { ids: ['recover'] })).toMatchObject({ removedIds: ['recover'] });
-    expect(handle.stop).toHaveBeenCalled();
   });
 
   it('fences events queued while the final atomic removal is being persisted', async () => {
@@ -700,12 +677,12 @@ describe('ScheduleService purge', () => {
     const snapshot = await f.read();
     for (const [index, fences] of [[{ id: 'legacy', ...owner }], [{ id: 'x', ...owner }, { id: 'x', ...owner }], [{ id: '../bad', ...owner }]].entries()) {
       const directory = path.join(root, `invalid-${index}`); await fs.mkdir(directory);
-      await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ ...snapshot, version: 3, purged: fences }));
+      await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ ...snapshot, cleanup: undefined, purgeRequests: undefined, version: 3, purged: fences }));
       const invalid = new ScheduleService({ directory, provider: { create: vi.fn() }, deliver: async () => {}, isOwnerCurrent: () => true });
       services.push(invalid); await expect(invalid.initialize()).rejects.toThrow();
     }
     const directory = path.join(root, 'full'); await fs.mkdir(directory);
-    await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ ...snapshot, version: 3,
+    await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ ...snapshot, cleanup: undefined, purgeRequests: undefined, version: 3,
       purged: Array.from({ length: 10_000 }, (_, index) => ({ id: `retired-${index}`, ...owner })) }));
     const full = new ScheduleService({ directory, provider: { create: vi.fn() }, deliver: async () => {}, isOwnerCurrent: () => true });
     services.push(full); await full.initialize();
@@ -723,7 +700,7 @@ describe('ScheduleService purge', () => {
     });
     expect((await f.service.purge(owner, { all: true })).errors[0].error).toContain('rename failure');
     expect((await f.read()).records).toHaveLength(1);
-    expect((await f.read()).purged).toBeUndefined();
+    expect((await f.read()).purged).toEqual([]);
   });
 
   it.each([{ ids: ['a', 'a'] }, { ids: ['../invalid'] }, { all: true, ids: [] }, {}])('rejects invalid selection %j', async selection => {

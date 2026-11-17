@@ -1,11 +1,9 @@
 import { cleanupInventory, type NativeCleanupDefinition } from '../ReviewedNativeCleanup';
 import { randomUUID } from 'crypto';
 import { nativeRule } from './rules';
-import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError, type NativeScheduleInput, type NativeScheduleHandle, type NativeScheduleEvent } from '../types';
+import { NativeScheduleNotAdmittedError, NativeScheduleCleanupError, type NativeScheduleInput, type NativeScheduleHandle, type NativeScheduleEvent } from '../types';
 
 export interface NativeScheduleAction { tool: 'CronCreate' | 'CronList' | 'CronDelete'; input: Record<string, unknown> }
-/** Deliberately incompatible with NativeScheduleHandle.releaseForRestart. */
-export interface ClaudeDefinitionRemovalReceipt { ownedDefinitionsAbsent: true; quiescence: 'unverified' }
 type Frame = Record<string, any>;
 type Invocation = { ended?: boolean };
 type Scope = { id: string; current: () => boolean; inTurn: boolean; turn?: Invocation; ended?: boolean; mutations: Set<string>; done: Promise<void> };
@@ -13,7 +11,6 @@ interface Job {
   id: string; marker: string; prompt: string; nativeId?: string; recurring: boolean; deadline?: number;
   current(): boolean; uncertain: boolean; retired: boolean; cancelled: boolean; emit(event: NativeScheduleEvent): void;
   definitionAbsent?: boolean;
-  recovering?: boolean;
   adopt?: boolean;
   cron?: string;
   inventoryReceipt?: boolean;
@@ -52,29 +49,17 @@ export class ClaudeSessionSchedules {
   private capable = false;
   private managementTurn = false;
   private management = new Set<Promise<void>>();
-  private recoveryTerminals = new Map<string, { done: Promise<void>; resolve(): void }>();
+  private cleanupTerminals = new Map<string, { done: Promise<void>; resolve(): void }>();
   /** Await only management turns already dispatched by this adapter. */
   async settleManagement(): Promise<void> {
-    await Promise.all([...this.management, ...[...this.recoveryTerminals.values()].map(turn => turn.done)]);
-  }
-  /** Abort only this recovery scope; keep authorized mutations for late receipts. */
-  expireRecovery(id: string): void {
-    const scope = this.scope;
-    if (!scope || scope.id !== id || scope.inTurn) return;
-    scope.ended = true;
-    if (this.pending?.scope === scope) this.pending.job.admissionBlocked = true;
-    if (this.pending?.scope === scope && (!this.pending.toolId || this.pending.action.tool === 'CronList')) {
-      this.failPending('Native recovery authorization expired.');
-    }
+    await Promise.all([...this.management, ...[...this.cleanupTerminals.values()].map(turn => turn.done)]);
   }
   private closed = false;
-  private skipUnadmitted = false;
   private seen = new Set<string>();
   private resultIds = new Set<string>();
   private foregroundId?: string;
   private foregroundTurn?: Invocation;
   private foregroundStarted = false;
-  private definitionRemoval?: { lease: { isCurrent(): boolean }; operation?: Promise<ClaudeDefinitionRemovalReceipt> };
   foregroundDispatched(id: string, management = false): void {
     this.endInvocation(this.foregroundTurn);
     if (this.batch) this.endInvocation(this.batch);
@@ -82,10 +67,10 @@ export class ClaudeSessionSchedules {
     this.foregroundId = id; this.foregroundStarted = false; this.managementTurn = management;
     if (management && this.pending && !this.pending.scope?.inTurn) {
       this.pending.managementId = id;
-      if (this.pending.job.recovering) {
+      if (this.pending.job.cleanupOnly) {
         let resolve!: () => void;
         const done = new Promise<void>(finish => { resolve = finish; });
-        this.recoveryTerminals.set(id, { done, resolve });
+        this.cleanupTerminals.set(id, { done, resolve });
       }
     }
   }
@@ -112,54 +97,7 @@ export class ClaudeSessionSchedules {
   get hasJobs(): boolean { return [...this.jobs.values()].some(job => !job.retired); }
   get hasPendingMutation(): boolean { return !!this.scope?.mutations.size || [...this.jobs.values()].some(job => !job.retired && job.uncertain); }
 
-  /** Synchronous admission boundary, before any await or deletion. */
-  beginRestart(): void { this.skipUnadmitted = true; }
   get admittedWork(): boolean { return !!this.submitted || !!this.batch?.occurrences.some(item => item.job); }
-
-  /**
-   * Preparation only: delete owned future definitions without revoking already
-   * fired occurrence authority. The caller must fence ordinary input on this
-   * exact host and retain the lease on failure. This is NOT a queue-drain proof,
-   * restart receipt or permission to close stdin. The executor must separately
-   * fence prompt admission, drain admitted work and confirm the exact host exit.
-   */
-  removeFutureDefinitionsForRestart(lease: { isCurrent(): boolean }): Promise<ClaudeDefinitionRemovalReceipt> {
-    if (this.definitionRemoval?.lease === lease && this.definitionRemoval.operation) return this.definitionRemoval.operation;
-    if (this.closed || !this.capable || !lease.isCurrent() || this.scope || this.pending || this.authorized.size || this.hasPendingMutation
-      || this.definitionRemoval && this.definitionRemoval.lease !== lease) {
-      return Promise.reject(new Error('Native definition removal ownership is unavailable.'));
-    }
-    const removal = this.definitionRemoval ??= { lease };
-    const current = () => !this.closed && lease.isCurrent();
-    const operation = Promise.resolve().then(async (): Promise<ClaudeDefinitionRemovalReceipt> => {
-      if (!current()) throw new Error('Native definition removal lease expired.');
-      for (const job of this.jobs.values()) {
-        if (job.retired || job.cancelled) continue;
-        if (!current() || !job.current()) throw new Error('Native definition removal lease expired.');
-        await this.inToolOperation(`restart-${job.id}`, () => current() && job.current(), async () => {
-          // Inventory may show a one-shot already removed by native firing.
-          // Preserve its occurrence authority; absence is not completion.
-          if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) {
-            try { await this.request(job, { tool: 'CronDelete', input: { id: job.nativeId } }, true); }
-            catch (error) {
-              if (!current()) throw error;
-              // An error-after-commit still needs an authoritative list below.
-            }
-          } else if (!job.recurring) job.onceDefinitionAlreadyAbsent = true;
-          if (!current() || !job.current()) throw new Error('Native definition removal lease expired.');
-          if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) {
-            throw new Error('Native definition removal remains unconfirmed.');
-          }
-          job.definitionAbsent = true;
-        }, false);
-      }
-      if (!current()) throw new Error('Native definition removal lease expired.');
-      return { ownedDefinitionsAbsent: true, quiescence: 'unverified' };
-    });
-    removal.operation = operation;
-    void operation.finally(() => { if (removal.operation === operation) removal.operation = undefined; }).catch(() => {});
-    return operation;
-  }
   async inToolOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn = true): Promise<T> {
     if (this.scope) throw new Error('A native schedule operation is already active.');
     const turn = inTurn ? this.invocation() : undefined;
@@ -245,7 +183,7 @@ export class ClaudeSessionSchedules {
     await this.request(job, { tool: 'CronDelete', input: { id: target.id } }, true);
   }
   private reviewJob(current: () => boolean): Job {
-    if (this.closed || this.definitionRemoval || !this.scope || !current()) throw new Error('Reviewed cleanup lease is unavailable.');
+    if (this.closed || !this.scope || !current()) throw new Error('Reviewed cleanup lease is unavailable.');
     // Never insert this query placeholder into the admitted job map.
     return { id: `review-${randomUUID()}`, marker: '', prompt: '', recurring: false,
       current, uncertain: false, retired: false, cancelled: false, emit: () => {}, adopt: true, reviewOnly: true };
@@ -253,7 +191,7 @@ export class ClaudeSessionSchedules {
 
   /** Retained ownership authorizes deletion only, never restored wake admission. */
   async cancelRetained(input: NativeScheduleInput, nativeId: string, current: () => boolean, timezone: string): Promise<void> {
-    if (this.closed || this.definitionRemoval || !this.capable || !this.scope || !current() || this.busy) {
+    if (this.closed || !this.capable || !this.scope || !current() || this.busy) {
       throw new Error('Native cancellation requires the current idle original session.');
     }
     const stable = input.recovery && JSON.parse(input.recovery.identity).marker;
@@ -282,7 +220,7 @@ export class ClaudeSessionSchedules {
     if (!job) {
       if (this.jobs.size >= 100) throw new Error('Native cancellation ownership capacity is unavailable.');
       job = { id: input.id, marker, prompt, cron, recurring: rule.recurring, current, nativeId,
-        expectedNativeId: nativeId, cleanupOnly: true, recovering: true, adopt: true,
+        expectedNativeId: nativeId, cleanupOnly: true, adopt: true,
         uncertain: false, retired: false, cancelled: false, emit: () => {} };
       this.jobs.set(input.id, job);
     }
@@ -296,7 +234,7 @@ export class ClaudeSessionSchedules {
   }
 
   async create(input: NativeScheduleInput, emit: Job['emit'], current: () => boolean = () => true,
-    timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, restore: boolean | 'adopt' | 'adopt-existing' = false, expectedNativeId?: string,
+    timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
     // An existing identity can still own native work from an earlier attempt.
     if (this.jobs.has(input.id)) {
@@ -306,7 +244,7 @@ export class ClaudeSessionSchedules {
     let cron: string;
     let marker: string;
     try {
-      if (this.closed || this.definitionRemoval || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
+      if (this.closed || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
         throw new Error('Native session schedule identity or capacity is unavailable.');
       }
       rule = nativeRule(input.rule, Date.now());
@@ -332,29 +270,15 @@ export class ClaudeSessionSchedules {
       if (input.recovery && (typeof stable !== 'string' || !/^[a-f0-9-]{36}$/.test(stable))) throw new Error('Invalid durable native schedule marker.');
       marker = `[remote-cli:${stable ?? randomUUID()}]`;
     } catch (error) {
-      // Restored definitions may predate this attempt; validation proves no absence.
-      if (restore || expectedNativeId) throw error;
       throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule validation refused admission.');
     }
     const job: Job = { id: input.id, marker, prompt: `${marker}\n${input.prompt}`, recurring: rule.recurring,
-      deadline: rule.at, current, canAdmitOccurrence, recovering: !!restore, adopt: typeof restore === 'string', cron, expectedNativeId, uncertain: false, retired: false, cancelled: false, emit };
+      deadline: rule.at, current, canAdmitOccurrence, cron, uncertain: false, retired: false, cancelled: false, emit };
     this.jobs.set(job.id, job);
     const handle = this.handle(job);
     try {
-      if (restore) {
-        // Hooks reject old wakes while inventory reconciles only this exact marker.
-        if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) {
-          if (typeof restore === 'string') { job.recovering = false; return handle; }
-          await this.request(job, { tool: 'CronDelete', input: { id: job.nativeId } }, true);
-          if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) throw new Error('Owned restored definition still exists.');
-        }
-        if (restore === 'adopt-existing') throw new NativeScheduleAbsentError('Native definition is absent after an unclean restart; expiry or deletion is uncertain. No replacement was created.');
-        job.nativeId = undefined; job.expectedNativeId = undefined;
-      }
       await this.request(job, { tool: 'CronCreate', input: { cron, prompt: job.prompt, recurring: rule.recurring, durable: false } });
       if (!job.nativeId) throw new Error('Native creation returned no verified job ID.');
-      if (restore && !this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) throw new Error('Restored native inventory is unconfirmed.');
-      job.recovering = false;
       return handle;
     } catch (error) {
       if (job.uncertain || job.nativeId) throw new NativeScheduleCleanupError('Native creation is unconfirmed. Use cancellation to reconcile this owned job; do not recreate it.', handle);
@@ -372,7 +296,6 @@ export class ClaudeSessionSchedules {
       get nativeId() { return job.nativeId ?? `unconfirmed-${job.id}`; },
       list: async () => {
         if (job.retired || this.closed || job.cancelled) return false;
-        if (this.definitionRemoval) throw new Error('Native restart preparation retains occurrence ownership; inventory absence is not completion.');
         const text = await this.request(job, { tool: 'CronList', input: {} });
         const exists = this.inventory(job, text);
         if (!exists) { job.uncertain = false; job.cancelled = true; }
@@ -413,12 +336,7 @@ export class ClaudeSessionSchedules {
     if (text === 'No scheduled jobs.') return false;
     const lines = text.split('\n');
     if (lines.length > 100 || lines.some(line => !/^[A-Za-z0-9_-]+ — /.test(line))) throw new Error('Unverified native inventory.');
-    if ((this.skipUnadmitted || job.recovering && !job.adopt) && lines.some(line => ![...this.jobs.values()].some(candidate =>
-      !candidate.retired && line.includes(candidate.marker) && line.includes('[session-only]')
-      && (!candidate.nativeId || line.startsWith(`${candidate.nativeId} — `))))) {
-      throw new Error('Unmanaged native inventory prevents orderly recovery.');
-    }
-    const owned = lines.filter(line => line.includes(job.adopt ? `: ${job.marker}` : job.marker));
+    const owned = lines.filter(line => line.includes(job.marker));
     if (owned.length > 1) throw new Error('Ambiguous native schedule identity.');
     if (!job.nativeId && owned.length) job.nativeId = owned[0].split(' — ')[0];
     const match = lines.find(line => line.startsWith(`${job.nativeId} — `));
@@ -432,10 +350,6 @@ export class ClaudeSessionSchedules {
       || typeof entry.id !== 'string' || !idPattern.test(entry.id) || typeof entry.prompt !== 'string' || typeof entry.cron !== 'string'
       || ('recurring' in entry && typeof entry.recurring !== 'boolean'))
       || new Set(entries.map(entry => entry.id)).size !== entries.length) throw new Error('Structured native inventory is unavailable or ambiguous.');
-    if (this.skipUnadmitted && entries.some(entry => ![...this.jobs.values()].some(candidate => !candidate.retired
-      && candidate.prompt === entry.prompt && candidate.nativeId === entry.id && entry.durable === false))) {
-      throw new Error('Unmanaged native inventory prevents orderly recovery.');
-    }
     const owned = entries.filter(entry => entry.prompt.startsWith(`${job.marker}\n`));
     if (owned.length > 1) throw new Error('Ambiguous native schedule identity.');
     const entry = owned[0];
@@ -547,8 +461,8 @@ export class ClaudeSessionSchedules {
     }
     if (frame.type === 'command_lifecycle') {
       if (['completed', 'cancelled', 'discarded', 'refused'].includes(frame.state)) {
-        this.recoveryTerminals.get(frame.command_uuid)?.resolve();
-        this.recoveryTerminals.delete(frame.command_uuid);
+        this.cleanupTerminals.get(frame.command_uuid)?.resolve();
+        this.cleanupTerminals.delete(frame.command_uuid);
       }
       if (frame.state === 'started') this.foregroundStarted = frame.command_uuid === this.foregroundId;
       if (frame.state === 'started' && frame.wakeup_source === 'schedule_wakeup') {
@@ -559,8 +473,7 @@ export class ClaudeSessionSchedules {
         // Native headless mode can batch several same-priority cron prompts.
         // startBatch emits their lifecycle IDs in prompt concatenation order.
         if (batch.occurrences.length >= 100) { this.failPending('Native schedule batch limit reached.'); return true; }
-        batch.occurrences.push({ id: frame.command_uuid, admissible: this.jobs.size > 0
-          && ![...this.jobs.values()].some(job => !job.retired && job.recovering && !job.cleanupOnly) });
+        batch.occurrences.push({ id: frame.command_uuid, admissible: this.jobs.size > 0 });
         if (this.submitted) { this.bind([this.submitted]); this.submitted = undefined; }
         return true;
       }
@@ -638,12 +551,6 @@ export class ClaudeSessionSchedules {
   private hook(frame: Frame): void {
     const input = frame.request.input;
     let response: Frame = {};
-    if (this.skipUnadmitted && input?.hook_event_name === 'UserPromptSubmit'
-      && !this.managementTurn && !this.batch && input.source !== 'schedule_wakeup') {
-      this.options.send({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id,
-        response: { decision: 'block', reason: 'New autonomous admission is fenced during restart.' } } });
-      return;
-    }
     if (input?.hook_event_name === 'PreToolUse') {
       const discovery = input.tool_name === 'ToolSearch' && this.pending
         && input.tool_input?.query === `select:${this.pending.action.tool}`
@@ -675,15 +582,6 @@ export class ClaudeSessionSchedules {
       // schedule lifecycle and exact complete prompt are both required then.
       const owned = this.matchPrompts(input.prompt);
       const expected = this.batch?.occurrences.length ?? 1;
-      if (this.skipUnadmitted) {
-        if (owned && owned.length === expected) for (const [index, job] of owned.entries()) {
-          const id = this.batch?.occurrences[index]?.id;
-          if (id) job.emit({ type: 'skipped', occurrenceId: id, reason: 'Pending occurrence skipped during orderly restart before prompt admission.' });
-        }
-        response = { decision: 'block', reason: 'Pending scheduled occurrence skipped during orderly restart.' };
-        this.options.send({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response } });
-        return;
-      }
       if (this.closed || this.submitted || this.batch?.occurrences.some(item => item.job || item.admissible === false)
         || !owned || owned.length !== expected) response = { decision: 'block', reason: 'Unknown or retired managed schedule occurrence.' };
       else if (this.batch) this.bind(owned);
@@ -696,7 +594,7 @@ export class ClaudeSessionSchedules {
     const jobs: Job[] = [];
     let remaining = prompt;
     while (remaining && jobs.length < 100) {
-      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.admissionBlocked && !item.recovering && this.canAdmitOccurrence(item) && !!item.nativeId
+      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.admissionBlocked && !item.cleanupOnly && this.canAdmitOccurrence(item) && !!item.nativeId
         && (remaining === item.prompt || remaining.startsWith(item.prompt + '\n')));
       if (!job) return;
       jobs.push(job); remaining = remaining.slice(job.prompt.length);
@@ -739,14 +637,14 @@ export class ClaudeSessionSchedules {
     if (job.retired) return;
     job.retired = true; job.emit({ type: 'stopped', reason, exitConfirmed: true });
   }
-  /** Only a confirmed process close loses all session-only jobs. */
-  processClosed(released = false): void {
-    for (const terminal of this.recoveryTerminals.values()) terminal.resolve();
-    this.recoveryTerminals.clear();
-    this.closed = true; this.failPending('Native conversation process exited. Session-only schedules were lost.');
+  /** Close interrupts owned work; persisted definitions and queued input may survive. */
+  processClosed(): void {
+    for (const terminal of this.cleanupTerminals.values()) terminal.resolve();
+    this.cleanupTerminals.clear();
+    this.closed = true; this.failPending('Native conversation process exited; schedules are interrupted and not restored.');
     for (const occurrence of this.batch?.occurrences ?? []) occurrence.job?.emit({ type: 'completed', occurrenceId: occurrence.id,
       success: false, error: 'Native conversation process exited during this occurrence.' });
     this.batch = undefined; this.submitted = undefined; this.authorized.clear();
-    if (!released) for (const job of this.jobs.values()) this.retire(job, 'Native conversation process exited.');
+    for (const job of this.jobs.values()) this.retire(job, 'Native conversation process exited.');
   }
 }

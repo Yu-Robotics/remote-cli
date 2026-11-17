@@ -14,9 +14,9 @@ vi.mock('child_process', async importOriginal => {
   const fixtureCommand = (command: string) => command.endsWith('fixture-agy.cjs');
   return { ...actual,
     spawn: (command: string, args: string[], options: any) => fixtureCommand(command)
-      ? actual.spawn(process.execPath, [command, ...args], options) : actual.spawn(command, args, options),
+      ? actual.spawn(process.execPath, [command, ...args], options) : (() => { throw new Error('Non-fixture backend launch refused'); })(),
     execFile: (command: string, args: string[], options: any, callback: any) => fixtureCommand(command)
-      ? actual.execFile(process.execPath, [command, ...args], options, callback) : actual.execFile(command, args, options, callback),
+      ? actual.execFile(process.execPath, [command, ...args], options, callback) : (() => { callback(new Error('Synthetic command unavailable')); return undefined; })(),
   };
 });
 import { configureAgyDelegation } from '../../src/executor/agy/AgyDelegationConfig';
@@ -53,7 +53,7 @@ describe('AGY thread-local delegation configuration', () => {
   const executors: AgyExecutor[] = [];
   beforeEach(() => {
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-delegation-test-')));
-    vi.stubEnv('REMOTE_CLI_TEST_AGY_HOME', home);
+    vi.stubEnv('REMOTE_CLI_TEST_AGY_HOME', home); vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
     command = path.join(home, 'fixture-agy.cjs');
     fs.writeFileSync(command, `#!${process.execPath}\n${fixture}`, { mode: 0o700 });
     fs.mkdirSync(path.join(home, '.gemini/config'), { recursive: true });
@@ -113,7 +113,7 @@ describe('AGY thread-local delegation configuration', () => {
     const directory = path.join(threadHome, '.gemini/config');
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, 'mcp_config.json'), original);
-    await expect(configureAgyDelegation('/missing/agy', threadHome, true)).rejects.toThrow('native');
+    await expect(configureAgyDelegation(path.join(home, 'missing-agy'), threadHome, true)).rejects.toThrow('native');
     expect(fs.readFileSync(path.join(directory, 'mcp_config.json'), 'utf8')).toBe(original);
     expect(fs.existsSync(path.join(directory, '.remote-cli-delegation-original.json'))).toBe(false);
     await configureAgyDelegation(command, threadHome, true);

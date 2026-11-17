@@ -17,77 +17,49 @@ export interface NativeScheduleInput {
   command?: string;
   model?: string;
   effort?: string;
-  /** Framework-issued identity persisted before CREATE, never model supplied. */
-  recovery?: ScheduleRecoveryCheckpoint;
+  /** Framework-issued cleanup identity persisted before CREATE; legacy storage shape. */
+  recovery?: ScheduleOwnershipMetadata;
 }
 
-export type ScheduleHandoffPolicy = 'drain-all' | 'skip-unadmitted';
-export interface NativeScheduleRelease {
-  nativeDefinitionAbsent: true; policy?: ScheduleHandoffPolicy;
-  /** Inventory absence before deletion: do not reconstruct this one-shot, without inventing an occurrence ID. */
-  onceDefinitionAlreadyAbsent?: true;
-}
-
-export interface ScheduleRecoveryCheckpoint {
+/** Legacy catalog shape retained for exact cleanup and diagnostics, never a resume capability. */
+export interface ScheduleOwnershipMetadata {
   version: 1;
   provider: string;
   strategy: 'reattach' | 'reconstruct';
   /** Provider-owned native session and ownership identity; not a transcript. */
   identity: string;
+  /** Legacy diagnostic field; never authorizes recovery. */
   orderlyOnly?: true;
-  /** Future recurring definitions may reconcile after provider-proven predecessor loss. */
+  abrupt?: true;
+  /** Legacy diagnostics only; no field here authorizes execution after host loss. */
   futureOnly?: true;
-  handoffPolicy?: ScheduleHandoffPolicy;
+  handoffPolicy?: 'drain-all' | 'skip-unadmitted';
   handoff?: 'clean';
-  /** Separate release evidence: a clean pause alone does not prove deletion. */
+  /** Legacy diagnostic only; current native absence requires fresh framework verification. */
   nativeDefinitionAbsent?: true;
 }
 
-/** Opt-in protocol. A conversation resume ID or a catalog lookup is not evidence. */
-export interface NativeScheduleRecovery {
+/** Exact ownership metadata and deletion only; never starts or restores a scheduled job. */
+export interface NativeScheduleCleanup {
   readonly provider: string;
-  readonly strategy: ScheduleRecoveryCheckpoint['strategy'];
-  readonly orderlyOnly?: true;
-  readonly futureOnly?: true;
-  readonly handoffPolicy?: ScheduleHandoffPolicy;
-  /** Cancellation only: verify exact retained definitions on the original session,
-   * never recreate or admit occurrences. Reject if global cleanup is unconfirmed,
-   * even when removal on the current host succeeded. No execution-recovery gate.
-   */
-  cancelRetained?(record: ScheduleRecord, context: { isCurrent(): boolean }): Promise<void>;
-  /** After all job releases: stop and join the exact owned native host. */
-  finishRestart?(): Promise<void>;
-  /** All jobs for this owner are terminal after recovery (for example expired).
-   * Release only a confirmed exited host's admission fence; never start a host.
-   */
-  releaseRestartAdmission?(): void;
-  /** Pure description: MUST NOT start a host or mutate native state. */
+  /** Legacy catalog identity discriminator, not a restart strategy. */
+  readonly strategy: ScheduleOwnershipMetadata['strategy'];
   describe(input: NativeScheduleInput, owner: ScheduleOwner): string;
-  /**
-   * Reconcile authoritative inventory under the original identity, excluding any
-   * surviving predecessor. Never blindly CREATE, adopt unmanaged jobs, replay an
-   * uncertain occurrence or catch up missed cron ticks. Restore original native
-   * context, not a summary/fork. Repeated attempts MUST be idempotent even after
-   * an error-after-commit. Refuse unknown inventory, ownership or execution state.
-   * Honor cancellation before admission, bound native operations, and retain a
-   * cleanup handle in NativeScheduleCleanupError for any uncertain mutation.
-   */
-  reconcile(record: ScheduleRecord, context: { notBefore: number; signal: AbortSignal; isCurrent(): boolean; isOwnerCurrent?(): boolean; canAdmitOccurrence?(): boolean },
-    onEvent: (event: NativeScheduleEvent) => void | Promise<void>): Promise<NativeScheduleHandle>;
+  cancelRetained?(record: ScheduleRecord, context: { isCurrent(): boolean }): Promise<void>;
 }
 
 export type NativeScheduleEvent =
-  | { type: 'rebound'; previousNativeId: string; nativeId: string }
+  /** Await durable original-session attribution before any native CREATE mutation. */
+  | { type: 'attributed'; cleanupIdentity: string }
   | { type: 'started'; occurrenceId: string }
-  | { type: 'skipped'; occurrenceId: string; reason: string }
   | { type: 'completed'; occurrenceId: string; success: boolean; output?: string; error?: string }
   | { type: 'stopped'; reason: string; exitConfirmed?: boolean };
 
 /** Native job ownership; process exit or job retirement is never automatically reversed. */
 export interface NativeScheduleHandle {
   readonly nativeId: string;
-  /** Confirmed original native context, captured after initial creation. */
-  readonly recoveryIdentity?: string;
+  /** Original native context for exact deletion, never execution authorization. */
+  readonly cleanupIdentity?: string;
   readonly onceDefinitionAlreadyAbsent?: true;
   /** Shared-session deletion leaves an already started occurrence running. */
   readonly cancellationKeepsRunning?: boolean;
@@ -97,15 +69,6 @@ export interface NativeScheduleHandle {
   readonly retirementConfirmed?: boolean;
   /** Fresh local absence evidence; invalidated when its native host exits. */
   readonly nativeDefinitionAbsent?: boolean;
-  /**
-   * Optional orderly shutdown handoff. Exclude new firings and prove
-   * no admitted execution remains. A negotiated skip-unadmitted policy may discard
-   * queued/pre-admission occurrences without replay, preserving future intent.
-   * Reject uncertainty. This is not cancellation and must not kill shared work.
-   * Return absence evidence only after verifying native deletion; a paused
-   * persistent definition still needs cleanup if the durable intent is cancelled.
-   */
-  releaseForRestart?(): Promise<void | NativeScheduleRelease>;
   /** Native list verification, not a local catalog lookup. */
   list(): Promise<boolean>;
   /** Confirm native deletion; an already executing occurrence may finish. */
@@ -115,8 +78,8 @@ export interface NativeScheduleHandle {
 }
 
 export interface NativeScheduleProvider {
-  /** Pure capability lookup; absent means restart recovery is unsupported. */
-  recoveryFor?(input: NativeScheduleInput): NativeScheduleRecovery | undefined;
+  /** Pure cleanup lookup; does not start a native host or grant execution. */
+  cleanupFor?(input: NativeScheduleInput): NativeScheduleCleanup | undefined;
   /** Admission is checked at each future wake, independently of deletion authority and completion delivery. */
   create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void | Promise<void>,
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle>;
@@ -124,13 +87,6 @@ export interface NativeScheduleProvider {
 
 /** Provider proved refusal before starting native admission or mutation. Not absence evidence. */
 export class NativeScheduleNotAdmittedError extends Error {}
-
-/** The exact failed recovery attempt settled without live admission or mutation.
- * Historical definitions and predecessor obligations may still be uncertain. */
-export class NativeScheduleRecoverySettledError extends Error {}
-
-/** Authoritative read-only inventory found no definition; no mutation was attempted. */
-export class NativeScheduleAbsentError extends Error {}
 
 /** Failed creation must retain a cleanup handle when native exit is unconfirmed. */
 export class NativeScheduleCleanupError extends Error {
@@ -153,7 +109,7 @@ export interface ScheduleRecord extends ScheduleOwner {
   nativeId?: string;
   state: 'creating' | 'active' | 'running' | 'completed' | 'cancelled' | 'interrupted' | 'failed';
   error?: string;
-  /** Durable intent, even on adapters that cannot yet recover it. */
+  /** Original execution settings retained for exact cleanup attribution. */
   execution?: { command?: string; model?: string; effort?: string };
   /** Cancellation intent is written before native deletion; never resurrect it. */
   cancelRequested?: true;
@@ -163,7 +119,8 @@ export interface ScheduleRecord extends ScheduleOwner {
   /** Framework-observed native deletion AND execution retirement, not a state inference.
    * Cancellation remains permanent; this receipt never grants execution recovery. */
   cleanupConfirmed?: true;
-  recovery?: ScheduleRecoveryCheckpoint & { status: 'eligible' | 'pending' | 'blocked' };
+  /** Historical field name is retained for catalog compatibility; execution restoration is absent. */
+  recovery?: ScheduleOwnershipMetadata & { status: 'eligible' | 'pending' | 'blocked' };
   /** Bounded replay suppression; external delivery is not globally exactly-once. */
   completedOccurrences?: string[];
   /** Observed pre-admission skips, a subset of the dedupe history, not successes. */

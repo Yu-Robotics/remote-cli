@@ -9,7 +9,7 @@ export function sessionSchedulePatch(directory: string, scope: string): string {
     { id: 'acp', inject: ['acpAppStartup', 'remoteCliSessionScheduleReady'] },
     { insert: [
       ...services.map(service => { const [id, name] = service.split(':'); return { id, name: `@deepseek-ai/${name}` }; }),
-      { id: 'remote-cli-session-schedule-storage', name: path.join(__dirname, 'SessionScheduleStorage.js'), config: { directory } },
+      { id: 'remote-cli-session-schedule-storage', name: path.join(__dirname, 'SessionScheduleStorage.js'), config: { directory: directory } },
       { id: 'remote-cli-session-schedule-bridge', name: path.join(__dirname, 'SessionScheduleBridge.js'), config: { scope } },
     ] },
   ].map(row => `- ${JSON.stringify(row)}\n`).join('');

@@ -681,6 +681,7 @@ export abstract class AcpExecutor implements IExecutor {
     finally { this.requireOriginalSession = false; }
   }
 
+
   protected async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
     this.nativeReceiptOperations++;
     try {

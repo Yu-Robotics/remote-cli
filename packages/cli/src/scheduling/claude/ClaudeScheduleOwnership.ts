@@ -4,7 +4,7 @@ import { assertScheduleHostAvailable, scheduleProcesses, type ScheduleHostIdenti
 import { createHash, randomUUID } from 'crypto';
 import { bootIdentity, kernelGate, syncDirectory, type BootIdentity, type KernelGate } from '../../delegation/OwnershipRuntime';
 
-interface Receipt { version: 1 | 2; nativeHost?: ScheduleHostIdentity; ownerToken?: string; predecessorUncertain?: true; session: string; identity: BootIdentity; token: string; clean: boolean }
+interface Receipt { version: 1 | 2 | 3; nativeHost?: ScheduleHostIdentity; ownerToken?: string; predecessorUncertain?: true; session: string; identity: BootIdentity; token: string; clean?: boolean }
 export interface ScheduleOwnershipDependencies {
   identity(): BootIdentity;
   gate(filename: string): KernelGate | undefined;
@@ -19,50 +19,15 @@ export class ClaudeScheduleOwnership {
   private gate?: KernelGate;
   private receipt?: Receipt;
   private live = false;
-  private admission?: 'fresh' | 'clean' | 'reboot';
   constructor(pointer: string, private readonly session: string,
     private readonly dependencies: ScheduleOwnershipDependencies = { identity: bootIdentity, gate: kernelGate }) {
     this.filename = `${pointer}.schedule-${createHash('sha256').update(session).digest('hex')}.json`;
   }
   exists(): boolean { return fs.existsSync(this.filename); }
-  /** Stable only across proven clean handoffs; dirty rearm starts a new lineage. */
+  /** Each native host receives a new exact owner token; archived obligations cannot borrow it. */
   get ownerToken(): string | undefined { return this.live ? this.receipt?.ownerToken ?? this.receipt?.token : undefined; }
   private matchesOwner(receipt: Receipt, ownerToken?: string): boolean {
     return ownerToken !== undefined && ownerToken === (receipt.ownerToken ?? receipt.token);
-  }
-  reserve(allowFresh: boolean, ownerToken?: string): void {
-    if (this.live) {
-      this.gate!.verify();
-      if (this.receipt?.predecessorUncertain && !this.matchesOwner(this.receipt, ownerToken)) {
-        throw new Error('Native schedule belongs to an uncertain predecessor ownership incarnation.');
-      }
-      return;
-    }
-    if (!this.gate) {
-      fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
-      this.gate = this.dependencies.gate(`${this.filename}.lock`);
-      if (!this.gate) throw new Error('Another client owns this native schedule session.');
-    }
-    try {
-      this.gate.verify();
-      const current = this.dependencies.identity();
-      const saved = this.read();
-      if (!saved && !allowFresh) throw new Error('Native schedule predecessor identity is missing; automatic recovery is blocked.');
-      if (saved && saved.identity.host !== current.host) throw new Error('Native schedule predecessor belongs to another machine.');
-      if (saved && !saved.clean && saved.identity.boot === current.boot) {
-        throw new Error('Native schedule predecessor exit is unconfirmed in this boot; PID absence cannot exclude surviving work.');
-      }
-      if (saved?.predecessorUncertain && saved.identity.boot === current.boot && !this.matchesOwner(saved, ownerToken)) {
-        throw new Error('Native schedule belongs to an uncertain predecessor ownership incarnation.');
-      }
-      this.admission = !saved ? 'fresh' : saved.clean ? 'clean' : 'reboot';
-      this.receipt = { version: 1, session: this.session, identity: current, token: randomUUID(), ownerToken: saved?.clean ? saved.ownerToken ?? saved.token : randomUUID(), clean: false,
-        ...(saved?.identity.boot === current.boot && saved.predecessorUncertain && { predecessorUncertain: true as const }) };
-      // Reserve before any successor can start. A crash during reconciliation
-      // cannot authorize another same-boot successor from an older catalog row.
-      this.write();
-      this.live = true;
-    } catch (error) { this.close(); throw error; }
   }
   /** New explicit jobs may use this original session after exclusive host
    * verification. Old uncertain obligations remain archived, never called clean
@@ -85,8 +50,8 @@ export class ClaudeScheduleOwnership {
       }
       const nativeHost = assertScheduleHostAvailable((this.dependencies.processes ?? scheduleProcesses)(), this.session, pid, command,
         saved?.identity.boot === identity.boot ? saved.nativeHost : undefined,
-        !!saved && !saved.clean && saved.identity.boot === identity.boot && !saved.nativeHost);
-      if (saved && !saved.clean) {
+        !!saved && saved.identity.boot === identity.boot && !saved.nativeHost);
+      if (saved) {
         const archive = `${this.filename}.retired-${saved.token}`;
         const bytes = fs.readFileSync(this.filename);
         if (fs.existsSync(archive)) {
@@ -104,14 +69,12 @@ export class ClaudeScheduleOwnership {
           } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
         }
       }
-      this.receipt = { version: 2, session: this.session, identity, token: randomUUID(), ownerToken: saved?.clean ? saved.ownerToken ?? saved.token : randomUUID(), clean: false, nativeHost,
-        ...(saved && saved.identity.boot === identity.boot && (!saved.clean || saved.predecessorUncertain) && { predecessorUncertain: true as const }) };
+      this.receipt = { version: 3, session: this.session, identity, token: randomUUID(), ownerToken: randomUUID(), nativeHost,
+        ...(saved && saved.identity.boot === identity.boot && { predecessorUncertain: true as const }) };
       this.write(); this.live = true;
-      // This admission is deliberately never reboot proof for old recovery.
-      this.admission = saved?.clean ? 'clean' : 'fresh';
     } catch (error) { this.close(); throw error; }
   }
-  /** Bind a clean/reboot restoration reservation to its initialized host before
+  /** Bind a current reservation to its initialized host before
    * any Cron tool can run. A crash before this write leaves legacy scan fallback. */
   bindHost(pid: number): void {
     if (!this.live || !this.receipt || !this.gate) throw new Error('Native schedule host reservation is unavailable.');
@@ -119,13 +82,9 @@ export class ClaudeScheduleOwnership {
     const host = (this.dependencies.processes ?? scheduleProcesses)().find(item => item.pid === pid);
     if (!host) throw new Error('Current native host identity is unavailable.');
     const previous = this.receipt;
-    this.receipt = { ...previous, version: 2, nativeHost: { pid, ...(host.birth && { birth: host.birth }) } };
+    this.receipt = { ...previous, version: 3, nativeHost: { pid, ...(host.birth && { birth: host.birth }) } };
     try { this.write(); }
     catch (error) { this.receipt = previous; this.close(); throw error; }
-  }
-  assertRebootRecovery(): void {
-    this.gate?.verify();
-    if (!this.live || this.admission !== 'reboot') throw new Error('Unclean native schedule recovery requires verified predecessor loss on a later boot of the same machine.');
   }
   /** Acquire exclusion for removal only. Never overwrite the predecessor receipt
    * or grant execution admission from a same-boot dirty predecessor.
@@ -141,7 +100,7 @@ export class ClaudeScheduleOwnership {
     if (!saved || saved.identity.host !== current.host) {
       throw new Error('Native cancellation ownership receipt is missing or belongs to another machine. Preserve the session for manual review.');
     }
-    return saved.identity.boot !== current.boot || (!saved.predecessorUncertain || this.matchesOwner(saved, ownerToken)) && (saved.clean || this.live && saved.token === this.receipt?.token);
+    return saved.identity.boot !== current.boot || (!saved.predecessorUncertain || this.matchesOwner(saved, ownerToken)) && (this.live && saved.token === this.receipt?.token);
   }
   /** Explicit local definition removal does not invent predecessor proof. */
   reviewedRemovalLease(): { verify(): void; retirementConfirmed(ownerToken?: string): boolean; close(): void } {
@@ -159,17 +118,11 @@ export class ClaudeScheduleOwnership {
         gate.verify();
         const receipt = this.read(), current = this.dependencies.identity();
         return !!receipt && receipt.identity.host === current.host
-          && (receipt.identity.boot !== current.boot || (!receipt.predecessorUncertain || this.matchesOwner(receipt, ownerToken)) && (receipt.clean || this.live && receipt.token === this.receipt?.token));
+          && (receipt.identity.boot !== current.boot || (!receipt.predecessorUncertain || this.matchesOwner(receipt, ownerToken)) && (this.live && receipt.token === this.receipt?.token));
       }, close: () => { if (!existing) gate.close(); } };
     } catch (error) { if (!existing) gate.close(); throw error; }
   }
   hostClosed(): void { this.live = false; }
-  confirmClean(): void {
-    if (this.live || !this.receipt || !this.gate) throw new Error('Native schedule host exit is unconfirmed.');
-    this.gate.verify();
-    this.receipt.clean = true;
-    this.write();
-  }
   close(): void { this.gate?.close(); this.gate = undefined; this.live = false; }
   private read(): Receipt | undefined {
     let stat: fs.Stats;
@@ -178,12 +131,13 @@ export class ClaudeScheduleOwnership {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 8192) throw new Error('Unsafe native schedule ownership receipt.');
     const value = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
     const { checksum, ...receipt } = value;
-    if (![1, 2].includes(receipt.version) || receipt.session !== this.session || typeof receipt.clean !== 'boolean'
+    if (![1, 2, 3].includes(receipt.version) || receipt.session !== this.session
+      || (receipt.version < 3 ? typeof receipt.clean !== 'boolean' : receipt.clean !== undefined)
       || !/^[a-f0-9-]{36}$/.test(receipt.token ?? '')
       || !['host', 'boot', 'namespace'].every(key => typeof receipt.identity?.[key] === 'string' && receipt.identity[key].length > 0)
       || receipt.ownerToken !== undefined && !/^[a-f0-9-]{36}$/.test(receipt.ownerToken)
       || receipt.predecessorUncertain !== undefined && receipt.predecessorUncertain !== true
-      || receipt.version === 2 && (!Number.isSafeInteger(receipt.nativeHost?.pid) || receipt.nativeHost.pid <= 1
+      || receipt.version >= 2 && (!Number.isSafeInteger(receipt.nativeHost?.pid) || receipt.nativeHost.pid <= 1
         || receipt.nativeHost.birth !== undefined && typeof receipt.nativeHost.birth !== 'string')
       || checksum !== createHash('sha256').update(JSON.stringify(receipt)).digest('hex')) {
       throw new Error('Native schedule ownership receipt is invalid; preserve it for review.');

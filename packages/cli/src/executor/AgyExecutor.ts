@@ -1,8 +1,7 @@
-import { AgyCheckpoint, definitionDigest, scheduleDigest, type AgyCheckpointData, type AgyResumePermit } from '../scheduling/agy/AgyCheckpoint';
-import type { NativeScheduleRecovery } from '../scheduling/types';
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { spawnManaged } from './ManagedSpawn';
+import { detachAgySelection } from './agy/AgySessionSelection';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
 import { execFile, ChildProcess } from 'child_process';
 import { ManagedProcessGroups } from './ManagedProcessGroups';
@@ -24,7 +23,7 @@ import type { AgyDeletionTarget } from '../delegation/AgySessionDeletion';
 import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletion';
 
 export interface AgyExecutorOptions {
-  /** Production ACP entry, including clean original-session checkpoints. Unattested saved sessions and managed workers remain compatible. */
+  /** Fresh ACP entry; saved legacy sessions retain their existing transport. */
   nativeAcp?: boolean;
   /** Model slug passed as --model. Leave unset to use agy's default. */
   model?: string;
@@ -215,57 +214,6 @@ export class AgyExecutor implements IExecutor {
   private acpEligible = false;
   private acpLeaseUnconfirmed = false;
   private readonly nativeAcp: boolean;
-  private resumePermit?: AgyResumePermit;
-  private restoringCheckpoint?: AgyCheckpointData;
-  private cleanCheckpoint(): AgyCheckpointData | undefined {
-    try { const value = this.checkpoint().read(); return value?.state === 'clean' ? value : undefined; }
-    catch { return; } // Incompatible proof never grants admission or breaks legacy chat.
-  }
-  private resumeCleanChat(): void {
-    if (this.acp || this.resumePermit || this.proc || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false || !this.conversationId) return;
-    const proof = this.cleanCheckpoint();
-    if (proof?.sessionId === this.conversationId && Object.keys(proof.jobs).length === 0) {
-      this.resumePermit = this.checkpoint().consume(this.conversationId);
-      if (this.scheduleOwner) {
-        fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true });
-        this.scheduleOwner = undefined;
-      }
-    }
-  }
-  private recoveryIdentity(): string { return JSON.stringify({ sessionId: this.conversationId, configuration: this.checkpoint().configuration }); }
-  private checkpoint(): AgyCheckpoint {
-    return new AgyCheckpoint(this.sessionFilePath + '.checkpoint', definitionDigest([this.threadId, this.currentWorkingDirectory, this.agyCommand, this.model ?? null, this.effort ?? null, this.autoApprove]));
-  }
-  get nativeScheduleRecovery(): NativeScheduleRecovery | undefined {
-    if (!this.nativeAcp || !this.threadId || this.delegationWorker) return;
-    return {
-      provider: 'agy-before-first-wake-v1', strategy: 'reconstruct', orderlyOnly: true,
-      describe: () => this.recoveryIdentity(),
-      finishRestart: async () => {
-        if (!this.acp?.checkpointClean) throw new Error('AGY exact deadline-bounded handoff is not clean.');
-        await this.acp.close(); this.acp = undefined; this.restoringCheckpoint = undefined;
-      },
-      reconcile: async (record, context, emit) => {
-        const checkpoint = this.checkpoint();
-        if (record.rule.kind === 'once' && Date.parse(record.rule.at) <= Date.now()) throw new Error('Expired AGY one-shot will not be reconstructed.');
-        if (record.recovery?.handoff !== 'clean' || record.recovery.identity !== this.recoveryIdentity()
-          || !context.isCurrent() || context.signal.aborted || record.cancelRequested) throw new Error('AGY clean recovery ownership changed.');
-        const input: NativeScheduleInput = { id: record.id, backend: record.backend, threadId: record.threadId, cwd: record.cwd,
-          prompt: record.prompt, rule: record.rule, ...record.execution, recovery: record.recovery };
-        const proof = this.restoringCheckpoint ?? checkpoint.read();
-        if (!proof || proof.jobs[record.id] !== scheduleDigest(input)) throw new Error('AGY definition has no exact handoff proof.');
-        if (!this.restoringCheckpoint) {
-          if (this.acp || this.proc || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false) throw new Error('AGY predecessor retirement is not confirmed.');
-          this.resumePermit = checkpoint.consume(this.conversationId!);
-          this.restoringCheckpoint = proof;
-          this.acp = undefined;
-        }
-        // Consume per-job proof before mutation. A partial restore is not a retry permit.
-        delete this.restoringCheckpoint.jobs[record.id];
-        return this.createNativeSchedule(input, emit, () => context.isOwnerCurrent?.() ?? context.isCurrent(), context.canAdmitOccurrence);
-      },
-    };
-  }
   private scheduleOwner?: { sessionId: string; hostId: string; retired: boolean };
 
   private writeNativeState(file: string, data: unknown): void {
@@ -276,13 +224,17 @@ export class AgyExecutor implements IExecutor {
   }
   private assertNoRetainedSchedules(): void {
     if (this.acp?.hasJobs || this.scheduleOwner?.sessionId === this.conversationId) {
-      throw new Error('AGY native notifications may remain queued. Reconfiguration/recovery of this conversation is unavailable; keep its schedule evidence and use a new thread.');
+      throw new Error('AGY native notifications may remain queued. Resuming this conversation after host loss is unavailable; keep its schedule evidence and use a new thread.');
     }
   }
-  private assertScheduleResettable(): void {
+  private assertScheduleResettable(allowOwnedRetirement = false, detachSelection = false): void {
     if (fs.existsSync(this.sessionFilePath + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');
-    if (this.acpLeaseUnconfirmed && !this.acp) throw new Error('Previous AGY ACP host retirement is unconfirmed; retained session and hook evidence cannot be discarded.');
-    if (this.scheduleOwner?.sessionId === this.conversationId && !this.scheduleOwner.retired) {
+    if (this.acpLeaseUnconfirmed && !this.acp && !detachSelection) throw new Error('Previous AGY ACP host retirement is unconfirmed; retained session and hook evidence cannot be discarded.');
+    if (this.scheduleOwner && this.scheduleOwner.sessionId !== this.conversationId) {
+      throw new Error('AGY schedule owner does not match the original conversation; retained state cannot be discarded.');
+    }
+    if (this.scheduleOwner && !this.scheduleOwner.retired
+      && !(allowOwnedRetirement && this.acp?.sessionId === this.conversationId && this.acp.canRetireForContextReset)) {
       throw new Error('AGY native notifications have unresolved ownership; confirm exact host retirement before explicitly discarding this context.');
     }
   }
@@ -292,8 +244,7 @@ export class AgyExecutor implements IExecutor {
   }
   private acpRuntime(): AgyAcpRuntime {
     if (this.acp) return this.acp;
-    this.resumeCleanChat();
-    if (((!this.acpEligible || this.conversationId) && !this.resumePermit) || !this.agyHome || !this.threadId || this.proc || this.isDestroyed) {
+    if (((!this.acpEligible || this.conversationId)) || !this.agyHome || !this.threadId || this.proc || this.isDestroyed) {
       throw new Error('AGY scheduling requires a fresh ACP conversation. This saved/legacy conversation remains on its compatible transport; use a new AGY thread.');
     }
     const env = this.buildEnv();
@@ -301,16 +252,16 @@ export class AgyExecutor implements IExecutor {
     env.HOME = this.agyHome; env.USERPROFILE = this.agyHome;
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome,
       cwd: this.currentWorkingDirectory, threadId: this.threadId, model: this.model, effort: this.effort,
-      autoApprove: this.autoApprove, env, checkpoint: this.checkpoint(), resume: this.resumePermit, mcpServers: delegationSessionServers(this.delegationConnection), mapTool: mapAgyTool,
+      autoApprove: this.autoApprove, env, mcpServers: delegationSessionServers(this.delegationConnection), mapTool: mapAgyTool,
       saveSession: id => {
         // Unlike legacy best-effort persistence, native scheduling cannot proceed
         // without an original-session pointer on disk.
         this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: false, savedAt: new Date().toISOString() });
         this.conversationId = id; this.acpLeaseUnconfirmed = true;
       },
-      retireSession: id => {
-        this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: true, savedAt: new Date().toISOString() });
-        this.acpLeaseUnconfirmed = false;
+      ownedSessionClosed: id => {
+        // Exact current-process close permits an explicit local reset, never successor chat admission.
+        if (this.conversationId === id) this.acpLeaseUnconfirmed = false;
       },
       retainScheduleOwner: (sessionId, hostId, retired) => {
         const owner = { sessionId, hostId, retired };
@@ -318,7 +269,6 @@ export class AgyExecutor implements IExecutor {
         this.writeNativeState(file, owner); this.scheduleOwner = owner;
       },
     });
-    this.resumePermit = undefined;
     return this.acp;
   }
   async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
@@ -333,12 +283,11 @@ export class AgyExecutor implements IExecutor {
     }
     const runtime = this.acpRuntime();
     await runtime.start();
-    if (input.recovery) input = { ...input, recovery: { ...input.recovery, identity: this.recoveryIdentity() } };
     return runtime.create(input, emit, () => !this.isDestroyed && current() && admit());
   }
   preservesProcessOnAbort(): boolean { return !!this.acp; }
   hasPendingCancellation(): boolean { return !!this.acp?.hasJobs && !!this.acp.blocked; }
-  hasPendingScheduleMutation(): boolean { return this.acp?.pendingMutation ?? false; }
+  hasPendingScheduleMutation(): boolean { return this.acp?.cleanupMutationPending ?? false; }
 
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
@@ -482,7 +431,7 @@ export class AgyExecutor implements IExecutor {
       if (connection) throw new Error('AGY delegation requires a thread-scoped HOME');
       return;
     }
-    if (!this.cleanCheckpoint()) this.assertNoRetainedSchedules();
+    this.assertNoRetainedSchedules();
     this.configuringTools = true;
     try {
       if (this.acp) { await this.acp.close(); this.acp = undefined; this.acpEligible = false; }
@@ -557,11 +506,22 @@ export class AgyExecutor implements IExecutor {
 
   async resetContext(): Promise<void> {
     if (this.resettingNativeContext || this.configuringTools) throw new Error('AGY context reset or managed-tool configuration is already in progress');
-    this.assertScheduleResettable();
+    // Only an explicit reset may detach an unconfirmed ACP selection. Absence
+    // of an owner journal is NOT permission to execute or erase the old session.
+    const detachSelection = this.acpLeaseUnconfirmed && !this.acp && !this.proc && !!this.conversationId
+      && !this.scheduleOwner && !fs.existsSync(this.sessionFilePath + '.native-schedules');
+    this.assertScheduleResettable(true, detachSelection);
+    if (detachSelection) {
+      if (!detachAgySelection(this.sessionFilePath)) throw new Error('Saved AGY ACP selection changed; reset was refused.');
+      this.conversationId = null; this.acpLeaseUnconfirmed = false;
+      this.pendingContextSeed = null; this.contextRevision++;
+      this.acpEligible = this.nativeAcp && !!this.threadId;
+      return;
+    }
     this.resettingNativeContext = true;
     this.contextRevision++;
     try {
-      if (this.acp) { await this.acp.close(); this.acp = undefined; }
+      if (this.acp) { await this.acp.close(); this.assertScheduleResettable(); this.acp = undefined; }
       this.killProcess();
       await this.waitForExit();
       // Keep the old pointer until admitted observations finish. The caller must await reset.
@@ -570,7 +530,6 @@ export class AgyExecutor implements IExecutor {
       // /clear means a real fresh start. Do not erase resume evidence before exit.
       this.pendingContextSeed = null;
       this.clearConversationId(); this.acpLeaseUnconfirmed = false;
-      this.resumePermit = undefined; this.restoringCheckpoint = undefined;
       fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
       if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
       this.acpEligible = this.nativeAcp && !!this.threadId;
@@ -801,6 +760,7 @@ export class AgyExecutor implements IExecutor {
    */
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
     this.assertNoRetainedSchedules();
+    if (this.acpLeaseUnconfirmed && !this.acp) throw new Error('Saved AGY ACP chat cannot safely resume or compact. Use explicit /clear to select a fresh conversation when no schedule owner remains; original history is retained.');
     if (!this.proc && !this.conversationId) {
       return { success: true, output: 'No active conversation to compact.' };
     }
@@ -835,13 +795,15 @@ export class AgyExecutor implements IExecutor {
    * HOMEs) is left untouched.
    */
   async deleteThreadData(_threadId: string): Promise<void> {
-    this.assertScheduleResettable();
+    if (fs.existsSync(this.sessionFilePath + '.detached-acp')) throw new Error('Detached AGY ACP history has unconfirmed predecessor retirement. Thread data cannot be erased; keep the original history and ownership evidence.');
+    this.assertScheduleResettable(true);
     await this.destroy();
+    this.assertScheduleResettable();
     // Managed lanes retain brain deliverables and recovery evidence. Parent reset owns history cleanup.
     if (this.delegationWorker) return;
     this.clearConversationId();
     fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
-    if (this.scheduleOwner?.retired) fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true });
+    if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
     if (this.agyHome) {
       fs.rmSync(this.agyHome, { recursive: true, force: true });
     }
@@ -873,12 +835,11 @@ export class AgyExecutor implements IExecutor {
       console.warn('[AgyExecutor] AGY input supports text only — attachments were dropped');
     }
 
-    this.resumeCleanChat();
-    if (!this.acp && this.acpLeaseUnconfirmed) throw new Error('Previous AGY ACP host or hook restoration is unconfirmed. No saved conversation was resumed; retain its state for explicit recovery.');
+    if (!this.acp && this.acpLeaseUnconfirmed) throw new Error('Previous AGY ACP host retirement and pending reminders are unconfirmed. Saved chat cannot safely resume, even without a schedule journal. Use explicit /clear only when no schedule owner remains, or use a new thread; original history is retained.');
     if (!this.acp && this.scheduleOwner?.sessionId === this.conversationId) {
-      throw new Error('AGY native schedules from this saved conversation require unresolved queue recovery. No prompt was sent. Use /schedule list; automatic reconstruction is unavailable.');
+      throw new Error('AGY native reminders may remain in this saved conversation. No prompt was sent. Use /schedule list to inspect retained evidence and a new thread for chat; schedule restoration is unavailable.');
     }
-    if (this.acp || this.acpEligible || this.resumePermit) {
+    if (this.acp || this.acpEligible) {
       const runtime = this.acpRuntime();
       // Do not silently abandon a newly allocated ACP conversation on error.
       try { await runtime.start(); }
@@ -1036,9 +997,6 @@ export class AgyExecutor implements IExecutor {
     // This is a host/transport fence, not proof that escaped descendants retired.
     if (this.pendingExits.size) throw new Error('AGY predecessor transport has not closed');
 
-    // Compatible transport can admit unobserved native work. Revoke any older
-    // clean ACP proof before spawning it, even when configuration later reverts.
-    if (this.sessionFilePath && fs.existsSync(this.sessionFilePath + '.checkpoint')) fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
     const env = this.buildEnv();
     if (this.nativeObserver && this.agyHome) {
       const scope = path.join(this.agyHome, '.gemini', 'antigravity-cli');
@@ -1306,7 +1264,7 @@ export class AgyExecutor implements IExecutor {
         const session = JSON.parse(data);
         if (session.id) {
           this.conversationId = session.id;
-          this.acpLeaseUnconfirmed = session.transport === 'acp' && session.retired !== true;
+          this.acpLeaseUnconfirmed = session.transport === 'acp';
           console.log(`[AgyExecutor] Loaded conversation ID: ${this.conversationId}`);
         }
       }

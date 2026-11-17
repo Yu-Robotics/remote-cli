@@ -81,10 +81,11 @@ export class DshAcpClient extends AcpClient {
     } finally { this.foregroundSession = undefined; this.foregroundStopReason = undefined; }
   }
 
-  createNativeSchedule(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void) {
+  async createNativeSchedule(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
+    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void | Promise<void>, current: () => boolean = () => true) {
     if (!this.scheduleClient) throw new Error('Worker sessions cannot create schedules.');
     this.scheduleEnabled = true;
+    if (!current()) throw new Error('Native scheduling context changed.');
     return this.scheduleClient.create(sessionId, input, onEvent);
   }
 

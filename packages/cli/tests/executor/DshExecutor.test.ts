@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../../src/scheduling/ScheduleService';
+import { NativeScheduleNotAdmittedError } from '../../src/scheduling/types';
+import { ScheduledSessionGuard } from '../../src/scheduling/dsh/ScheduledSessionGuard';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { DshExecutor, type DshExecutorOptions } from '../../src/executor/DshExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
-import type { AcpContentBlock, AcpConfigOption } from '../../src/executor/acp/AcpTypes';
+import type { AcpContentBlock, AcpConfigOption, AcpMcpServer } from '../../src/executor/acp/AcpTypes';
 
 const model = '["deepseek-official","deepseek-v4-flash"]';
 const otherModel = '["deepseek-official","deepseek-v4-pro"]';
@@ -22,8 +25,8 @@ class FakeTransport implements AcpTransport {
     } });
   }
   initialize = vi.fn();
-  newSession = vi.fn(async () => ({ sessionId: this.id, configOptions: this.options }));
-  loadSession = vi.fn(async () => ({ configOptions: this.options }));
+  newSession = vi.fn(async (_cwd: string, _servers?: AcpMcpServer[]) => ({ sessionId: this.id, configOptions: this.options }));
+  loadSession = vi.fn(async (_sessionId: string, _cwd: string, _servers?: AcpMcpServer[]) => ({ configOptions: this.options }));
   prompt = vi.fn(async (_id: string, _blocks: AcpContentBlock[]) => {
     this.events.onThoughtChunk?.({ type: 'text', text: 'private reasoning' });
     this.events.onTextChunk?.({ type: 'text', text: 'public answer' });
@@ -49,6 +52,87 @@ describe('DshExecutor', () => {
   const pointer = () => path.join(directory, 'sessions', 'thread.json');
   const handoff = () => path.join(directory, 'sessions', 'thread.handoff.json');
   const current = () => transports[transports.length - 1];
+  it.each([false, true])('does not fence chat after pre-marker CREATE refusal (saved session=%s)', async saved => {
+    if (saved) {
+      await executor.execute('original context');
+      await executor.destroy();
+      executor = create();
+    }
+    const nativeCreate = vi.fn();
+    customize = transport => {
+      transport.initialize.mockRejectedValue(new Error('Synthetic session startup failure'));
+      (transport as any).createNativeSchedule = nativeCreate;
+    };
+    const owner = { threadId: 'thread', openId: 'synthetic-user', generation: 'generation' };
+    const catalogDir = path.join(directory, 'catalog');
+    const catalog = path.join(catalogDir, SCHEDULE_CATALOG_FILE);
+    const makeService = () => new ScheduleService({ directory: catalogDir, deliver: async () => {}, isOwnerCurrent: () => true,
+      provider: { cleanupFor: () => executor.nativeScheduleCleanup, create: (input, emit) => executor.createNativeSchedule(input, emit) } });
+    let service = makeService(); await service.initialize();
+    const input = { id: 'refused-job', backend: 'dsh' as const, cwd: directory, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron' as const, expression: '* * * * *', timezone: 'UTC' } };
+    try {
+      await expect(service.create(owner, input)).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(nativeCreate).not.toHaveBeenCalled();
+      expect(await service.list(owner)).toEqual([]);
+      expect(await service.listCleanup(owner)).toEqual([]);
+      await service.destroy(); service = makeService(); await service.initialize();
+      expect(await service.list(owner)).toEqual([]);
+      await expect(service.create(owner, input)).rejects.toThrow('already exists or was purged');
+      const guard = new ScheduledSessionGuard(path.join(directory, 'sessions'), 'thread', catalog);
+      expect(() => guard.assertResume('session-0')).not.toThrow();
+      expect(() => guard.assertResume('fresh-session')).not.toThrow();
+      await executor.destroy(); customize = undefined;
+      executor = create({ scheduleCatalog: catalog });
+      expect(await executor.execute('continue chat')).toMatchObject({ success: true });
+      if (saved) expect(current().loadSession).toHaveBeenCalledWith('session-0', directory);
+      else expect(current().newSession).toHaveBeenCalledOnce();
+    } finally { await service.destroy(); }
+  });
+
+  it.each(['success', 'ambiguous', 'cancel'] as const)('attributes DSH CREATE before mutation and retains exact cleanup through %s', async outcome => {
+    const owner = { threadId: 'thread', openId: 'synthetic-user', generation: 'generation' };
+    const catalogDir = path.join(directory, 'catalog');
+    const catalog = path.join(catalogDir, SCHEDULE_CATALOG_FILE);
+    const read = () => JSON.parse(fs.readFileSync(catalog, 'utf8'));
+    const cancel = vi.fn(async () => {}), stop = vi.fn(async () => {});
+    customize = transport => {
+      (transport as any).createNativeSchedule = vi.fn(async () => {
+        expect(JSON.parse(read().records[0].recovery.identity)).toEqual({ sessionId: 'session-0', cwd: directory, threadId: 'thread' });
+        if (outcome === 'ambiguous') throw new Error('Native CREATE outcome unknown');
+        return { nativeId: 'synthetic-task', cancel, stop, list: vi.fn(async () => true) };
+      });
+    };
+    const makeService = () => new ScheduleService({ directory: catalogDir, deliver: async () => {}, isOwnerCurrent: () => true,
+      provider: { cleanupFor: () => executor.nativeScheduleCleanup, create: (input, emit) => executor.createNativeSchedule(input, emit) } });
+    let service = makeService(); await service.initialize();
+    try {
+      const created = service.create(owner, { id: 'job', backend: 'dsh', cwd: directory, prompt: 'Synthetic reminder',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
+      if (outcome === 'ambiguous') await expect(created).rejects.toThrow('outcome unknown');
+      else await created;
+      if (outcome === 'cancel') await service.cancel(owner, 'job');
+      const guard = new ScheduledSessionGuard(path.join(directory, 'guard'), 'thread', catalog);
+      expect(() => guard.assertResume('session-0')).toThrow('blocked');
+      guard.assertResume('fresh-session');
+      await service.destroy(); service = makeService(); await service.initialize();
+      expect(service.hasActiveSchedules()).toBe(false);
+      await service.purge(owner, { ids: ['job'] });
+      const cleanup = await service.listCleanup(owner);
+      expect(cleanup[0].attribution?.sessionId).toBe('session-0');
+      expect(() => guard.assertResume('session-0')).toThrow('blocked'); guard.assertResume('fresh-session');
+      expect(current().prompt).not.toHaveBeenCalled();
+    } finally { await service.destroy(); }
+  });
+
+  it('does not mutate native scheduling if durable attribution is rejected', async () => {
+    const createNative = vi.fn(); customize = transport => { (transport as any).createNativeSchedule = createNative; };
+    await expect(executor.createNativeSchedule({ id: 'job', backend: 'dsh', cwd: directory, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, async () => { throw new Error('Attribution storage unavailable'); }))
+      .rejects.toThrow('Attribution storage unavailable');
+    expect(createNative).not.toHaveBeenCalled();
+  });
+
   it('uses the active foreground transport for management without awaiting its model turn or opening another session', async () => {
     await executor.execute('original context');
     const transport = current();
@@ -65,7 +149,7 @@ describe('DshExecutor', () => {
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
     const jobs = await shared.createNativeSchedule({ id: 'job', backend: 'dsh', cwd: directory, prompt: 'Use context',
       rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {});
-    expect((sharedTransport as any).createNativeSchedule).toHaveBeenCalledWith(shared.getSessionId(), expect.anything(), expect.any(Function));
+    expect((sharedTransport as any).createNativeSchedule).toHaveBeenCalledWith(shared.getSessionId(), expect.anything(), expect.any(Function), expect.any(Function));
     expect(sharedTransport.newSession).toHaveBeenCalledOnce();
     await jobs.cancel(); expect(sharedTransport.sendCancel).not.toHaveBeenCalled(); expect(sharedTransport.destroy).not.toHaveBeenCalled();
     finish(); await foreground;
@@ -118,12 +202,13 @@ describe('DshExecutor', () => {
   beforeEach(() => {
     directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'remote-cli-dsh-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    vi.stubEnv('HOME', directory); vi.stubEnv('USERPROFILE', directory);
     transports = []; executors = []; images = false; customize = undefined;
     executor = create();
   });
   afterEach(async () => {
     for (const instance of executors) { await instance.destroy(); await instance.waitForExit(); }
-    vi.restoreAllMocks();
+    vi.restoreAllMocks(); vi.unstubAllEnvs();
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
@@ -142,9 +227,59 @@ describe('DshExecutor', () => {
     expect(current().loadSession).not.toHaveBeenCalled();
   });
 
+  it('blocks unqualified scheduled-session resume before spawning, including failed CREATE, while retaining the pointer', async () => {
+    customize = item => { (item as any).createNativeSchedule = vi.fn(async () => { throw new Error('ambiguous native CREATE'); }); };
+    await executor.execute('original');
+    await expect(executor.createNativeSchedule({ id: 'fixture-job', cwd: directory, prompt: 'fixture',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {})).rejects.toThrow('ambiguous');
+    const original = fs.readFileSync(pointer(), 'utf8');
+    await executor.destroy(); const count = transports.length;
+    executor = create();
+    expect(await executor.execute('continue')).toMatchObject({ success: false, error: expect.stringContaining('automatic resume is blocked') });
+    expect(transports).toHaveLength(count); expect(fs.readFileSync(pointer(), 'utf8')).toBe(original);
+    const ordinary = create({ threadId: 'ordinary-sibling' });
+    expect(await ordinary.execute('normal')).toMatchObject({ success: true });
+  });
+
   it('rejects owned history overlays on ordinary foreground executors', () => {
     expect(() => create({ managedHistoryPatch: '- id: synthetic-owned-scope\n' })).toThrow('managed worker');
     expect(transports).toHaveLength(0);
+  });
+
+  it('keeps scheduled-session refusal after cancellation and confirmed local transport exit', async () => {
+    const handle = { nativeId: 'fixture-native', list: vi.fn(async () => false),
+      cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    customize = item => { (item as any).createNativeSchedule = vi.fn(async () => handle); };
+    await executor.execute('original');
+    const job = await executor.createNativeSchedule({ id: 'fixture-job', cwd: directory, prompt: 'fixture',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {});
+    await job.cancel();
+    // Native deletion does not remove reminders already persisted in the original inbox.
+    const original = fs.readFileSync(pointer(), 'utf8');
+    const transport = current();
+    transport.prompt.mockRejectedValueOnce(new Error('fixture transport failure'));
+    expect(await executor.execute('interrupted')).toMatchObject({ success: false });
+    await executor.waitForExit();
+    expect(transport.destroy).toHaveBeenCalled();
+    expect(transport.waitForExit).toHaveBeenCalled();
+    const count = transports.length;
+    expect(await executor.execute('continue')).toMatchObject({ success: false,
+      error: expect.stringContaining('automatic resume is blocked') });
+    expect(transports).toHaveLength(count);
+    expect(fs.readFileSync(pointer(), 'utf8')).toBe(original);
+    expect(handle.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('resumes ordinary local transport failures in the same session without a scheduling obligation', async () => {
+    await executor.execute('original');
+    const session = executor.getSessionId();
+    current().prompt.mockRejectedValueOnce(new Error('fixture transport failure'));
+    expect(await executor.execute('interrupted')).toMatchObject({ success: false });
+    await executor.waitForExit();
+    expect(await executor.execute('continue')).toMatchObject({ success: true });
+    expect(current().loadSession).toHaveBeenCalledWith(session, directory);
+    expect(current().newSession).not.toHaveBeenCalled();
+    expect(executor.getSessionId()).toBe(session);
   });
 
   it('fails before creating a process when the requested working directory is not allowed', () => {
@@ -355,7 +490,7 @@ describe('DshExecutor', () => {
     const connection = { url: 'http://127.0.0.1:1234', token: 'fixture-token', groups: ['scheduling'] as const };
     await executor.configureManagedTools(connection); await executor.execute('first');
     const first = current();
-    expect(first.newSession.mock.calls[0][1][0].env).toContainEqual({ name: 'REMOTE_CLI_TOOL_GROUPS', value: '["scheduling"]' });
+    expect(first.newSession.mock.calls[0]?.[1]?.[0].env).toContainEqual({ name: 'REMOTE_CLI_TOOL_GROUPS', value: '["scheduling"]' });
     await executor.configureManagedTools({ ...connection }); await executor.execute('second');
     expect(current()).toBe(first);
     await executor.configureManagedTools({ ...connection, groups: ['delegation', 'scheduling'] }); await executor.execute('third');

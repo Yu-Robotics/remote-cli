@@ -148,8 +148,8 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
-  /** Opt-in cross-process reconciliation; absent until native ownership/handoff is proven. */
-  nativeScheduleRecovery?: import('../scheduling/types').NativeScheduleRecovery;
+  /** Exact retained cancellation only; never restores execution or starts a host. */
+  nativeScheduleCleanup?: import('../scheduling/types').NativeScheduleCleanup;
   /** Native timing in the existing foreground conversation; never fork its history. */
   createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
     onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void | Promise<void>, isOwnerCurrent?: () => boolean,

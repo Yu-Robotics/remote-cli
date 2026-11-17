@@ -74,7 +74,7 @@ export function createExecutor(
   threadId?: string,
   model?: string,
   effort?: string,
-  runtime: { lifecycleHooks?: boolean; delegationWorker?: boolean; speed?: string | null } = {},
+  runtime: { lifecycleHooks?: boolean; delegationWorker?: boolean; speed?: string | null; scheduleCatalog?: string } = {},
 ): IExecutor {
   const executorType = executorConfig.type as string;
   switch (executorType) {
@@ -169,6 +169,7 @@ export function createExecutor(
         dshCommand: executorConfig.dsh?.command,
         delegationWorker: runtime.delegationWorker,
         threadId,
+        scheduleCatalog: runtime.scheduleCatalog,
       });
 
     case 'claude-persistent':

@@ -44,6 +44,9 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   get busy(): boolean { return this.boundary !== undefined || !!this.operation; }
   get hasJobs(): boolean { return this.jobs.size > 0; }
   get pendingMutation(): boolean { return !!this.operation || !!this.scope; }
+  // The admitted management scope is not itself an unsettled native receipt.
+  // Keep it in pendingMutation for host transitions, but allow its own purge.
+  get cleanupMutationPending(): boolean { return !!this.operation || this.mutationUncertain && !this.exited; }
   async withOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
     if (this.scope || (inTurn && !this.foreground)) throw new Error('AGY schedule operation scope is unavailable.');
     this.check(); this.scope = { id, current, inTurn };
@@ -57,16 +60,16 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   private failure?: string;
   private backgroundUnknown = false;
   private mutationUncertain = false;
-  private checkpointInvalid = false;
-  private checkpointCaptured = false;
-  private checkpointCancellation = false;
+  private cancellationInvalid = false;
+  private cancellationCaptured = false;
+  private cancellationInProgress = false;
   /** Guard only the interval before ANY possible native firing. This does not
    * deduce queue emptiness from inventory or from fullyIdle. */
-  checkpointWindow(allowForeground = false, allowManagementScope = false): () => void {
+  cancellationWindow(allowForeground = false, allowManagementScope = false): () => void {
     this.check();
     if (this.operation || this.scope && (!allowManagementScope || this.scope.inTurn) || (!allowForeground && (this.foreground || this.boundary !== undefined))
       || this.backgroundUnknown || this.mutationUncertain || this.observed.size || this.pendingWakes.size) {
-      throw new Error('AGY checkpoint requires never-fired definitions and no unknown native work.');
+      throw new Error('AGY cancellation retirement requires never-fired definitions and no unknown native work.');
     }
     const now = Date.now(), mono = performance.now();
     const cutoffs = [...this.jobs.values()].filter(job => !job.retiredBeforeWake).map(job => job.firstPossibleWake ?? 0);
@@ -75,13 +78,13 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     const check = () => {
       // Reject clock discontinuities and require exit before the earliest native
       // deadline, including a reserve for clock granularity. No timer drives work.
-      if (this.checkpointInvalid || [...this.jobs.values()].some(job => !job.cancelled && !job.completed && !job.admit()) || this.backgroundUnknown || this.mutationUncertain || this.observed.size || this.pendingWakes.size
+      if (this.cancellationInvalid || [...this.jobs.values()].some(job => !job.cancelled && !job.completed && !job.admit()) || this.backgroundUnknown || this.mutationUncertain || this.observed.size || this.pendingWakes.size
         || Date.now() + 1000 >= cutoff || performance.now() + 1000 >= deadline
         || Math.abs((Date.now() - now) - (performance.now() - mono)) > 250) {
-        throw new Error('AGY checkpoint deadline or queued-work proof expired; reconstruction is blocked.');
+        throw new Error('AGY cancellation deadline or queued-work proof expired; retirement is unconfirmed.');
       }
     };
-    check(); this.checkpointCaptured = true; return check;
+    check(); this.cancellationCaptured = true; return check;
   }
 
   private exited = false;
@@ -102,8 +105,8 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     this.hostId = options.hostId ?? randomUUID();
   }
 
-  get status(): { qualified: boolean; blocked?: string; recovery: false } {
-    return { qualified: this.ready && !this.failure, blocked: this.failure, recovery: false };
+  get status(): { qualified: boolean; blocked?: string } {
+    return { qualified: this.ready && !this.failure, blocked: this.failure };
   }
 
   /** Explicit native inventory management, never an idle wakeup nudge. The
@@ -177,7 +180,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
           self.check();
           if (!job.id) throw new Error('AGY native identity is unresolved; no blind deletion or recreation is allowed.');
           let beforeWake: (() => void) | undefined;
-          try { beforeWake = self.checkpointWindow(false, true); } catch { /* Deletion still works without an execution-retirement receipt. */ }
+          try { beforeWake = self.cancellationWindow(false, true); } catch { /* Deletion still works without an execution-retirement receipt. */ }
           if (await self.present(job)) {
             if (await self.run({ tool: 'manage_task', input: { Action: 'kill', TaskId: job.id } }) !== true
               || await self.present(job)) throw new Error('AGY exact native deletion is unconfirmed.');
@@ -211,24 +214,24 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   beginForeground(): void { this.check(); if (this.operation || this.foreground || this.boundary !== undefined) throw new Error('AGY host is busy.'); this.foregroundResult = undefined; this.foreground = true; this.executionForeground = true; }
   endForeground(): { success: boolean; output: string } | undefined { this.foreground = false; return this.foregroundResult; }
   foregroundCancelled(): void {
-    this.checkpointCancellation = this.checkpointCaptured;
+    this.cancellationInProgress = this.cancellationCaptured;
     this.foreground = false;
-    this.stopForTransition('AGY foreground cancelled: native notifications may remain queued. Automatic dispatch/recovery is unconfirmed; no management prompt or reconstruction was sent.');
+    this.stopForTransition('AGY foreground cancelled: native notifications may remain queued. Further dispatch is blocked; no management prompt was sent.');
   }
   processClosed(confirmed: boolean): void {
     this.exited = confirmed;
     for (const job of this.jobs.values()) job.absent = false;
-    this.stopForTransition(confirmed ? 'AGY native host exited; queued work and restart recovery remain unresolved.' : 'AGY native host retirement is unconfirmed.', confirmed);
+    this.stopForTransition(confirmed ? 'AGY native host exited; queued work remains unresolved; schedules are not restored.' : 'AGY native host retirement is unconfirmed.', confirmed);
   }
   private ownershipLost(reason: string): void {
     // sendCancel deliberately revokes ACP admission. Late authenticated receipts
     // still invalidate the proof if they contain unknown work; token revocation
     // alone must not defeat the already captured, deadline-bounded exit check.
-    if (this.checkpointCancellation) this.stopForTransition(reason);
+    if (this.cancellationInProgress) this.stopForTransition(reason);
     else this.fence(reason);
   }
   fence(reason: string, exitConfirmed = false): void {
-    this.checkpointInvalid = true;
+    this.cancellationInvalid = true;
     this.stopForTransition(reason, exitConfirmed);
   }
   private stopForTransition(reason: string, exitConfirmed = false): void {
@@ -280,7 +283,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
       if (event === 'Stop' && this.boundary !== undefined) this.complete(payload, records);
       return {};
     } catch {
-      this.fence('AGY hook/transcript evidence is invalid or incomplete; automatic execution recovery is blocked.');
+      this.fence('AGY hook/transcript evidence is invalid or incomplete; further execution is blocked.');
       return event === 'PreInvocation' ? { terminationBehavior: 'terminate' }
         : event === 'PreToolUse' ? { decision: 'deny', reason: this.failure } : {};
     }
@@ -293,7 +296,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     if (!call || typeof call.name !== 'string' || typeof call.id !== 'string' || call.id.length > 256
       || !Number.isSafeInteger(payload.stepIdx) || (payload.stepIdx as number) < 0) return deny;
     const op = this.operation;
-    if (!['schedule', 'manage_task'].includes(call.name) && !/remote_cli_schedule_(create|list|cancel|operation|capabilities)$/.test(call.name)) this.backgroundUnknown = true;
+    if (!['schedule', 'manage_task'].includes(call.name) && !/remote_cli_schedule_(create|list|cancel|purge|operation|capabilities)$/.test(call.name)) this.backgroundUnknown = true;
     if (!op) return ['schedule', 'manage_task'].includes(call.name) ? deny : { decision: 'allow' };
     if (this.scope?.inTurn && !['schedule', 'manage_task'].includes(call.name)) return { decision: 'allow' };
     if (this.scope && !this.scope.current()) return deny;

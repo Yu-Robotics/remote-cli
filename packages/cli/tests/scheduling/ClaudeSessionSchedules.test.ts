@@ -35,7 +35,7 @@ function harness() {
     adapter.accept({ type: 'command_lifecycle', command_uuid: id, state: 'completed' });
   };
   async function create(id = 'job-one', nativeId = 'native-one', onEvent = vi.fn(), rule = input().rule, admit?: () => boolean) {
-    const promise = adapter.inToolOperation(`operation-${id}`, () => true, () => adapter.create({ ...input(id), rule }, onEvent, undefined, undefined, false, undefined, admit));
+    const promise = adapter.inToolOperation(`operation-${id}`, () => true, () => adapter.create({ ...input(id), rule }, onEvent, undefined, undefined, admit));
     const action = adapter.action(`operation-${id}`)!;
     expect(action.tool).toBe('CronCreate');
     expect(hook(action.tool, action.input, `tool-${id}`)).toEqual({});
@@ -197,14 +197,14 @@ describe('Claude foreground native schedule protocol', () => {
       };
       if (reason === 'native-timezone') timezone = 'Invalid/Timezone';
       await expect(h.adapter.inToolOperation('refused', () => true,
-        () => h.adapter.create(value, events, () => true, timezone, false, undefined, admit)))
+        () => h.adapter.create(value, events, () => true, timezone, admit)))
         .rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
       expect(h.adapter.action('refused')).toBeUndefined(); expect(h.adapter.hasJobs).toBe(false);
       expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled();
       expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled(); h.adapter.processClosed();
     });
 
-  it.each(['closed', 'restart', 'capacity'])(
+  it.each(['closed', 'capacity'])(
     'refuses a fresh job before dispatch when the adapter is blocked by %s', async reason => {
       const h = harness();
       if (reason === 'closed') h.adapter.processClosed();
@@ -225,16 +225,6 @@ describe('Claude foreground native schedule protocol', () => {
     expect(h.occurrence(String(existing.action.input.prompt))).toEqual({}); h.complete();
     expect(existing.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed' })); h.adapter.processClosed();
   });
-
-  it.each([true, 'adopt', 'adopt-existing', 'expected-id'] as const)(
-    'keeps validation failure uncertain when restoring a possibly existing definition (%s)', async restore => {
-      const h = harness();
-      const failure = await h.adapter.create({ ...input(), rule: { kind: 'cron', expression: 'invalid', timezone: 'UTC' } },
-        vi.fn(), () => true, 'UTC', restore === 'expected-id' ? false : restore,
-        restore === 'expected-id' ? 'original-native' : undefined).catch(error => error);
-      expect(failure).toBeInstanceOf(Error); expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
-      expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled(); h.adapter.processClosed();
-    });
 
   it('inventories arbitrary reviewed native definitions without granting admission or accepting uncorrelated receipts', async () => {
     const h = harness(); let current = true;
@@ -503,45 +493,6 @@ describe('Claude foreground native schedule protocol', () => {
     expect(h.manage).not.toHaveBeenCalled(); expect(h.adapter.busy).toBe(false); h.adapter.processClosed();
   });
 
-  it('expires only the captured recovery scope and joins its late management terminal', async () => {
-    const h = harness(); let finish!: (value: { success: boolean }) => void;
-    h.manage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-    const restored = { ...input(), recovery: { version: 1 as const, provider: 'fixture', strategy: 'reconstruct' as const,
-      identity: JSON.stringify({ marker: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }) } };
-    const pending = h.adapter.inToolOperation('restore-old', () => true, () => h.adapter.create(restored, vi.fn(), undefined, undefined, true), false);
-    const failure = expect(pending).rejects.toThrow('authorization expired');
-    h.adapter.foregroundDispatched('management-old', true);
-    h.adapter.expireRecovery('unrelated');
-    expect(h.manage).toHaveBeenCalledOnce();
-    h.adapter.expireRecovery('restore-old'); await failure;
-    const joined = vi.fn(); const settlement = h.adapter.settleManagement().then(joined);
-    await Promise.resolve(); expect(joined).not.toHaveBeenCalled();
-    finish({ success: true }); await Promise.resolve(); await Promise.resolve();
-    expect(joined).not.toHaveBeenCalled();
-    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'unrelated-turn', state: 'completed' });
-    await Promise.resolve(); expect(joined).not.toHaveBeenCalled();
-    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'management-old', state: 'completed' });
-    await settlement; expect(joined).toHaveBeenCalledOnce();
-    const next = h.adapter.inToolOperation('restore-new', () => true, () => h.adapter.create(input('new'), vi.fn()), false);
-    h.adapter.foregroundDispatched('management-new', true);
-    h.adapter.expireRecovery('restore-old');
-    const action = JSON.parse(h.manage.mock.calls.at(-1)![0]!.split('\n').at(-1)!);
-    expect(h.hook(action.tool, action.input)).toEqual({}); h.receipt(h.created());
-    expect((await next).nativeId).toBe('native-one'); h.adapter.processClosed();
-  });
-  it('retains an invoked mutation receipt after recovery expiry and blocks its stale wake before inference', async () => {
-    const h = harness();
-    const pending = h.adapter.inToolOperation('restore-invoked', () => true, () => h.adapter.create(input(), vi.fn()), false);
-    h.adapter.foregroundDispatched('management-invoked', true);
-    const action = JSON.parse(h.manage.mock.calls.at(-1)![0]!.split('\n').at(-1)!);
-    expect(h.hook(action.tool, action.input)).toEqual({});
-    h.adapter.expireRecovery('restore-invoked');
-    expect(h.adapter.cleanupMutationPending).toBe(true);
-    h.receipt(h.created()); expect((await pending).nativeId).toBe('native-one');
-    expect(h.occurrence(action.input.prompt)).toHaveProperty('decision', 'block');
-    h.adapter.processClosed();
-  });
-
   it('uses queued same-session management for slash/card controls and denies unrelated tools during it', async () => {
     const h = harness(); const events = vi.fn();
     const pending = h.adapter.create(input(), events);
@@ -674,42 +625,6 @@ describe('Claude foreground native schedule protocol', () => {
     h.receipt(h.created(), 'unguarded'); h.adapter.foregroundEnded();
     await failure; expect(h.adapter.hasJobs).toBe(true); h.adapter.processClosed();
   });
-
-  it.each(['valid', 'missing', 'duplicate', 'prompt', 'cron', 'durable', 'recurring-string', 'recurring-number', 'id-collision', 'changed-id'])(
-    'requires exact structured native ownership when adopting (%s)', async variant => {
-      const h = harness(); const marker = '11111111-1111-4111-8111-111111111111';
-      const restored = { ...input(), recovery: { version: 1 as const, provider: 'fixture', strategy: 'reconstruct' as const,
-        identity: JSON.stringify({ marker }) } };
-      const events = vi.fn();
-      const operation = h.adapter.inToolOperation('restore', () => true,
-        () => h.adapter.create(restored, events, () => true, 'UTC', 'adopt', 'original-native'));
-      const failure = variant === 'valid' ? undefined : expect(operation).rejects.toThrow();
-      const row = { id: 'original-native', prompt: `[remote-cli:${marker}]\n${restored.prompt}`, cron: '* * * * *', recurring: true, durable: false };
-      const jobs = [row];
-      if (variant === 'duplicate') jobs.push({ ...row, id: 'duplicate-native' });
-      if (variant === 'id-collision') jobs.push({ ...row, prompt: 'Unrelated task' });
-      if (variant === 'prompt') row.prompt += ' changed';
-      if (variant === 'cron') row.cron = '0 * * * *';
-      if (variant === 'durable') row.durable = true;
-      if (variant === 'recurring-string') Object.assign(row, { recurring: 'false' });
-      if (variant === 'recurring-number') Object.assign(row, { recurring: 1 });
-      if (variant === 'changed-id') row.id = 'changed-native-id';
-      // A restored wake arriving during inspection must not become a later admission.
-      expect(h.hook('CronList', {})).toEqual({});
-      h.adapter.accept({ type: 'user', ...(variant === 'missing' ? {} : { tool_use_result: { jobs } }),
-        message: { content: [{ type: 'tool_result', tool_use_id: 'tool-one', content: 'Native human-readable summary.' }] } });
-      h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'queued-before-adoption', state: 'started', wakeup_source: 'schedule_wakeup' });
-      if (failure) await failure;
-      else {
-        expect((await operation).nativeId).toBe('original-native');
-        expect(h.adapter.action('restore')).toBeUndefined();
-        h.adapter.accept({ type: 'control_request', request_id: 'stale-wake', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-          input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: row.prompt } } });
-        expect(h.send.mock.calls.at(-1)![0].response.response.decision).toBe('block');
-        expect(events).not.toHaveBeenCalled();
-      }
-      h.adapter.processClosed();
-    });
 
   describe('retained cancellation without execution recovery', () => {
     const marker = '11111111-1111-4111-8111-111111111111';

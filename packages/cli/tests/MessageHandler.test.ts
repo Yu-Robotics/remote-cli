@@ -1102,43 +1102,18 @@ describe('MessageHandler', () => {
   });
 
   describe('automatic update readiness', () => {
-    it('releases an update-specific fence only after service and executor readiness settle for the same generation', () => {
+    it('checks active work, native mutation and delivery without an update handoff', async () => {
       const handler = ctx.handler as any;
-      const id = 'default-thread-id';
-      const generation = handler.scheduleGeneration(id);
-      handler.automaticUpdateScheduleThreads.set(id, generation);
-      const service = {
-        hasUnresolvedHandoff: vi.fn(() => true), hasUnresolvedRecovery: vi.fn(() => false),
-        hasPendingRecovery: vi.fn(() => false), canSuspendForRestart: vi.fn(() => true),
-        hasActiveSchedules: vi.fn(() => false), recover: vi.fn(), suspendForRestart: vi.fn(),
-      };
+      const service = { canRestartWithoutActiveWork: vi.fn(() => false), recover: vi.fn() };
       handler.schedules = service;
       const executor = { hasPendingScheduleMutation: vi.fn(() => true), hasUncertainShutdown: vi.fn(() => false) };
       vi.spyOn(ctx.mockThreadPool, 'getExistingExecutor').mockReturnValue(executor as any);
       expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      service.hasUnresolvedHandoff.mockReturnValue(false);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      executor.hasPendingScheduleMutation.mockReturnValue(false);
-      executor.hasUncertainShutdown.mockReturnValue(true);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      executor.hasUncertainShutdown.mockReturnValue(false);
-      handler.automaticUpdateScheduleThreads.set(id, 'different-owner-generation');
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      handler.automaticUpdateScheduleThreads.set(id, generation);
-      service.hasUnresolvedRecovery.mockReturnValue(true);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      service.hasUnresolvedRecovery.mockReturnValue(false);
-      service.hasPendingRecovery.mockReturnValue(true);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      service.hasPendingRecovery.mockReturnValue(false);
-      service.canSuspendForRestart.mockReturnValue(false);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
-      service.canSuspendForRestart.mockReturnValue(true);
-      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
-      expect(handler.automaticUpdateScheduleThreads.size).toBe(0);
-      expect(service.recover).not.toHaveBeenCalled();
-      expect(service.suspendForRestart).not.toHaveBeenCalled();
-      handler.schedules = undefined;
+      service.canRestartWithoutActiveWork.mockReturnValue(true); expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      executor.hasPendingScheduleMutation.mockReturnValue(false); executor.hasUncertainShutdown.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false); executor.hasUncertainShutdown.mockReturnValue(false);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true); await ctx.handler.prepareAutomaticUpdate(); await ctx.handler.endAutomaticUpdate();
+      expect(service.recover).not.toHaveBeenCalled(); handler.schedules = undefined;
     });
 
     it('resumes command execution after a manual-mode update without restarting', async () => {

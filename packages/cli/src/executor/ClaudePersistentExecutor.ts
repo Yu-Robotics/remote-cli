@@ -2,8 +2,8 @@ import type { NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleRecoverySettledError, NativeScheduleCleanupError } from '../scheduling/types';
-import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleRecovery, NativeScheduleRelease } from '../scheduling/types';
+import { NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from '../scheduling/types';
+import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleCleanup } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
@@ -542,12 +542,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return data;
   }
 
-  private scheduleRestart?: {
-    child: ChildProcess; epoch: number; adapter: ClaudeSessionSchedules;
-    release?: Promise<NativeScheduleRelease>; endRequested?: boolean;
-    exit?: { code: number | null; signal: NodeJS.Signals | null };
-  };
-  private scheduleRestoring?: object;
   private scheduleOwnership?: ClaudeScheduleOwnership;
   private scheduleOwnershipSession?: string;
   private scheduleHostOwnership(): ClaudeScheduleOwnership {
@@ -560,13 +554,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return this.scheduleOwnership!;
   }
 
-  get nativeScheduleRecovery(): NativeScheduleRecovery | undefined {
+  get nativeScheduleCleanup(): NativeScheduleCleanup | undefined {
     // Advertise the adapter before cold startup; native operations still require
     // the current host's tools, hooks, lifecycle evidence and confirmed receipts.
     if (this.delegationWorker || this.sandbox.isRestricted()) return undefined;
     return {
-      provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', orderlyOnly: true, futureOnly: true,
-      handoffPolicy: 'skip-unadmitted',
+      provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct',
       cancelRetained: async (record, context) => {
         const identity = JSON.parse(record.recovery!.identity);
         const child = this.claudeProcess, epoch = this.stopEpoch;
@@ -595,112 +588,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       describe: input => JSON.stringify({ marker: randomUUID(), sessionId: this.sessionId,
         cwd: input.cwd, threadId: this.threadId, model: this.model, effort: this.effort,
         effectiveModel: this.acknowledgedModel || this.reportedModel || this.model }),
-      finishRestart: () => this.finishScheduleRestart(),
-      releaseRestartAdmission: () => {
-        const state = this.scheduleRestart;
-        if (state?.exit?.code === 0 && !state.exit.signal && state.endRequested
-          && state.epoch === this.stopEpoch && !this.claudeProcess) this.scheduleRestart = undefined;
-      },
-      reconcile: async (record, context, emit) => {
-        let identity: { ownerToken?: string; sessionId: string; cwd: string; threadId: string; model?: string; effort?: string; effectiveModel?: string };
-        let clean: boolean | undefined;
-        // Only this synchronous preflight can certify that no native admission
-        // began. Failures after host startup retain the ordinary uncertainty fence.
-        try {
-          identity = JSON.parse(record.recovery!.identity);
-          clean = record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent;
-          if ((!clean && (!record.recovery?.futureOnly || record.rule.kind !== 'cron'))
-            || record.recovery?.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
-            || context.signal.aborted || !identity.sessionId || identity.sessionId !== this.sessionId
-            || identity.cwd !== this.currentWorkingDirectory || identity.threadId !== this.threadId
-            || identity.model !== this.model || identity.effort !== this.effort) {
-            throw new Error('Original Claude context or recovery evidence changed.');
-          }
-          if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
-          this.scheduleRestart = undefined;
-          const ownership = this.scheduleHostOwnership();
-          ownership.reserve(!!clean, identity.ownerToken);
-          if (!clean) ownership.assertRebootRecovery();
-        } catch (error) {
-          throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native recovery preflight refused admission.');
-        }
-        const restoration = {};
-        this.scheduleRestoring = restoration;
-        const epoch = this.stopEpoch;
-        const current = () => this.scheduleRestoring === restoration && this.stopEpoch === epoch
-          && !this.isDestroyed && context.isCurrent() && !context.signal.aborted && this.sessionId === identity.sessionId;
-        const input: NativeScheduleInput = { id: record.id, threadId: record.threadId, backend: 'claude',
-          cwd: record.cwd, prompt: record.prompt, rule: record.rule, ...record.execution, recovery: record.recovery };
-        let handle: NativeScheduleHandle | undefined;
-        let adapter: ClaudeSessionSchedules | undefined;
-        const expire = () => adapter?.expireRecovery(`restore-${record.id}`);
-        context.signal.addEventListener('abort', expire, { once: true });
-        try {
-          await this.listModels();
-          if (!current()) throw new Error('Claude recovery owner changed.');
-          if (!this.claudeProcess?.pid || this.turnLedger.invalid || this.turnLedger.pid !== this.claudeProcess.pid
-            || this.turnLedger.session && !this.turnLedger.supported(this.claudeProcess.pid)
-            || typeof identity.effectiveModel !== 'string' || !identity.effectiveModel) throw new Error('Original Claude model or supported host is unavailable.');
-          const child = this.claudeProcess;
-          if (this.model !== identity.effectiveModel) {
-            const response = await this.nativeControl('set_model', { model: identity.effectiveModel });
-            if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery model owner changed.');
-            if (!response || typeof response !== 'object' || (response as Record<string, unknown>).model !== identity.effectiveModel) {
-              throw new Error('Claude recovery model selection is unconfirmed.');
-            }
-            this.recordModelSelection(identity.effectiveModel);
-          }
-          this.scheduleHostOwnership().bindHost(child.pid!);
-          adapter = this.schedules();
-          const timezone = await this.readNativeScheduleTimezone();
-          if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery host changed.');
-          handle = await adapter.inToolOperation(`restore-${record.id}`, current,
-            () => adapter!.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId, context.canAdmitOccurrence), false);
-          if (!current() || this.claudeProcess !== child || !this.turnLedger.supported(child?.pid)) throw new NativeScheduleCleanupError('Claude recovery host or protocol changed.', handle);
-          const recovered = this.recoverableScheduleHandle(handle, input, restoration);
-          this.scheduleRestoring = undefined;
-          return recovered;
-        } catch (error) {
-          if (error instanceof NativeScheduleAbsentError && this.scheduleRestoring === restoration) this.scheduleRestoring = undefined;
-          const cleanup = error instanceof NativeScheduleCleanupError ? error.handle : handle;
-          if (cleanup) throw new NativeScheduleCleanupError(error instanceof Error ? error.message : 'Claude recovery failed after native creation.',
-            this.recoverableScheduleHandle(cleanup, input, restoration));
-          // No cleanup handle means the adapter never admitted a mutation. Still
-          // join its exact management turn before reopening ordinary input.
-          const settled = adapter?.settleManagement() ?? Promise.resolve();
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          try {
-            await Promise.race([settled, new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Native recovery management settlement timed out.')), 60_000);
-            })]);
-          } catch (settlementError) {
-            if (this.scheduleRestoring !== restoration || this.stopEpoch !== epoch) throw settlementError;
-            if (adapter?.hasJobs || adapter?.admittedWork || adapter?.cleanupMutationPending
-              || !this.turnLedger.inventory || this.turnLedger.inventory.size
-              || [...this.turnLedger.tasks.values()].some(task => !task.terminal)) {
-              // A sibling or unknown live task forbids recycling the shared host.
-              // Keep joining this exact turn so its eventual terminal releases
-              // the failed attempt instead of leaving a permanent no-handle fence.
-              await settled;
-            } else {
-              // Only an isolated failed management host may be recycled. Session
-              // identity/history survive, and close drains all native output first.
-              await this.stopProcess();
-              if (this.currentScheduleManagement) {
-                this.currentCommandReject?.(new Error('Failed native recovery management host closed.'));
-                this.resetCurrentCommand(); this.isProcessing = false;
-              }
-              await settled;
-            }
-          } finally { clearTimeout(timer); }
-          if (this.scheduleRestoring === restoration) this.scheduleRestoring = undefined;
-          throw new NativeScheduleRecoverySettledError(error instanceof Error ? error.message : 'Native recovery failed.');
-        } finally { context.signal.removeEventListener('abort', expire); }
-      },
     };
   }
 
-  private recoverableScheduleHandle(handle: NativeScheduleHandle, input: NativeScheduleInput, restoration?: object): NativeScheduleHandle {
+  private ownedScheduleHandle(handle: NativeScheduleHandle, input: NativeScheduleInput): NativeScheduleHandle {
     if (!input.recovery) return handle;
     // describe() runs before creation reserves ownership. Capture the actual
     // admitted incarnation here, never a later host's token in the getter.
@@ -709,79 +600,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return { ...handle,
       get nativeId() { return handle.nativeId; },
       get nativeDefinitionAbsent() { return handle.nativeDefinitionAbsent; },
-      get recoveryIdentity() { return JSON.stringify({ ...identity, sessionId: executor.sessionId,
+      get cleanupIdentity() { return JSON.stringify({ ...identity, sessionId: executor.sessionId,
         model: executor.model, effort: executor.effort,
         effectiveModel: executor.acknowledgedModel || executor.reportedModel || executor.model }); },
-      releaseForRestart: async () => ({ ...await this.releaseScheduleDefinitions(),
-        ...(handle.onceDefinitionAlreadyAbsent && { onceDefinitionAlreadyAbsent: true as const }) }),
-      stop: async () => {
-        await handle.stop();
-        if (restoration && this.scheduleRestoring === restoration && !this.sessionSchedules?.hasPendingMutation) this.scheduleRestoring = undefined;
-      },
+
     };
-  }
-
-  private releaseScheduleDefinitions(): Promise<NativeScheduleRelease> {
-    if (this.scheduleRestart?.release) return this.scheduleRestart.release;
-    const child = this.claudeProcess;
-    if (!child || !this.turnLedger.supported(child.pid) || !this.scheduleHooksReady || this.modelChange
-      || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.commandQueue.length
-      || this.isProcessing || this.isStarting || this.scheduleRestoring) return Promise.reject(new Error('Claude handoff admission is unavailable.'));
-    const adapter = this.schedules();
-    const state = this.scheduleRestart ??= { child, epoch: this.stopEpoch, adapter };
-    const current = () => !this.isDestroyed && this.claudeProcess === child && this.stopEpoch === state.epoch && !this.abortOperation;
-    // Synchronous: after this point, a wake must pass the hook fence or be skipped.
-    adapter.beginRestart();
-    state.release = (async () => {
-      await adapter.removeFutureDefinitionsForRestart({ isCurrent: current });
-      await this.turnLedger.wait(() => current() && !adapter.admittedWork && !this.isProcessing
-        && !this.turnLedger.active && !this.pendingApprovals.size && !this.pendingControlRequests.size,
-      25_000, 'Admitted schedule execution drain');
-      if (!current()) throw new Error('Claude handoff host changed.');
-      return { nativeDefinitionAbsent: true, policy: 'skip-unadmitted' };
-    })();
-    return state.release;
-  }
-
-  private async finishScheduleRestart(): Promise<void> {
-    const state = this.scheduleRestart;
-    if (!state?.release) throw new Error('Claude handoff was not prepared.');
-    await state.release;
-    if (state.exit) {
-      if (state.exit.code === 0 && !state.exit.signal && state.endRequested
-        && this.stopEpoch === state.epoch && !this.claudeProcess) {
-        // A timeout or failed receipt publication can precede a confirmed close.
-        // Retrying must durably publish that proof before reporting success.
-        this.scheduleOwnership?.confirmClean();
-        return;
-      }
-      throw new Error('Claude handoff exited unsuccessfully.');
-    }
-    const child = state.child;
-    const current = () => this.claudeProcess === child && this.stopEpoch === state.epoch && !this.isDestroyed;
-    if (!current()) throw new Error('Claude handoff host changed.');
-    // A new initialize response includes a fresh authoritative native task snapshot.
-    this.turnLedger.inventory = undefined;
-    await this.nativeControl('initialize', { hooks: SCHEDULE_HOOKS });
-    await this.turnLedger.wait(() => current() && this.turnLedger.inventory?.size === 0
-      && [...this.turnLedger.tasks.values()].every(task => task.terminal)
-      && !state.adapter.admittedWork && !this.turnLedger.active && !this.isProcessing
-      && !this.pendingApprovals.size && !this.pendingControlRequests.size, 25_000, 'Native background drain');
-    if (!current()) throw new Error('Claude handoff host changed.');
-    // No signals, process-tree stop or timeout escalation: timeout retains the fence.
-    const exit = new Promise<void>((resolve, reject) => {
-      const closed = (code: number | null, signal: NodeJS.Signals | null) => {
-        clearTimeout(timer);
-        if (code === 0 && !signal && this.stopEpoch === state.epoch) resolve();
-        else reject(new Error('Claude orderly exit was not confirmed.'));
-      };
-      const timer = setTimeout(() => { child.removeListener('close', closed); reject(new Error('Claude orderly exit remains unconfirmed; ownership retained.')); }, 20_000);
-      child.once('close', closed);
-    });
-    state.endRequested = true;
-    child.stdin!.end();
-    await exit;
-    this.scheduleOwnership?.confirmClean();
   }
 
   private sessionSchedules?: ClaudeSessionSchedules;
@@ -814,7 +637,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (!this.sessionId) throw new Error('No bound Claude session. Select the original thread/session; cleanup never searches or creates another session.');
     if (!current() || this.reviewedCleanupActive || this.modelChange || this.retainedAbort || this.abortOperation
       || this.hasUncertainShutdown() || this.delegationWorker || this.isDestroyed || this.isStopping
-      || this.sandbox.isRestricted() || this.scheduleRestart || this.scheduleRestoring || (!inTurn && this.isBusy())
+      || this.sandbox.isRestricted() || (!inTurn && this.isBusy())
       || !this.delegation?.groups?.includes('scheduling')) throw new Error('Bound native cleanup is unavailable or busy. Retry when this thread is idle.');
     this.reviewedCleanupActive = true;
     const sessionId = this.sessionId, cwd = this.currentWorkingDirectory;
@@ -877,18 +700,18 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
     let timezone: string;
     try {
-      if (this.scheduleRestart || this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
+      if (this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
         || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
       if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
       timezone = await this.readNativeScheduleTimezone();
       if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
-      if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
+      if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude schedule ownership protocol is unsupported.');
       if (input.recovery) this.scheduleHostOwnership().reserveForNewJob(this.claudeProcess!.pid!, this.claudeCommand);
     } catch (error) {
       // No adapter admission or native schedule mutation has started here.
       throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule preflight refused admission.');
     }
-    return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, false, undefined, canAdmitOccurrence), input);
+    return this.ownedScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, canAdmitOccurrence), input);
   }
 
   /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
@@ -950,8 +773,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   isBusy(): boolean { return !!this.modelChange || this.isWorkBusy(); }
 
   private isWorkBusy(): boolean {
-    if (this.reviewedCleanupActive || this.scheduleRestoring || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost
-      || this.scheduleRestart && this.claudeProcess === this.scheduleRestart.child) return true;
+    if (this.reviewedCleanupActive || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost
+) return true;
     if (this.sessionSchedules?.busy) return true;
     return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
   }
@@ -1026,7 +849,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       this.scheduleGuardRequired = !this.delegationWorker && (!!this.sessionId || managedScheduling);
       // Non-owning hosts must not start the native scheduler or expose Cron tools.
       // The settings flag does not suppress transcript-restored definitions.
-      const disableNativeSchedules = !managedScheduling;
+      const disableNativeSchedules = !managedScheduling
+        || !!this.sessionId && this.scheduleHostOwnership().exists() && !this.scheduleHostOwnership().ownerToken;
       const mcpServers: Record<string, unknown> = {};
       const args: string[] = [
         '--input-format=stream-json',
@@ -1236,12 +1060,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
-        const restart = this.scheduleRestart;
-        const released = restart?.child === child && restart.endRequested && restart.epoch === this.stopEpoch && code === 0 && !signal;
         if (this.claudeProcess === child) {
-          if (restart?.child === child) restart.exit = { code, signal };
           this.scheduleOwnership?.hostClosed();
-          this.sessionSchedules?.processClosed(!!released);
+          this.sessionSchedules?.processClosed();
           this.sessionSchedules = undefined;
           this.scheduleHooksReady = false;
         }
@@ -1256,7 +1077,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         this.turnLedger.retire();
 
         // Check if this was an intentional stop (abort/reset)
-        const wasIntentionalStop = this.isStopping || !!released;
+        const wasIntentionalStop = this.isStopping;
         this.isStopping = false; // Reset the flag
 
         // Reject current command if any (only for unexpected exits)
@@ -2630,7 +2451,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     options: PersistentClaudeOptions = {}
   ): Promise<PersistentClaudeResult> {
     if (this.isDestroyed) return { success: false, error: 'Executor has been destroyed' };
-    if ((this.scheduleRestart || this.scheduleRestoring) && !(options.nativeScheduleManagement && options.nativeScheduleCurrent?.())) return { success: false, error: 'Native schedule handoff or restoration is pending.' };
     if (this.modelChange) return { success: false, error: 'Native model change is pending or unconfirmed. Retry /model after its reply, or use /clear (session-only schedules will be lost).' };
     if (((this.abortOperation || this.retainedAbort) && !(this.cleanupAdmission() && options.nativeScheduleManagement && options.nativeScheduleCurrent?.()))
       || this.hasUncertainShutdown() || ((this.scheduleCleanupHost || this.reviewedCleanupActive) && !options.nativeScheduleManagement)) {
@@ -2850,7 +2670,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.resetCurrentCommand(); this.isProcessing = false;
     this.currentTaskId = null; this.currentTaskStartTime = 0;
     await this.stopProcess(); this.retainedAbort = undefined; this.shutdownUncertain = false;
-    this.scheduleRestart = undefined; this.scheduleRestoring = undefined;
   }
 
   /**
@@ -2862,7 +2681,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * prompts interrupted during startup are not replayed into the fresh context.
    */
   resetContext(): void {
-    this.scheduleRestart = undefined; this.scheduleRestoring = undefined;
     this.cancelInputWaiters();
     this.nativeCreationEpoch++;
     console.log('[ClaudePersistent] Resetting session context');

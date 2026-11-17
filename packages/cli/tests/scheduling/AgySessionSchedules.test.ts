@@ -63,6 +63,29 @@ function harness() {
 }
 
 describe('AGY original-session native provider', () => {
+  it('distinguishes an admitted scope from an unsettled or failed native receipt', async () => {
+    const h = harness(); await h.bridge.qualify();
+    let entered!: () => void, fail!: (error: Error) => void;
+    const admission = new Promise<void>(resolve => { entered = resolve; });
+    h.override(async () => { entered(); return new Promise((_, reject) => { fail = reject; }); });
+    await h.bridge.withOperation('synthetic-operation', () => true, async () => {
+      expect(h.bridge.pendingMutation).toBe(true);
+      expect(h.bridge.cleanupMutationPending).toBe(false);
+      const creating = h.create();
+      const rejected = expect(creating).rejects.toBeInstanceOf(NativeScheduleCleanupError);
+      await admission;
+      expect(h.bridge.cleanupMutationPending).toBe(true);
+      fail(new Error('Synthetic unknown native mutation'));
+      await rejected;
+    }, false);
+    expect(h.bridge.pendingMutation).toBe(false);
+    expect(h.bridge.cleanupMutationPending).toBe(true);
+    h.bridge.processClosed(false);
+    expect(h.bridge.cleanupMutationPending).toBe(true);
+    h.bridge.processClosed(true);
+    expect(h.bridge.cleanupMutationPending).toBe(false);
+  });
+
   it('retains a new occurrence when a stale Stop arrives before its invocation has finished', async () => {
     const h = harness(); await h.bridge.qualify(); const a = await h.create();
     h.begin(); h.wake(a.nativeId); h.stop();
@@ -190,7 +213,7 @@ describe('AGY original-session native provider', () => {
     h.bridge.foregroundCancelled();
     await expect(a.list()).rejects.toThrow('queued'); await expect(a.cancel()).rejects.toThrow('queued');
     await expect(h.create('another')).rejects.toThrow('queued'); expect(manage).not.toHaveBeenCalled();
-    expect(h.bridge.status.recovery).toBe(false);
+    expect(h.bridge.status).not.toHaveProperty('recovery');
     expect('recoveryFor' in h.bridge).toBe(false);
   });
   it('blocks admission before model invocation when owner/generation changes, including throwing guards', async () => {
@@ -267,7 +290,7 @@ describe('AGY before-first-wake quiescence proof', () => {
   const clock = () => vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
   it('permits captured cancellation/exit only before the native first possible wake', async () => {
     const time = clock(); const h = harness(); await h.bridge.qualify(); await h.create();
-    const check = h.bridge.checkpointWindow();
+    const check = h.bridge.cancellationWindow();
     h.bridge.foregroundCancelled(); h.bridge.processClosed(true); expect(check).not.toThrow();
     time.mockReturnValue(Date.parse('2030-01-01T00:01:00Z'));
     expect(check).toThrow('deadline');
@@ -276,7 +299,7 @@ describe('AGY before-first-wake quiescence proof', () => {
     clock(); const h = harness(); await h.bridge.qualify(); const first = await h.create(); const sibling = await h.create('job-b');
     await h.bridge.withOperation('cancel-first', () => true, () => first.cancel(), false);
     expect(first.retirementConfirmed).toBe(true); expect(sibling.retirementConfirmed).toBe(false);
-    expect(await sibling.list()).toBe(true); expect(h.bridge.checkpointWindow()).toBeTypeOf('function');
+    expect(await sibling.list()).toBe(true); expect(h.bridge.cancellationWindow()).toBeTypeOf('function');
   });
   it('rejects unknown native tools, foreign SYSTEM senders and provider faults after capture', async () => {
     clock();
@@ -285,21 +308,21 @@ describe('AGY before-first-wake quiescence proof', () => {
       (h: ReturnType<typeof harness>) => { h.wake('external-session/task-42'); h.hook('PostToolUse'); },
       (h: ReturnType<typeof harness>) => h.bridge.fence('Relay lost authenticated evidence'),
     ]) {
-      const h = harness(); await h.bridge.qualify(); await h.create(); const check = h.bridge.checkpointWindow();
+      const h = harness(); await h.bridge.qualify(); await h.create(); const check = h.bridge.cancellationWindow();
       invalidate(h); expect(check).toThrow();
     }
   });
   it('never treats an observed completed cron occurrence as an empty queue', async () => {
     clock(); const h = harness(); await h.bridge.qualify(); const job = await h.create();
     h.begin(); h.wake(job.nativeId); h.stop();
-    expect(() => h.bridge.checkpointWindow()).toThrow('never-fired');
+    expect(() => h.bridge.cancellationWindow()).toThrow('never-fired');
   });
   it('rejects incomplete foreground or a deadline whose setup has already consumed the margin', async () => {
     const time = clock(); const h = harness(); await h.bridge.qualify(); await h.create();
     h.bridge.beginForeground(); h.begin();
-    expect(() => h.bridge.checkpointWindow()).toThrow('never-fired');
-    expect(h.bridge.checkpointWindow(true)).toBeTypeOf('function');
+    expect(() => h.bridge.cancellationWindow()).toThrow('never-fired');
+    expect(h.bridge.cancellationWindow(true)).toBeTypeOf('function');
     time.mockReturnValue(Date.parse('2030-01-01T00:00:59.500Z'));
-    expect(() => h.bridge.checkpointWindow(true)).toThrow('deadline');
+    expect(() => h.bridge.cancellationWindow(true)).toThrow('deadline');
   });
 });

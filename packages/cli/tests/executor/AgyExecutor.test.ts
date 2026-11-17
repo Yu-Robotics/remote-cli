@@ -1186,7 +1186,7 @@ describe('AgyExecutor', () => {
     emitResult();
     await p;
 
-    mockFs.existsSync.mockImplementation((file: any) => !String(file).endsWith('.checkpoint.lock'));
+    mockFs.existsSync.mockImplementation((file: any) => String(file).endsWith('thread-1.json'));
     await executor.deleteThreadData('thread-1');
     expect(mockFs.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('thread-1'));
   });

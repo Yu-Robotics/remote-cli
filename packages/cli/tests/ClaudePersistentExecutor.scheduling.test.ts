@@ -77,7 +77,9 @@ describe('Claude shared foreground scheduling integration', () => {
   });
   it('combines predecessor proof with current native work and host validity for purge', async () => {
     raw.delegation = { groups: ['scheduling'] };
-    raw.scheduleHostOwnership().reserve(true);
+    const ownership = raw.scheduleHostOwnership();
+    ownership.dependencies.processes = () => [{ pid: 4242, birth: 'fixture-birth', command: 'fixture-claude' }];
+    ownership.reserveForNewJob(4242, 'fixture-claude');
     await executor.withReviewedNativeCleanup('purge-proof', () => true, async host => {
       expect(host.cwd).toBe(root); expect(host.retirementConfirmed?.()).toBe(true);
       raw.sessionSchedules.submitted = { synthetic: true };
@@ -278,15 +280,15 @@ describe('Claude shared foreground scheduling integration', () => {
     raw.delegationWorker = false; expect(nativeTools).toHaveLength(0);
   });
 
-  it.each(['scheduleRestart', 'modelChange', 'isDestroyed', 'isStopping', 'hooks', 'cwd', 'protocol', 'ownership', 'model-race'])(
+  it.each(['modelChange', 'isDestroyed', 'isStopping', 'hooks', 'cwd', 'protocol', 'ownership', 'model-race'])(
     'refuses %s before calling the session adapter or admitting an occurrence', async reason => {
       const input: NativeScheduleInput = { id: 'refused', cwd: root, prompt: 'Synthetic',
         rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
       const create = vi.spyOn(raw.sessionSchedules, 'create');
       const admit = vi.fn(() => true); const events = vi.fn();
-      const original = { scheduleRestart: raw.scheduleRestart, modelChange: raw.modelChange,
+      const original = { modelChange: raw.modelChange,
         isDestroyed: raw.isDestroyed, isStopping: raw.isStopping, scheduleHooksReady: raw.scheduleHooksReady };
-      if (['scheduleRestart', 'modelChange', 'isDestroyed', 'isStopping'].includes(reason)) raw[reason] = true;
+      if (['modelChange', 'isDestroyed', 'isStopping'].includes(reason)) raw[reason] = true;
       if (reason === 'hooks') raw.scheduleHooksReady = false;
       if (reason === 'cwd') input.cwd = path.join(root, 'different-directory');
       if (reason === 'protocol' || reason === 'ownership') {

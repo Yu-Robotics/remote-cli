@@ -14,7 +14,7 @@ export async function verifySchedulePurge<T>(record: Readonly<ScheduleRecord | S
   if (!record.recovery || !record.nativeId) return unresolved('unattributed',
     'Original native session/definition attribution is missing. Review and delete selected native definitions in the original bound session; an empty different session cannot prove native absence.');
   if (record.backend !== 'claude') return unresolved('predecessor_unknown',
-    'This backend requires its original live cancellation handle or a saved confirmed cleanup/clean-handoff receipt. Current-session inventory cannot prove predecessor retirement.');
+    'This backend requires its original live cancellation handle or a saved confirmed cleanup receipt. Current-session inventory cannot prove predecessor retirement.');
   let identity: { ownerToken?: string; marker?: string; sessionId?: string; cwd?: string; threadId?: string };
   try { identity = JSON.parse(record.recovery.identity); }
   catch { return unresolved('unattributed', 'Original native session attribution is invalid. Preserve the original session for cleanup review.'); }

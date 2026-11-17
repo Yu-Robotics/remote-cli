@@ -220,7 +220,7 @@ export class LinuxServiceManager extends BaseServiceManager {
     if (values.KillMode !== 'mixed' || values.KillSignal !== '15' || values.SendSIGKILL !== 'yes'
       || values.FinalKillSignal !== '9' || values.SendSIGHUP !== 'no' || !finiteTimeout
       || values.ExecStop !== '' || values.ExecStopPost !== '') {
-      throw new Error('Effective systemd shutdown policy is incompatible with orderly native handoff. Review unit overrides; no start or stop was requested.');
+      throw new Error('Effective systemd shutdown policy is incompatible with owned-process shutdown. Review unit overrides; no start or stop was requested.');
     }
   }
 

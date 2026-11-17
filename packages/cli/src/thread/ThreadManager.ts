@@ -10,6 +10,7 @@ import {
   THREAD_NAME_REGEX,
 } from './types';
 import type { BackendKey } from '../types/config';
+import { assertAgySelectionResettable, detachAgySelection } from '../executor/agy/AgySessionSelection';
 import { ThreadContextReset } from './ThreadContextReset';
 
 /**
@@ -211,8 +212,12 @@ export class ThreadManager {
       throw new Error('AGY checkpoint transition is unconfirmed; thread state was retained.');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     try {
+      await fs.lstat(path.join(agyDataDir, 'agy-sessions', `${id}.json.detached-acp`));
+      throw new Error('Detached AGY ACP history has unconfirmed predecessor retirement; thread data was retained.');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
       const pointer = JSON.parse(await fs.readFile(path.join(agyDataDir, 'agy-sessions', `${id}.json`), 'utf8'));
-      if (pointer.transport === 'acp' && pointer.retired !== true) throw new Error('AGY ACP host retirement is unconfirmed; session data was retained.');
+      if (pointer.transport === 'acp') throw new Error('AGY ACP host retirement is unconfirmed; session data was retained.');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     try {
       const owner = JSON.parse(await fs.readFile(agyOwner, 'utf8'));
@@ -264,9 +269,11 @@ export class ThreadManager {
     const roots = new Set([path.dirname(this.storePath), path.join(os.homedir(), '.remote-cli')]);
     const namespaces = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh'];
     const pointers: string[] = [];
+    const agyPointers = new Set<string>();
     for (const root of roots) {
       for (const backend of namespaces) {
         const pointer = path.join(root, `${backend}-sessions`, `${threadId}.json`);
+        if (backend === 'agy') { assertAgySelectionResettable(pointer); agyPointers.add(pointer); }
         try {
           const stat = await fs.lstat(pointer);
           if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`Session binding is not a file: ${pointer}`);
@@ -288,7 +295,11 @@ export class ThreadManager {
     }
     // Validate every location before deleting any binding; predictable failures
     // such as an invalid pointer or unwritable directory leave all sessions intact.
-    for (const pointer of pointers) await fs.rm(pointer, { force: true });
+    // Archive inactive ACP selections before any other binding is removed. The
+    // active executor may already have archived its own pointer during reset.
+    const detached = new Set<string>();
+    for (const pointer of agyPointers) if (detachAgySelection(pointer)) detached.add(pointer);
+    for (const pointer of pointers) if (!detached.has(pointer)) await fs.rm(pointer, { force: true });
   }
 
   /**

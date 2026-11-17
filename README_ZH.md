@@ -174,25 +174,12 @@ remote-cli service uninstall
 
 安装器会自动记录当前 Node.js 可执行文件、CLI 入口、`HOME`、`PATH` 和日志路径。macOS 使用 `LaunchAgent`，Linux 使用 `systemd --user`。`remote-cli stop` 也会停止正在运行的托管服务；`remote-cli service stop` 和 `remote-cli service start` 可以在不移除自动启动配置的情况下暂停和恢复服务。服务以当前用户运行，不使用 root，因此 backend 登录信息和项目目录权限应与手动启动一致。Linux 默认在用户登录后启动；如果希望服务器重启后、登录前也启动，可以明确执行 `loginctl enable-linger "$USER"`。
 
-From CLI 1.6.239, generated Linux user units use `KillMode=mixed` and
-`TimeoutStopSec=90s`. systemd first signals only the CLI main process so native
-schedule handoff can drain; the Router connection remains open for result
-acknowledgements until handler cleanup settles. On main-process exit or timeout,
-systemd can still kill remaining children. Timeout or failed cleanup is not a clean
-recovery checkpoint. The limited same-machine reboot reconciliation described below
-does not make same-boot crashes safe.
-
-From CLI 1.6.248, a failed automatic update releases global update admission
-while retaining fences on the affected schedule threads. Unrelated threads can
-continue chatting. `/schedule list` on a fenced thread shows stored status;
-conflicting operations and installation remain blocked until ownership is proven
-safe. Retried readiness checks do not repeat an uncertain handoff or start model
-recovery to unlock chat. Logs distinguish preparation from package installation.
-This failure-handling fix does not yet provide model-free schedule handoff.
-
-From CLI 1.6.254, the experimental retained-host mode and its launch flag are
-removed. Ordinary startup and existing schedule recovery remain unchanged. Recovery
-after an abrupt stop without an exit checkpoint is not added by this removal.
+From CLI 1.6.257, every schedule-host exit is treated as abrupt. Shutdown and
+updates do not invoke schedule management, drain results, or write clean recovery
+proof. Generated Linux units retain their bounded owned-process shutdown policy;
+its timeout is not a recovery guarantee. The retained-host mode remains removed.
+Idle future schedules do not indefinitely block updates. Active work, pending
+results and uncertain live operations retain their independent admission guards.
 
 Use the updated CLI's `remote-cli service start`, `stop`, or `install` to apply the
 shutdown policy to an existing generated unit before stopping it. Start/stop migrate
@@ -574,52 +561,38 @@ hook groups are retained in a private HOME overlay, never edited globally. Ordin
 chat streams ACP text until a managed timer exists; afterwards foreground output
 uses the native terminal batch to avoid replaying buffered autonomous text.
 
-From CLI 1.6.246, AGY recovery is conditional. `/abort` can automatically continue eligible future
-jobs in the **same native conversation** when no owned timer has reached its first
-possible wake, no unknown native work or uncertain mutation has been observed, and
-the exact predecessor group exits before that deadline. The cancelled foreground
-request is not replayed. Native definition IDs change; catalog ownership and
-original-thread delivery remain stable.
+AGY automatic schedule recovery is unsupported: native hooks cannot guarantee
+fail-closed admission after coordinator loss. No exit checkpoint, automatic
+same-session schedule reconstruction, or abort continuation is used. Saved
+ACP contexts retain their history and uncertainty. Without positive resume proof,
+ordinary chat also refuses that saved ACP context, even when no schedule-owner journal
+exists; a legacy exit flag is not proof. Explicit `/clear` (or a directory change)
+may select a fresh conversation only when no schedule owner or checkpoint transition
+remains. It archives the old selection and unconfirmed-retirement evidence without
+erasing native history or executing the old session. Thread deletion remains blocked
+by that retained uncertainty, including after another restart or when AGY is inactive. A scheduled saved
+context still requires a new thread for chat. No backend switch is automatic. Existing legacy stream-json conversations
+retain their compatible transport.
 
-Orderly restart/update uses the shared durable recovery catalog: delete exact
-owned definitions, confirm group retirement within the same guarded interval,
-persist a clean checkpoint, and consume it once before loading the original
-conversation. Only future definitions are reconstructed. Lost output acknowledgements
-retain the existing outbox; no inference is repeated to recover a result. Expired
-one-shots and cancelled records are never recreated. Exact cancellation completed
-before any possible first wake can also retire that job independently, preserving
-eligible siblings. After every job has that receipt, a clean saved conversation
-can resume without the old scheduling fence. A completed invocation, empty
-native inventory or a PID disappearing alone is not a queue-drain checkpoint.
+When the AGY executor is not loaded, any retained AGY schedule-owner journal
+(including one marked retired) blocks thread-wide `/clear` and `/cd`, even if the
+thread currently uses another backend. Use a new thread; the journal is retained.
+This is stricter than retirement of a host still owned by the active executor.
 
-Already-fired recurring jobs, due/unjoined notifications, unknown background tools,
-failed mutation receipts, missed cancellation terminals, deadline/clock races,
-changed settings/ownership and dirty exits remain explicitly blocked. There is no
-crash/reboot replay permission inferred from process absence. Pending native work
-still blocks automatic upgrades. Model/effort/tool changes and context deletion
-retain the existing ownership guards. Ordinary no-job abort/settings behavior
-remains compatible. From CLI 1.6.247, corrupt or unreadable reset-generation
-metadata still blocks execution but does not prevent shutdown from retiring the
-existing AGY host. Unconfirmed host exit continues to block catalog cleanup.
-
-A clean, checkpointed no-job ACP conversation automatically loads its exact saved
-ID on the next host, including its native context. Uninstrumented legacy stream-json
-sessions have no trusted pre-inference queue checkpoint and remain on their
-compatible transport; migration to managed ACP is refused before any inventory
-prompt. Their context is not reset, forked or copied. This is a remaining legacy
-migration limitation, not a claim that native `session/load` cannot load them.
-
-Native acceptance covers Linux with a disposable native AGY host, loopback fake
-model and local Router ACK fixture. Real account/provider traffic, Feishu delivery,
-macOS/Windows native execution and dirty reboot recovery remain unverified.
+Exact cancellation before a first possible wake remains useful cleanup evidence.
+The 1.6.256 fixes still retire only the currently owned AGY host before thread
+reset, deletion or directory changes. Unknown predecessors, checkpoint-transition
+locks, live siblings and unconfirmed exits prevent data erasure. These cleanup
+checks do not grant schedule replay or certify arbitrary saved ACP chat as safe.
 
 The shared scheduling service stays dormant without a task catalog: ordinary
 connection, reconnection, chat and control commands do not create a catalog or
 subscribe to result receipts. Active fresh AGY chat hosts install their temporary
 hook relay before the first turn so later tasks share that exact conversation;
 inactive or other backends do not acquire AGY listeners or scheduling state. Startup
-only checks whether a catalog already exists. Existing catalogs are recovered
-for interrupted-job status and pending-result delivery; explicit `/schedule`
+only checks whether a catalog already exists. Existing catalogs are loaded
+for interrupted-job status independently of Router delivery capabilities; completed
+results wait for a compatible Router. Unreadable catalogs remain conservatively fenced; explicit `/schedule`
 management or an explicit scheduling tool call initializes the service on demand.
 
 Scheduling-enabled Claude hosts use the native `--await-initialize` startup barrier:
@@ -715,77 +688,56 @@ converted to that timezone, and ambiguous clock-rollback times are rejected.
 Unattended work follows the existing native tool policy. Cancellation stops future
 firings without killing the shared conversation; queued or running work may finish.
 
-Keep the CLI and computer running for native execution. From CLI 1.6.239,
-newly managed Claude schedules use runtime tools, hooks, lifecycle capabilities
-and matching host/session identity for orderly restart/upgrade recovery, without
-an exact native version or architecture allowlist. Future definitions
-are preserved as durable intent. Recovery resumes the original conversation and
-queries structured native inventory: matching definitions are adopted, and missing
-definitions are recreated only after verified orderly deletion. Startup does not
-require visiting the thread. Missing capabilities and uncertain receipts remain
-unsupported; removing the allowlist does not guarantee compatibility with every
-native release or platform. The official changelog introduced `/loop` in 2.1.71,
-but does not establish a minimum for this complete recovery protocol.
+Keep the CLI and computer running for native execution. Schedules are interrupted
+when their native host exits or the CLI/computer restarts. No backend automatically
+restores definitions, replays uncertain work, runs expired one-shots late, or catches
+up missed cron ticks. Reconnect retries completed outbox results only; it does not
+execute the task again.
 
-New Claude recurring jobs also retain a small per-session ownership receipt under
-an exclusive kernel lock. After a verified later boot of the same machine, future
-firings can reconcile without an exit-time handoff. This uses existing portable
-ownership primitives, not systemd, launchd or a Windows service manager. A second
-catalog writer is rejected before it can overwrite cancellation intent. The new
-host is durably reserved before reconciliation, so another crash cannot authorize
-a concurrent same-boot retry. Exact native IDs, full prompts, cron rules and
-session-only persistence must match; unrelated native definitions are not deleted.
-Wakes observed during reconciliation are blocked before admission.
+Original native histories remain intact. Claude definitions and AGY/DSH queued
+reminders can survive host loss, so process exit does not prove their absence.
+Resumed Claude hosts with prior scheduling ownership disable native Cron. AGY and
+DSH sessions with unresolved scheduling obligations refuse automatic resume and
+retain their original history and cleanup evidence. Exact cancellation or current
+inventory absence does not by itself prove that old queued reminders disappeared.
+DSH records created by this version retain their exact session identity before native
+CREATE, including ambiguous failures: they fence that session, not unrelated fresh
+sessions. Missing legacy attribution stays unknown. Historical AGY/DSH cleanup
+obligations without a management route do not consume the live task quota; list and
+purge remain catalog-only and retain unresolved cleanup evidence. Saved AGY ACP chat
+cannot safely resume even without a known schedule; see the explicit `/clear` limits
+above. No automatic reset, history deletion, local scheduler or surviving host service
+is used to bypass these guards.
 
-Automatic restoration after a CLI-only crash in the same boot remains blocked:
-a missing or reused PID cannot prove that old admitted work or escaped descendants
-have ended. A missing native definition after an unclean restart is not recreated:
-expiry or deletion cannot be distinguished. Unknown past effects are not retried,
-missed firings are not replayed, and uncertain one-shots remain interrupted. Legacy
-records without this ownership evidence require the existing clean handoff path.
-The ownership APIs have Linux/macOS/Windows implementations; this change's native
-acceptance ran only on Linux with a simulated boot identity transition. It is not
-proof of a real machine-reboot recovery or of native macOS/Windows behavior.
+The schedule recovery experiment has been removed, including its admission server,
+journals, DSH controller and startup reconstruction. Native create/list/cancel,
+explicit exact cleanup, history purge and completed-result delivery remain available
+with their existing ownership and data-erasure guards. Scheduling is session-scoped
+on every platform; Linux tests do not establish native macOS/Windows acceptance.
+
+Catalog version 6 preserves task intent, cancellation, purged-ID fences, frozen
+purge selections, cleanup selectors and pending results. Legacy clean flags are
+retained only as diagnostics. Older CLI versions cannot safely load this catalog;
+do not downgrade by editing its version or erasing ownership evidence.
 
 From CLI 1.6.253, fresh schedule attempts definitively refused before native
 admission (such as a native timezone mismatch) disappear from the task list without
 manual cleanup. Startup also compacts existing proven refusal rows. The request
 still reports its original failure, and durable ID fences prevent replay after
-restart. Ambiguous creation, restoration failures, cleanup selectors, and pending
+restart. Ambiguous creation, interrupted attempts, cleanup selectors, and pending
 results remain tracked. Records stay visible when concurrent work, persistence
 failure, or replay-fence capacity prevents safe compaction.
 
-From CLI 1.6.252, failed Claude restoration becomes inactive and retains its
-original checkpoint, native ID and diagnostic. Interrupted blocked rows and a crash
-during a consumed restoration attempt do not restart that attempt on every launch;
-a healthy active job with a temporarily blocked occurrence is not a failure.
-A cleanly suspended sibling waiting for thread admission keeps its recovery intent
-across restarts. Settlement of the failed attempt retries that sibling when current
-thread admission permits; it never retries the failed job.
-Ordinary chat resumes in the same native session after the exact failed management
-turn settles. A stalled management-only host can be recycled after a bounded wait;
-live siblings, admitted tasks and uncertain mutations prevent that recycle. Session
-history and backend selection are preserved. Late results and pending Router
-acknowledgements retain their normal durable delivery path.
+Failed recovery attempts retain their original identity and uncertainty. An
+untouched sibling waiting for thread admission retains its pending intent; releasing
+the exact failed runtime can permit the sibling without retrying failed work.
+Actual execution, cleanup, and result/ACK obligations remain independent.
 
-To replace failed intent, inspect `/schedule list`, use `/schedule cleanup review`
-and its exact-ID confirmation to remove obsolete native definitions, then create a
-new schedule explicitly. No pointer deletion, receipt editing, `/clear`, or machine
-reboot is required. New admission verifies exclusive current native-host ownership,
-records its process identity, and retains the old dirty receipt as a diagnostic.
-New jobs retain their own ownership proof across clean handoffs, allowing safe
-recovery and cancellation without certifying older uncertain jobs.
-Legacy receipts use a read-only process inventory: another matching session host,
-a native host without attributable session arguments, or incomplete inventory
-still blocks admission until that conflict is resolved. This verifies host exclusion;
-it does not certify completion of old external work. Empty CronList output alone
-never supplies that proof. Failed-only history does not block update or shutdown
-once live attempts settle; unacknowledged results and actual live work still do.
-These paths have synthetic Linux tests; actual native backend acceptance and native
-macOS/Windows runs remain separate verification requirements.
-Version 1.6.252 writes new ownership receipts and optional cleanup-owner attribution.
-Older clients cannot read all of this state; do not downgrade a populated scheduling
-state directory or remove ownership fields to make an older client accept it.
+To replace failed intent, inspect `/schedule list` and use exact native cleanup
+where supported before creating new explicit work. Missing attribution, empty
+inventory, a missing PID, or archived ownership diagnostics do not prove native
+retirement. New host tokens never authorize old uncertain jobs. Cancellation and
+purge preserve siblings, pending results and original-session attribution.
 
 From CLI 1.6.240, explicit cancellation can inspect an interrupted Claude job in
 its original native session even without a live schedule handle. Use the full
@@ -829,6 +781,10 @@ No manually typed confirmation is required. `all` freezes the current owner's
 conversation records and unresolved cleanup IDs; request selections survive restart, so replay never selects newly created siblings; siblings outside the selection
 and other owner generations are preserved. Running occurrences, native mutations,
 recovery operations and external deliveries already in flight remain pending.
+AGY purge also uses native management admission during a foreground turn. It
+requests exact list/kill receipts for the selected tasks and retains history when
+native runtime retirement is still unconfirmed; history-only cleanup starts no
+native work.
 
 History removal is separate from native cleanup. Inspect `status` (`complete` or `partial`), `historyRemovedIds`
 (`removedIds` remains its compatibility alias), `alreadyRemovedIds`,
@@ -857,7 +813,7 @@ definitions and siblings are never swept. Missing original session attribution
 cannot be invented from a short ID or an empty current session. Unknown native
 work remains an explicit cleanup obligation; unknown predecessor work is never
 reported stopped. DSH uses its live cancellation handle or previously confirmed
-cleanup/clean-handoff receipt; without these, history can be removed but native
+explicit cancellation receipt; without these, history can be removed but native
 retirement remains unresolved. Other backends retain their actual capability
 limits; the permission to delete is backend-neutral, not a new native API.
 
@@ -908,69 +864,23 @@ remain unchanged, without fabricated recovery receipts. A new review is required
 after reconnect or restart. Native acceptance is Linux-only; macOS and Windows
 still require native validation.
 
-Claude handoff fences scheduled work at the UserPromptSubmit admission boundary,
-before model inference or tools. An already-fired occurrence that has not crossed
-that boundary may be skipped, including a queued or still-expanding wakeup. Skips
-are not successful results and are never replayed; unseen skips cannot be counted.
-Already admitted work must finish, results must be acknowledged, and native
-background work must complete naturally. Unmanaged inventory, unknown activity,
-or unconfirmed exit blocks handoff without force-killing the host. Expired
-one-shots stay expired; a one-shot already absent from native inventory is not
-recreated, even if its stored deadline is still ahead. Recurring jobs resume only
-future native firings.
+There is no orderly schedule handoff for Claude, AGY or DSH, including optional
+update optimization. Shutdown performs no schedule model/RPC/proof operation.
+The unrelated `/compact` summary handoff remains available.
 
-A cancelled, discarded or refused native occurrence is reported as unsuccessful
-even if its separate result frame claims successful completion.
-
-From CLI 1.6.238, newly created DSH schedules can recover after a confirmed orderly
-shutdown or automatic update, without opening their thread. Before installation,
-the client fences new commands, deletes future native definitions, drains already
-queued/started reminders, waits for result acknowledgements, flushes the original
-native session and joins the owned host exit. Only then does it persist a clean
-restart checkpoint. Startup resumes that original session and reconstructs eligible
-jobs in fresh native schedule storage, with native timing and inventory validation.
-The adapter checks required drain/flush/exit operations; incompatible or unconfirmed
-outcomes block the handoff. DSH retains its stricter queued-work drain and session-flush requirements.
-
-The provider-neutral framework supports persistent reattachment or reconstruction
-with proven predecessor exclusion. It stores original owner/backend/directory
-identity, intent, absolute one-shot deadlines, cancellation intent and bounded
-completed-occurrence IDs. Recovery waits for Router readiness and runs sequentially.
-No catalog means no schedule host starts. Explicit cancellation, context reset,
-thread deletion and retired ownership never authorize recreation. Legacy interrupted
-jobs and same-boot dirty crashes remain blocked; neither a missing PID nor a conversation
-ID proves that old work cannot still execute. Running/unknown-completion work is
-never blindly replayed. Clean proof is consumed before native mutation, so an
-error-after-commit cannot authorize a duplicate CREATE on the next startup. A clean
-pause is distinct from verified native deletion: persistent providers must retain
-cleanup ownership until deletion is confirmed, including cancellation and expiry.
-Claude restoration requires acknowledgement of the original model selection;
-malformed or mismatched replies keep recovery blocked. Cleanup of another job
-cannot release an unresolved restoration fence. If every one-shot expires or is
-skipped, update finalization releases confirmed-exit admission without recreating it.
-
-Expired one-shots remain interrupted with an explicit expiry reason and do not run
-late. Recurring rules resume future native firings without a catch-up storm. Missed
-firings during the shutdown/install interval are not replayed. Completed results
-remain in the local outbox until Router acknowledgement. Delivery is not globally
-exactly-once: Router deduplication is bounded and process-local, and a crash between
+A cancelled, discarded or refused native occurrence is unsuccessful even when a
+separate result frame claims success. Unknown admitted work is disabled for manual
+review, never replayed or risk-rearmed. Completed results remain in the local
+outbox until an authenticated exact Router acknowledgement. Delivery is not globally
+exactly-once: Router deduplication is bounded and process-local, so a crash between
 send and acknowledgement can duplicate output. Acknowledgement is not a read receipt.
 
-Waiting supported Claude and DSH jobs with clean handoff capability no longer indefinitely block automatic
-upgrades. Active turns, queues, unacknowledged results, uncertain mutations and cleanup
-still block. A Claude firing racing idle admission may be skipped before prompt admission;
-admitted execution must drain. DSH retains its stricter queued-work drain policy.
-A timeout does not force-kill work or claim success. Failed installation and manual install-only
-updates restore cleanly suspended jobs in the running client. If only Router
-readiness is missing, restoration continues on reconnect after installation has
-finished; reconnect during installation cannot restart native timing. An uncertain handoff
-retains admission and reports failure. Failed Claude restoration follows the
-quarantine and settlement behavior above; a service restart alone never authorizes
-replaying uncertain old jobs. New explicit jobs use separate current-host checks.
-Non-interactive clients retain supervisor restart behavior. Foreground start mode
-still activates the installed version only at the next manual start. No shell clock,
-transcript copy, blind CREATE retry or backend switch is used as fallback. Claude
-retained-process `/abort` behavior is unchanged.
+Updates inspect active turns, queues, results, mutations and cleanup without
+preparing a native handoff. Installation failure releases only global update
+admission; it does not reconstruct schedules. Non-interactive clients retain
+supervisor restart behavior; foreground clients activate an installed version at
+the next manual start. Native Linux qualification does not imply macOS/Windows
+support, and unqualified DSH recovery remains unavailable.
 
 `/schedule list` and the model list tool inspect native state on demand without
 cancelling jobs. Inventory errors preserve existing task state and execution
