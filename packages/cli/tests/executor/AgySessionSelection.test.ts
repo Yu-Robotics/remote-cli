@@ -16,7 +16,7 @@ it('preserves legacy pointers and refuses malformed ACP selections without inven
   fs.writeFileSync(pointer, '{'); expect(() => detachAgySelection(pointer)).toThrow(); expect(fs.readFileSync(pointer, 'utf8')).toBe('{');
   fs.writeFileSync(pointer, JSON.stringify({ transport: 'acp' })); expect(() => detachAgySelection(pointer)).toThrow('Invalid');
 });
-it.each(['.checkpoint.lock', '.native-schedules'])('retains the selected ACP session while %s exists', suffix => {
+it.each(['.checkpoint.lock', '.native-schedules', '.allocation-unconfirmed'])('retains the selected ACP session while %s exists', suffix => {
   const data = JSON.stringify({ id: 'synthetic-session', transport: 'acp' }); fs.writeFileSync(pointer, data);
   fs.writeFileSync(pointer + suffix, 'synthetic-evidence'); expect(() => detachAgySelection(pointer)).toThrow();
   expect(fs.readFileSync(pointer, 'utf8')).toBe(data);

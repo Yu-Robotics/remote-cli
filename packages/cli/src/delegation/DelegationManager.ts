@@ -40,7 +40,7 @@ import { ActivityProgress } from '../utils/ActivityProgress';
 import { normalizeActivity } from '../executor/Activity';
 import { compareNoticeVersions, validNoticeVersion } from '../maintenance/Version';
 
-export const DELEGATION_LIMITS = { launches: 12, concurrent: 5,
+export const DELEGATION_LIMITS = { launches: 12, concurrent: 20,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024, summaryBytes: 4 * 1024,
@@ -391,7 +391,7 @@ export class DelegationManager {
         this.guard.resolveWorkingDirectory(found.root);
         source = found;
         leasePath = found.root;
-        maxChildren = DELEGATION_LIMITS.concurrent;
+        maxChildren = Math.min(DELEGATION_LIMITS.concurrent, DELEGATION_LIMITS.launches);
       }
     });
     const getTask = (value: unknown): Task => {

@@ -1456,16 +1456,69 @@ describe('managed agent delegation', () => {
   it('caps device concurrency across independent workspaces and releases capacity on cancel', async () => {
     vi.mocked(worker.execute).mockImplementation(() => new Promise(() => undefined));
     factory.mockImplementation((_guard, _config, cwd) => ({ ...worker, getCurrentWorkingDirectory: () => cwd }));
-    const scopes = Array.from({ length: 6 }, (_, index) => {
+    const scopes = Array.from({ length: 21 }, (_, index) => {
       const cwd = path.join(home, `project-${index}`); fs.mkdirSync(cwd);
       return manager.begin({ ...parent, cwd, thread: { ...parent.thread, id: `owner-${index}`, workingDirectory: cwd } });
     });
-    const tasks = await Promise.all(scopes.slice(0, 5).map(scope => scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'start')));
-    await expect(scopes[5].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'full')).rejects.toThrow('capacity');
+    const tasks = await Promise.all(scopes.slice(0, 20).map(scope => scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'start')));
+    await expect(scopes[20].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'full')).rejects.toThrow('capacity');
     await scopes[0].invoke('remote_cli_cancel', { taskId: (tasks[0] as any).taskId }, 'cancel');
-    await expect(scopes[5].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'retry')).resolves.toHaveProperty('taskId');
+    await expect(scopes[20].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'retry')).resolves.toHaveProperty('taskId');
   });
 
+
+  it('keeps accepted FIFO followers unconstructed at global saturation and retains a slot until exact exit', async () => {
+    const finishes: Array<(result: ExecuteResult) => void> = [];
+    let releaseExit!: () => void;
+    const exitGate = new Promise<void>(resolve => { releaseExit = resolve; });
+    factory.mockImplementation((_guard, _config, cwd) => ({ ...worker,
+      getCurrentWorkingDirectory: () => cwd,
+      execute: vi.fn(() => new Promise<ExecuteResult>(resolve => { finishes.push(resolve); })),
+      waitForManagedProcessGroupExit: cwd === path.join(home, 'fifo-project-0') ? () => exitGate : async () => {},
+    }));
+    const scopes = Array.from({ length: 20 }, (_, index) => {
+      const cwd = path.join(home, `fifo-project-${index}`); fs.mkdirSync(cwd);
+      return manager.begin({ ...parent, cwd, thread: { ...parent.thread, id: `fifo-${index}`, workingDirectory: cwd } });
+    });
+    const tasks = await Promise.all(scopes.map(scope => scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Hold' }, 'start')));
+    const first: any = await scopes[0].invoke('remote_cli_delegate', { backend: 'pi', objective: 'FIFO first' }, 'first');
+    const cancelled: any = await scopes[0].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Cancelled follower' }, 'cancelled');
+    const second: any = await scopes[0].invoke('remote_cli_delegate', { backend: 'pi', objective: 'FIFO second' }, 'second');
+    expect([first.state, cancelled.state, second.state]).toEqual(['queued', 'queued', 'queued']);
+    expect(factory).toHaveBeenCalledTimes(20);
+    await scopes[0].invoke('remote_cli_cancel', { taskId: cancelled.taskId }, 'cancel');
+    expect(factory).toHaveBeenCalledTimes(20);
+    const cancelRunning = scopes[0].invoke('remote_cli_cancel', { taskId: (tasks[0] as any).taskId }, 'cancel-running');
+    try {
+      await vi.waitFor(() => expect(worker.destroy).toHaveBeenCalled());
+      expect(factory).toHaveBeenCalledTimes(20);
+    } finally { releaseExit(); }
+    await cancelRunning;
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(21));
+    expect((await scopes[0].invoke('remote_cli_result', { taskId: second.taskId, waitSeconds: 0 }, 'queued-result') as any).state).toBe('queued');
+    await scopes[0].invoke('remote_cli_cancel', { taskId: first.taskId }, 'release-first');
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(22));
+    expect(finishes).toHaveLength(22);
+    await scopes[0].invoke('remote_cli_cancel', { taskId: second.taskId }, 'release-second');
+  });
+
+  it('exposes a legacy AGY refusal on a real resettable worker context and clears only that lane', async () => {
+    parent.onProgress = vi.fn(() => true);
+    worker.execute = vi.fn().mockRejectedValueOnce(new Error('Legacy AGY worker history cannot execute over ACP. Use this worker card Clear action.'))
+      .mockResolvedValue({ success: true, output: 'Fresh ACP fixture' });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'agy', objective: 'Legacy selection' }, 'legacy');
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'legacy-result');
+    const progress = vi.mocked(parent.onProgress).mock.calls.at(-1)![0];
+    expect(progress.phase).toBe('failed'); expect(progress.workerContext).toBeDefined();
+    const lane = (await manager.laneStore.lanesForThread(parent.thread.id, 'agy'))[0];
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', `${lane.executorThreadId}.json`);
+    fs.mkdirSync(path.dirname(pointer), { recursive: true }); fs.writeFileSync(pointer, JSON.stringify({ id: 'synthetic-legacy' }));
+    await manager.resetWorkerContext(parent.thread, progress.workerContext!.laneId, progress.workerContext!.generation);
+    expect(fs.existsSync(pointer)).toBe(false);
+    const next: any = await scope.invoke('remote_cli_delegate', { backend: 'agy', objective: 'Explicitly cleared' }, 'fresh');
+    expect(await scope.invoke('remote_cli_result', { taskId: next.taskId }, 'fresh-result')).toMatchObject({ state: 'succeeded' });
+  });
   it('bounds sequential delegation and reports authentication failures without automatic retries', async () => {
     vi.mocked(worker.execute).mockResolvedValue({ success: false, error: 'Authentication required' });
     const scope = manager.begin(parent);

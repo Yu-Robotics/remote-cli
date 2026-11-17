@@ -1,3 +1,5 @@
+import { AgyAcpRuntime } from '../../src/executor/agy/AgyAcpRuntime';
+import { crashAgyOverlay } from '../scheduling/agyHookCrashFixture';
 import { randomUUID } from 'crypto';
 import { captureCodexDeletionTarget } from '../../src/delegation/NativeSessionDeletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +26,24 @@ vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
   return syntheticOwnershipRuntime(actual);
 });
+
+// This file never launches an ACP backend. The fresh-worker startup assertion
+// uses the production runtime/overlay with an allocation-only synthetic transport.
+vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
+  private exit!: () => void;
+  private exited = new Promise<void>(resolve => { this.exit = resolve; });
+  async initialize() { return {}; }
+  async newSessionWithSetup(_cwd: string, _mcp: unknown, setup: any) {
+    const session = { sessionId: 'synthetic-new-worker', configOptions: [] };
+    await setup(session, () => { throw new Error('Unexpected settings control'); }); return session;
+  }
+  async loadSessionWithSetup() { throw new Error('Fresh worker must never load old history'); }
+  async prompt() { throw new Error('No model prompt in reset fixture'); }
+  sessionAdmission() { return {}; }
+  destroy() { this.exit(); }
+  waitForExit() { return this.exited; }
+  async waitForManagedProcessGroupExit() {}
+} }));
 
 describe('thread-wide conversation reset', () => {
   let home: string;
@@ -78,7 +98,7 @@ describe('thread-wide conversation reset', () => {
   const lane = async (backend: DelegationBackend, owner = threadId, generation = 3) => {
     const result = await delegation.laneStore.acquire({ threadId: owner, backend, workingDirectory: project,
       workspaceGeneration: generation }, { pooled: true });
-    await write(pointer(backend, result.lane.executorThreadId), 'old worker conversation');
+    await write(pointer(backend, result.lane.executorThreadId), backend === 'agy' ? JSON.stringify({ id: 'synthetic-old-worker' }) : 'old worker conversation');
     if (backend === 'dsh') await write(pointer(backend, result.lane.executorThreadId).replace('.json', '.handoff.json'), 'old worker summary');
     return result.lane;
   };
@@ -132,6 +152,54 @@ describe('thread-wide conversation reset', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
+  });
+
+  it('routes the actual worker-card clear handler for a legacy AGY lane without erasing history', async () => {
+    const worker = await lane('agy'); await ready(worker);
+    await write(pointer('agy', worker.executorThreadId), JSON.stringify({ id: 'synthetic-legacy-worker' }));
+    const history = await write(path.join(home, '.remote-cli', 'agy-homes', worker.executorThreadId, 'history.fixture'), 'Synthetic original history');
+    (handler as any).workerContextResetSupported = true;
+    await handler.handleMessage({ type: 'worker_context_reset', messageId: 'synthetic-clear-card', threadId,
+      laneId: worker.id, generation: worker.contextGeneration ?? 0 } as any);
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'worker_context_reset_result', messageId: 'synthetic-clear-card', success: true }));
+    expect(existsSync(pointer('agy', worker.executorThreadId))).toBe(false);
+    expect(await fs.readFile(history, 'utf8')).toBe('Synthetic original history');
+    expect(factory).not.toHaveBeenCalled();
+    const next = await delegation.laneStore.acquire({ threadId, backend: 'agy', workingDirectory: project, workspaceGeneration: 3 }, { pooled: true });
+    expect(next.lane.id).toBe(worker.id); expect(next.lane.contextGeneration).toBe(2);
+    await delegation.laneStore.markReady(next.lane.id);
+  });
+
+  it('recovers crash-left hooks after the real worker-card clear without replacing history', async () => {
+    const worker = await lane('agy'); await ready(worker);
+    const workerHome = path.join(home, '.remote-cli', 'agy-homes', worker.executorThreadId);
+    await fs.mkdir(workerHome, { recursive: true }); await crashAgyOverlay(workerHome);
+    await write(pointer('agy', worker.executorThreadId), JSON.stringify({ id: 'synthetic-old-worker', transport: 'acp' }));
+    const history = await write(path.join(workerHome, 'history.fixture'), 'Synthetic native history');
+    (handler as any).workerContextResetSupported = true;
+    await handler.handleMessage({ type: 'worker_context_reset', messageId: 'crash-clear', threadId, laneId: worker.id, generation: 0 } as any);
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'worker_context_reset_result', messageId: 'crash-clear', success: true }));
+    const allocated = vi.fn();
+    const runtime = new AgyAcpRuntime({ command: 'synthetic-never-spawn', home: workerHome, cwd: project, threadId: worker.executorThreadId,
+      env: {}, autoApprove: true, worker: true, saveSession: allocated, ownedSessionClosed: vi.fn(), retainScheduleOwner: vi.fn(),
+      mapTool: (name, input) => ({ name, input }) });
+    try { await runtime.start(); expect(allocated).toHaveBeenCalledOnce(); expect(allocated).toHaveBeenCalledWith('synthetic-new-worker'); }
+    finally { await runtime.close(); }
+    expect(await fs.readFile(history, 'utf8')).toBe('Synthetic native history');
+    expect(await fs.readdir(pointer('agy', worker.executorThreadId) + '.detached-acp')).toHaveLength(1);
+    expect(existsSync(pointer('agy', worker.executorThreadId))).toBe(false);
+  });
+  it.each(['.allocation-unconfirmed', '.native-schedules', '.checkpoint.lock'])('reports a truthful worker-card refusal while %s remains', async suffix => {
+    const worker = await lane('agy'); await ready(worker);
+    const saved = await fs.readFile(pointer('agy', worker.executorThreadId));
+    const evidence = await write(pointer('agy', worker.executorThreadId) + suffix, 'Synthetic unresolved evidence');
+    (handler as any).workerContextResetSupported = true;
+    await handler.handleMessage({ type: 'worker_context_reset', messageId: 'uncertain-clear', threadId, laneId: worker.id, generation: 0 } as any);
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'worker_context_reset_result', messageId: 'uncertain-clear', success: false,
+      error: expect.stringContaining('Clear did not discard it') }));
+    expect(await fs.readFile(pointer('agy', worker.executorThreadId))).toEqual(saved);
+    expect(await fs.readFile(evidence, 'utf8')).toBe('Synthetic unresolved evidence');
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it('explicit clear archives an inactive ACP selection without executing or erasing the original conversation', async () => {

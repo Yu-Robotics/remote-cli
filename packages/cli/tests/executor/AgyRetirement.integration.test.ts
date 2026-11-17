@@ -1,106 +1,78 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { spawn, type ChildProcess } from 'child_process';
+import type { ChildProcess } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { once } from 'events';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-
-// Real OS children speak only this test's stream-json fixture. No AGY binary,
-// user configuration, account or provider is involved in this regression.
-const launch = vi.hoisted(() => ({ fixture: '', home: '', children: [] as ChildProcess[] }));
-vi.mock('../../src/executor/ManagedSpawn', () => ({
-  spawnManaged: (_managed: boolean, _command: string, args: string[], options: { cwd: string }) => {
-    const child = spawn(process.execPath, [launch.fixture, ...args], {
-      cwd: options.cwd, stdio: 'pipe',
-      env: { HOME: launch.home, USERPROFILE: launch.home, PATH: process.env.PATH,
-        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR },
-    });
-    launch.children.push(child);
-    return child;
+const fixture = vi.hoisted(() => ({ home: '', script: '', children: [] as ChildProcess[], restored: vi.fn() }));
+vi.mock('os', async load => { const actual = await load<typeof import('os')>(); return { ...actual, homedir: () => fixture.home, default: { ...actual, homedir: () => fixture.home } }; });
+vi.mock('../../src/executor/ManagedSpawn', async load => {
+  const actual = await load<typeof import('../../src/executor/ManagedSpawn')>();
+  return { ...actual, spawnManaged: (enabled: boolean, _command: string, args: string[], options: any) => {
+    // Reject arbitrary backend selection; the only executable is this owned Node fixture.
+    if (_command !== 'synthetic-agy-acp') throw new Error('Unexpected native backend command');
+    const child = actual.spawnManaged(enabled, process.execPath, [fixture.script, ...args], options);
+    fixture.children.push(child); return child;
+  } };
+});
+vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
+  AgyHookRelay: class { async start() { return { url: 'http://127.0.0.1:1/hook', token: 'synthetic' }; } bindSession() {} async close() {} },
+  installAgyScheduleHooks: async (...args: any[]) => {
+    const actual = await vi.importActual<any>('../../src/scheduling/agy/AgyHookRelay');
+    const lease = await actual.installAgyScheduleHooks(...args);
+    return Object.assign(async () => { await lease(); fixture.restored(); }, { run: (callback: () => unknown) => lease.run(callback) });
   },
 }));
-vi.mock('os', async importOriginal => {
-  const actual = await importOriginal<typeof import('os')>();
-  const homedir = () => launch.home;
-  return { ...actual, homedir, default: { ...actual, homedir } };
+vi.mock('../../src/delegation/OwnershipRuntime', async load => {
+  const actual = await load<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
 });
-
-describe('AGY host retirement with a real subprocess', () => {
-  let executor: AgyExecutor;
-  beforeEach(() => {
-    launch.home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-retirement-')));
-    launch.fixture = path.join(launch.home, 'fixture.cjs');
-    launch.children = [];
-    fs.writeFileSync(launch.fixture, `
+let executor: AgyExecutor;
+beforeEach(() => {
+  fixture.home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-retirement-')));
+  vi.stubEnv('HOME', fixture.home); vi.stubEnv('USERPROFILE', fixture.home);
+  fixture.script = path.join(fixture.home, 'fixture.cjs'); fixture.children = []; fixture.restored.mockClear();
+  fs.writeFileSync(fixture.script, `
 const readline = require('node:readline');
-const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
-process.on('SIGTERM', () => send({ event: 'fixture_signal_received' }));
-readline.createInterface({ input: process.stdin }).on('line', line => {
-  const message = JSON.parse(line);
-  if (message.event === 'fixture_exit') process.exit(0);
-  send({ event: 'init', conversation_id: 'synthetic-conversation' });
-  if (message.message.content !== 'hold') send({ event: 'result', result: {
-    status: 'SUCCESS', response: 'fixture completed', conversation_id: 'synthetic-conversation'
-  } });
+const send = x => process.stdout.write(JSON.stringify(x) + '\\n');
+setInterval(() => {}, 1000);
+process.on('SIGTERM', () => require('node:fs').writeFileSync(require('node:path').join(process.env.HOME, 'signal-received'), 'yes'));
+readline.createInterface({input:process.stdin}).on('line', line => {
+ const request=JSON.parse(line);
+ if(request.method==='fixture_exit') process.exit(0);
+ if(request.method==='initialize') send({jsonrpc:'2.0',id:request.id,result:{}});
+ if(request.method==='session/new') send({jsonrpc:'2.0',id:request.id,result:{sessionId:'synthetic-session',configOptions:[]}});
+});`);
+  executor = new AgyExecutor(new DirectoryGuard([fixture.home]), { threadId: 'synthetic-thread', initialWorkingDirectory: fixture.home, agyCommand: 'synthetic-agy-acp' });
 });
-`);
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    executor = new AgyExecutor(new DirectoryGuard([launch.home]), {
-      initialWorkingDirectory: launch.home, killEscalationMs: 1_500,
-    });
-  });
-  afterEach(async () => {
-    // Close every real fixture even when an assertion fails. These children have
-    // no descendants; await OS close before removing their temporary directory.
-    await Promise.all(launch.children.map(async child => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      const closed = once(child, 'close');
-      child.kill('SIGKILL');
-      await closed;
-    }));
-    await executor.destroy();
-    vi.restoreAllMocks();
-    fs.rmSync(launch.home, { recursive: true, force: true });
-  });
-
-  it.skipIf(process.platform === 'win32')('waits for an uncooperative POSIX child before reporting abort and dispatching a successor', async () => {
-    const running = executor.execute('hold');
-    await vi.waitFor(() => expect(executor.getSessionId()).toBe('synthetic-conversation'));
-    const old = launch.children[0];
-    let signalObserved = false;
-    old.stdout!.on('data', chunk => { if (chunk.toString().includes('fixture_signal_received')) signalObserved = true; });
-    let aborted = false;
-    const aborting = executor.abort().then(result => { aborted = true; return result; });
-    await expect(running).resolves.toMatchObject({ success: false });
-    const next = executor.execute('next');
-    await vi.waitFor(() => expect(signalObserved).toBe(true));
-    expect(aborted).toBe(false);
-    expect(launch.children).toHaveLength(1);
-    expect(old.exitCode).toBeNull();
-    expect(executor.isBusy()).toBe(true);
-    // Test-only control acknowledges real exit; kill() success was insufficient.
-    old.stdin!.write(JSON.stringify({ event: 'fixture_exit' }) + '\n');
-    expect(await aborting).toBe(true);
-    await expect(next).resolves.toMatchObject({ success: true, output: 'fixture completed' });
-    expect(old.exitCode).toBe(0);
-    expect(launch.children).toHaveLength(2);
-    expect(launch.children[1].spawnargs).toEqual(expect.arrayContaining(['--conversation', 'synthetic-conversation']));
-  });
-
-  it('joins a real closed child before removing its isolated thread data', async () => {
-    const result = await executor.execute('complete');
-    expect(result.success).toBe(true);
-    const child = launch.children[0];
-    // Close first to make this cleanup check portable: Windows SIGTERM cannot
-    // be held by the JavaScript signal handler used in the POSIX case above.
-    const closed = once(child, 'close');
-    child.stdin!.write(JSON.stringify({ event: 'fixture_exit' }) + '\n');
-    await closed;
+afterEach(async () => {
+  for (const child of fixture.children) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
+  }
+  await executor.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+describe('AGY ACP exact OS process retirement', () => {
+  it('joins the exact ACP group before releasing hooks and prevents a successor', async () => {
+    const runtime = await (executor as any).runtime(); await runtime.start();
+    const child = fixture.children[0];
+    let closed = false; const closing = executor.destroy().then(() => { closed = true; });
+    if (process.platform === 'linux') {
+      await vi.waitFor(() => expect(fs.existsSync(path.join((runtime as any).options.home, 'signal-received'))).toBe(true));
+      expect(closed).toBe(false);
+    }
+    expect(executor.getSessionId()).toBe('synthetic-session'); if (process.platform === 'linux') expect(fixture.restored).not.toHaveBeenCalled();
+    await expect(executor.execute('no successor')).rejects.toThrow('destroyed'); expect(fixture.children).toHaveLength(1);
+    await closing; expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+    if (process.platform === 'linux') expect(child.signalCode).toBe('SIGKILL'); expect(fixture.restored).toHaveBeenCalledOnce();
+  }, 10_000);
+  it('joins a real closed ACP process before thread-data erasure', async () => {
+    const runtime = await (executor as any).runtime(); await runtime.start(); const child = fixture.children[0];
+    const closed = once(child, 'close'); child.stdin!.write(JSON.stringify({ method: 'fixture_exit' }) + '\n'); const [code] = await closed;
     await executor.deleteThreadData('synthetic-thread');
-    expect(child.exitCode).toBe(0);
-    expect(executor.getSessionId()).toBeNull();
+    expect(code).toBe(0); expect(executor.getSessionId()).toBeNull(); expect(fixture.restored).toHaveBeenCalledOnce();
   });
 });

@@ -551,43 +551,52 @@ catalog, outbox and Router acknowledgements. Equal-prompt tasks retain distinct
 native identities, and cancelling one task preserves its siblings. No executable
 version gate, client timer, model polling or alternate backend is used.
 
-Saved stream-json conversations and managed child workers keep their compatible
-transport and context; scheduling is unavailable there. No saved conversation is
-silently forked, reset or migrated. New ACP sessions require native handle support,
-working hooks and native tool receipts; failed pre-session initialization may fall
-back to compatible chat without scheduling. Per-thread authentication/config links,
-model/effort launch settings and session-scoped managed tools are preserved. User
-hook groups are retained in a private HOME overlay, never edited globally. Ordinary
-chat streams ACP text until a managed timer exists; afterwards foreground output
-uses the native terminal batch to avoid replaying buffered autonomous text.
+From CLI 1.6.260, AGY main conversations and managed workers use ACP exclusively.
+AGY 1.5.10 is the native acceptance baseline. Linux, macOS and Windows x64/ARM64
+require the matching published remote-cli native helper. Missing helpers or unsupported
+native controls fail visibly; no conversation transport fallback is attempted.
+Legacy stream-json selections refuse execution. Use explicit main `/clear`, a worker
+card's Clear action, or parent `/clear` after task and artifact closeout. No history is
+silently migrated, replaced or erased; existing ownership and deletion guards remain.
 
-From CLI 1.6.258, fresh AGY ACP conversations apply model and thinking-level
-selections through native session controls before the first prompt or schedule
-admission. Unset settings retain native defaults. Unsupported or unconfirmed
-explicit settings fail visibly with sanitized stage/category diagnostics. A failed
-allocated selection remains refused until explicit `/clear`; original history and
-uncertain-retirement evidence are retained. Failures before allocation may use
-stream-json chat with a visible explanation that scheduling is unavailable.
+Live `/model` and `/effort` changes use confirmed native controls on the same ACP
+session. They require idle chat without retained schedules. Settings and managed-tool
+reconnection permanently disable scheduling on that host; loading never creates fresh
+schedule admission. Manual permissions use existing approval cards or text replies.
+Cancellation uses ACP cancel; completed tool effects remain, and an unconfirmed
+terminal prevents continuation. Native Stop errors take precedence over ACP end_turn.
+Explicit compaction remains summarize-then-reset, not native session compaction.
+Informational commands remain bounded native CLI helpers, never slash text sent to
+inference. Images are forwarded as ACP content; model support remains native-dependent.
 
-This change covers fresh ACP startup only. Changing `/model` or `/effort` on an
-existing live ACP conversation still closes its ACP host and selects the compatible
-stream-json path; that path has no native scheduling, and resuming an ACP-created
-conversation there is unverified. Use explicit `/clear` (when ownership guards permit)
-to apply changed settings to a fresh ACP conversation. This is not a live settings
-migration or a saved-session resume guarantee.
+New workers persist their native creation receipt before their first prompt. Reuse
+requires matching worker provenance, observed terminal evidence and exact prior group
+exit. A requested tool denial permanently fences that host's reuse and controlled
+reconnect, even if native later reports DONE and a successful Stop. Observed
+background-task creation receipts also fence reuse regardless of DONE status or
+hook coverage. Previous continuity receipts require explicit clear. Hook failures
+can fail open: completely missing hook and transcript evidence remains a native
+limit, not proof that arbitrary saved queues are empty. Nonforeground permission
+requests are denied; only the current foreground turn uses approval cards/text.
+No automatic schedule recovery, replay, checkpoint restoration or exit-time model
+handoff is used.
 
-AGY automatic schedule recovery is unsupported: native hooks cannot guarantee
-fail-closed admission after coordinator loss. No exit checkpoint, automatic
-same-session schedule reconstruction, or abort continuation is used. Saved
-ACP contexts retain their history and uncertainty. Without positive resume proof,
-ordinary chat also refuses that saved ACP context, even when no schedule-owner journal
-exists; a legacy exit flag is not proof. Explicit `/clear` (or a directory change)
-may select a fresh conversation only when no schedule owner or checkpoint transition
-remains. It archives the old selection and unconfirmed-retirement evidence without
-erasing native history or executing the old session. Thread deletion remains blocked
-by that retained uncertainty, including after another restart or when AGY is inactive. A scheduled saved
-context still requires a new thread for chat. No backend switch is automatic. Existing legacy stream-json conversations
-retain their compatible transport.
+AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
+journal. After a crash, explicit clear can be followed by fresh startup only when
+the previous owner and exact native group are proved absent. A dead parent alone
+is insufficient. Unrelated hook groups and edits are preserved. Unknown older
+overlays, changed files, unresolved launches and uncertain descendant exit are
+refused with ownership guidance; preserve the affected thread/lane and use a new
+one pending inspection. Windows crash leftovers without an exact tree-exit receipt
+remain refused until same-host reboot evidence is available. No saved conversation
+is loaded by overlay restoration. Worker-card Clear refuses unidentified allocation
+or schedule ownership instead of reporting success while leaving execution blocked.
+
+Saved main ACP selections remain refused after host loss, even without a schedule
+journal. Explicit `/clear` may archive a selection when ownership guards permit,
+without executing or erasing its native history. Unconfirmed allocation and schedule
+ownership remain blockers; use a new thread when guided to do so. Thread data erasure
+has stricter proof requirements than selection reset. No backend switch is automatic.
 
 When the AGY executor is not loaded, any retained AGY schedule-owner journal
 (including one marked retired) blocks thread-wide `/clear` and `/cd`, even if the
@@ -1524,7 +1533,8 @@ a new worker is not replayed after failure. Abort and shutdown suppress the
 failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
-From CLI 1.6.131, there are at most five occupied starting/running worker slots per CLI.
+From CLI 1.6.260, there are at most 20 occupied starting/running worker slots per CLI.
+One Git-backed request may run up to 12 workers concurrently within that global budget.
 From CLI 1.6.130, a Git-backed request can run multiple workers concurrently
 in independent worktrees; further tasks report `queued` and start in FIFO order
 as capacity becomes available. Non-Git directories still run one worker at a
@@ -1663,7 +1673,9 @@ Backend 选择同时支持全局模式和按线程模式：
 
 Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、OpenCode CLI、Kimi Code CLI、ZCode、Pi、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
 
-**AGY 数据分离（不是安全边界）**：agy 默认将所有会话保存在 `~/.gemini/antigravity-cli`。remote-cli 将每个线程的 AGY 进程的 `HOME` 改为 `~/.remote-cli/agy-homes/<threadId>`，以改变默认数据查找位置；登录凭据、配置和程序目录仍从真实的 `~/.gemini` 链接过来。AGY 工具也会继承更改后的 `HOME`，因此 `cd ~`、Git/SSH 配置、缓存和脚本行为可能变化。软链以及原始 HOME 对拥有同一系统用户权限的进程仍然可读；这**不能**阻止工具读取其他线程的会话。若不可信线程需要读取隔离，请使用独立系统账户或真正的文件系统沙箱。如果 AGY 将凭据软链替换为线程本地文件，remote-cli 会保留该文件，不会覆盖共享凭据；登录状态不一致时需要手动处理。已有会话不会自动复制。升级保存了 AGY 会话的客户端前，先停止该客户端，根据 `~/.remote-cli/agy-sessions/<threadId>.json` 中的会话 ID，使用 SQLite 的 `.backup` 命令复制对应数据库，再将共享存储中的 `brain/<conversationId>` 目录复制到 `~/.remote-cli/agy-homes/<threadId>/.gemini/antigravity-cli/`，并保留共享存储作为备份。如果线程 HOME 中缺少已保存会话的数据库，AGY 会明确报迁移错误，而不是尝试恢复；不再需要旧会话时可用 `/clear` 开始新会话。删除线程时，即使 AGY 不是当前后端，也会删除其 AGY HOME 和会话指针。其他后端不受影响。
+AGY is an exception to automatic continuation after backend switching: a saved main ACP or legacy selection is retained but refused until the explicit reset requirements above are satisfied.
+
+**AGY data separation (not a security boundary)**: each thread redirects AGY's HOME to `~/.remote-cli/agy-homes/<threadId>`. Authentication, configuration and program entries are linked from the original HOME; conversation storage is private to the thread's default lookup. Tools retain OS-user access, including access through those links, and inherit the changed HOME. This affects shell home expansion, Git/SSH configuration and caches; it is not a filesystem sandbox. Thread-local credential replacements are preserved rather than copied back to shared credentials. Existing histories are not copied or automatically migrated. Legacy selections require explicit `/clear`; saved main ACP selections remain subject to ownership refusal even without a schedule journal. Exact thread deletion remains stricter than selection reset and may refuse unconfirmed ownership. Other backends retain their existing behavior.
 
 From CLI 1.6.255, per-thread AGY environments also link the native login file `~/.gemini/antigravity-cli/antigravity-oauth-token`. The link is checked before each process launch, so logging in with `agy` in the normal HOME also makes a newly created login file available to existing threads. Existing thread-local credential files are preserved; reconcile them manually if login state diverges.
 
@@ -1709,7 +1721,7 @@ Native background work and internal completion processing continue. Codex still 
 
 ### 图片输入
 
-You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode app-server, or Pi RPC backend. AGY currently accepts text only and will not process image attachments. For ordinary documents, see [File Attachments](#file-attachments).
+You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode app-server, or Pi RPC backend. AGY ACP also forwards image attachments; acceptance depends on the selected native model. For ordinary documents, see [File Attachments](#file-attachments).
 
 Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 协议返回生成图片，CLI 将图片发送给 Router，Router 上传到飞书，并在原有的 Card 2.0 响应中显示。该功能需要 CLI 和 Router 都升级到支持图片转发的版本。只升级 Router 是兼容的，但旧 CLI 不会生成或发送图片事件；只升级 CLI 也不会破坏兼容性，但旧 Router 会忽略可选的图片流消息，仍然显示文本响应。
 

@@ -4,11 +4,11 @@ import http from 'http';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { MAX_TRANSCRIPT, parseTranscript, type TranscriptRecord } from './transcript';
 import { openOutputFile } from '../../output/OutputSnapshots';
+import { ownAgyHooks, type AgyHookLease } from './AgyHookOwnership';
 import type { HookDecision, HookPayload } from './AgySessionSchedules';
 
 export const AGY_HOOK_EVENTS = ['SessionStart', 'PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation', 'Stop'] as const;
 const MAX_BODY = 256 * 1024;
-const GROUP = 'remote-cli-native-schedule';
 
 /** Event-triggered, authenticated loopback IO. This is not a filesystem watcher
  * or a scheduler. Never reads a locator outside the exact bound native session. */
@@ -99,77 +99,22 @@ export class AgyHookRelay {
   }
 }
 
-/** Overlay the documented per-HOME hook group, preserving user groups. Refuse a
- * shared configuration directory: the existing executor must detach its HOME
- * links before enabling ACP. Never silently modify the user's global config. */
-export async function installAgyScheduleHooks(home: string, descriptor: { url: string; token: string }): Promise<() => Promise<void>> {
-  const root = await fs.realpath(home);
-  const config = path.join(root, '.gemini', 'config');
-  // Detach only this private HOME's link; never write through global config.
-  let directoryLink: string | undefined;
-  try {
-    if ((await fs.lstat(config)).isSymbolicLink()) {
-      directoryLink = await fs.readlink(config);
-      const source = await fs.realpath(config);
-      await fs.unlink(config); await fs.mkdir(config, { mode: 0o700 });
-      for (const entry of await fs.readdir(source)) await fs.symlink(path.join(source, entry), path.join(config, entry));
-    }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  await fs.mkdir(config, { recursive: true, mode: 0o700 });
-  if (await fs.realpath(config) !== config) throw new Error('AGY hooks require a private canonical per-thread configuration directory.');
-  const target = path.join(config, 'hooks.json');
-  let original: string | undefined;
-  let originalLink: string | undefined;
-  try {
-    if ((await fs.lstat(target)).isSymbolicLink()) originalLink = await fs.readlink(target);
-    if ((await fs.stat(target)).size > MAX_BODY) throw new Error('AGY hook configuration is too large.');
-    original = await fs.readFile(target, 'utf8');
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const groups = original === undefined ? {} : JSON.parse(original);
-  if (!groups || typeof groups !== 'object' || Array.isArray(groups) || Object.hasOwn(groups, GROUP)) throw new Error('AGY hook overlay is already owned or unsupported.');
-  const privateDir = await fs.mkdtemp(path.join(root, '.remote-cli-agy-hooks-'));
-  await fs.chmod(privateDir, 0o700);
-  const endpointFile = path.join(privateDir, 'relay.json');
-  await fs.writeFile(endpointFile, JSON.stringify(descriptor), { mode: 0o600, flag: 'wx' });
-  const helper = path.join(__dirname, 'hookClient.js');
-  // Native hooks execute a shell command. Restrict metacharacters on both shells;
-  // do not interpolate endpoint credentials or model-controlled arguments.
-  const quote = (value: string) => {
-    if (/[\r\n"`$%!]/.test(value)) throw new Error('AGY hook executable path cannot be safely quoted.');
-    return `"${value}"`;
-  };
-  let installed: string;
-  try {
+/** Install one durably owned per-HOME overlay; never overwrite an unknown owner. */
+export async function installAgyScheduleHooks(home: string, descriptor: { url: string; token: string }): Promise<AgyHookLease> {
+  return ownAgyHooks(home, privateDir => {
+    const endpointFile = path.join(privateDir, 'relay.json');
+    // The descriptor belongs only to this overlay and contains no user credential.
+    require('fs').writeFileSync(endpointFile, JSON.stringify(descriptor), { mode: 0o600, flag: 'wx' });
+    const helper = path.join(__dirname, 'hookClient.js');
+    const quote = (value: string) => {
+      if (/[\r\n"`$%!]/.test(value)) throw new Error('AGY hook executable path cannot be safely quoted.');
+      return `"${value}"`;
+    };
     const group: Record<string, unknown> = { enabled: true };
     for (const event of AGY_HOOK_EVENTS) {
       const handler = { type: 'command', command: [process.execPath, helper, endpointFile, event].map(quote).join(' '), timeout: 10 };
       group[event] = event === 'PreToolUse' || event === 'PostToolUse' ? [{ matcher: '.*', hooks: [handler] }] : [handler];
     }
-    installed = JSON.stringify({ ...groups, [GROUP]: group }, null, 2) + '\n';
-    const temp = path.join(config, `.hooks-${randomBytes(8).toString('hex')}.tmp`);
-    try {
-      await fs.writeFile(temp, installed, { mode: 0o600, flag: 'wx' });
-      await fs.rename(temp, target);
-    } finally { await fs.rm(temp, { force: true }); }
-  } catch (error) { await fs.rm(privateDir, { recursive: true, force: true }); throw error; }
-  return async () => {
-    // A concurrent user edit must never be overwritten by teardown.
-    if (await fs.readFile(target, 'utf8') !== installed) throw new Error('AGY hooks changed; automatic overlay restoration refused.');
-    if (originalLink) { await fs.unlink(target); await fs.symlink(originalLink, target); }
-    else if (original === undefined) await fs.unlink(target);
-    else await fs.writeFile(target, original, { mode: 0o600 });
-    if (directoryLink) {
-      const source = await fs.realpath(path.resolve(path.dirname(config), directoryLink));
-      const entries = await fs.readdir(config);
-      const unchanged = await Promise.all(entries.map(async name => {
-        const file = path.join(config, name);
-        return (await fs.lstat(file)).isSymbolicLink() && await fs.readlink(file) === path.join(source, name);
-      }));
-      if (unchanged.every(Boolean)) {
-        for (const name of entries) await fs.unlink(path.join(config, name));
-        await fs.rmdir(config); await fs.symlink(directoryLink, config, 'dir');
-      }
-    }
-    await fs.rm(privateDir, { recursive: true, force: true });
-  };
+    return group;
+  });
 }

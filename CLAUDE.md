@@ -339,7 +339,7 @@ The [historical investigation](REDACTED_THINKING_ANALYSIS.md) records the origin
 
 ## AGY CLI (Antigravity) Support
 
-The CLI supports AGY CLI (Google Antigravity's agentic CLI, binary `agy`) as an alternative AI backend via its Claude-Code-style **stream-json** protocol.
+The CLI supports AGY CLI (Google Antigravity's agentic CLI, binary `agy`) as an alternative AI backend via its persistent **ACP** protocol (native acceptance baseline: AGY 1.5.10).
 
 ### Setup
 
@@ -375,30 +375,64 @@ AGY CLI is auto-detected if already installed on the local machine (`agy --versi
 
 ### Architecture (AGY)
 
-```
-packages/cli/src/executor/
-  IExecutor.ts              # Shared interface for all executor backends
-  AgyExecutor.ts            # stream-json executor (implements IExecutor)
-  compactHandoff.ts         # Shared summarize-then-reset compact (prompt + seed wrapper)
-```
+`AgyExecutor` owns one `AgyAcpRuntime` per active thread. There is no persistent
+stream-json execution path or fallback. ACP initial settings are confirmed before
+prompt admission; live model/effort and AGY-specific mode controls require an idle
+host without retained schedules. Loading or changing controls cannot grant fresh
+scheduling admission. Shared ACP defaults for other backends remain unchanged.
 
-AgyExecutor uses a **persistent stream-json process** — a single long-lived agy subprocess (`--input-format=stream-json --output-format=stream-json`) that maintains its own context across turns. Wire format (verified against agy 1.1.9):
+From CLI 1.6.260, AGY main conversations and managed workers use ACP exclusively.
+AGY 1.5.10 is the native acceptance baseline. Linux, macOS and Windows x64/ARM64
+require the matching published remote-cli native helper. Missing helpers or unsupported
+native controls fail visibly; no conversation transport fallback is attempted.
+Legacy stream-json selections refuse execution. Use explicit main `/clear`, a worker
+card's Clear action, or parent `/clear` after task and artifact closeout. No history is
+silently migrated, replaced or erased; existing ownership and deletion guards remain.
 
-- **In** (stdin, one NDJSON line per turn): `{"event":"user","message":{"content":"..."}}` — text blocks only; image attachments are dropped with a warning.
-- **Out** (stdout NDJSON): `init` (carries `conversation_id`), `step_update` (`agent_response` text deltas → `onStream`; `tool` steps with `tool_info` → `onToolUse`/`onToolResult`; `user_input`/`system_message`/`checkpoint` ignored), `result` (terminal; `status` SUCCESS/ERROR/INTERRUPTED/CANCELED → command completion).
-- **Resume**: the `conversation_id` is persisted per thread (`~/.remote-cli/agy-sessions/<threadId>.json`) and passed via `--conversation <id>` when respawning after a process crash or abort. Changing directory clears the conversation ID and any pending compact summary.
-- **Per-thread data separation, not read isolation**: agy normally stores all conversations under `$HOME/.gemini/antigravity-cli`. The executor redirects its default lookup with `HOME=~/.remote-cli/agy-homes/<threadId>`; auth/config files and program directories are linked from the real `~/.gemini`, while `brain/` and `conversations/` are per-thread. Symlinks and the user's OS permissions still permit cross-thread reads, and AGY tools inherit the changed `HOME`. Existing conversations require a one-time manual migration before upgrading; startup never copies conversation data and refuses to resume a saved ID whose database is missing. If agy replaces a credential symlink with a local file, both copies are left untouched; the master is never overwritten. Setup failure stops AGY rather than using the shared HOME. `/thread delete` removes AGY data even when its executor is inactive.
-- **Abort**: the protocol has no cancel request (`control_request` is unsupported), so abort kills the process; the next command resumes the conversation.
-- AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
-- `/model` is supported: `setModel()` stores the model and recycles the agy process (immediately when idle, deferred until the running command finishes when busy); the conversation id survives, so context is preserved. MessageHandler persists the choice per backend (`thread.models.agy`), and the factory gives the per-thread model precedence over `executor.agy.model`. Bare `/model` lists available models via `agy models` (verified live: prints `slug<TAB>Display Name` lines — note `agy -p "/model"` only lists one model, use `agy models` for the full list).
+Live `/model` and `/effort` changes use confirmed native controls on the same ACP
+session. They require idle chat without retained schedules. Settings and managed-tool
+reconnection permanently disable scheduling on that host; loading never creates fresh
+schedule admission. Manual permissions use existing approval cards or text replies.
+Cancellation uses ACP cancel; completed tool effects remain, and an unconfirmed
+terminal prevents continuation. Native Stop errors take precedence over ACP end_turn.
+Explicit compaction remains summarize-then-reset, not native session compaction.
+Informational commands remain bounded native CLI helpers, never slash text sent to
+inference. Images are forwarded as ACP content; model support remains native-dependent.
 
-Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only) and no native hook events. AGY relies on DirectoryGuard for working-directory selection and `--dangerously-skip-permissions` for tool approvals.
+New workers persist their native creation receipt before their first prompt. Reuse
+requires matching worker provenance, observed terminal evidence and exact prior group
+exit. A requested tool denial permanently fences that host's reuse and controlled
+reconnect, even if native later reports DONE and a successful Stop. Observed
+background-task creation receipts also fence reuse regardless of DONE status or
+hook coverage. Previous continuity receipts require explicit clear. Hook failures
+can fail open: completely missing hook and transcript evidence remains a native
+limit, not proof that arbitrary saved queues are empty. Nonforeground permission
+requests are denied; only the current foreground turn uses approval cards/text.
+No automatic schedule recovery, replay, checkpoint restoration or exit-time model
+handoff is used.
 
-**Slash passthrough (AGY)**: `executeSlashCommand` is backend-aware. agy's stream-json protocol explicitly refuses CLI-answered slash commands (`status: ERROR`, "...answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /help invocation" — verified against agy 1.1.26), so whitelisted read-only commands (`/help` `/model` `/skills` `/usage` `/config` `/changelog` `/agents` `/permissions` `/hooks` `/credits` — see `MessageHandler.AGY_PASSTHROUGH_COMMANDS`) are forwarded as a one-shot `agy -p "<cmd>"`. These are all read-only: agy rejects arguments ("takes no arguments"), so `/model <slug>` cannot set a model this way (use the built-in `/model`, which goes through `setModel()`). `/compact` is explicitly refused — verified live that outside the TUI the model role-plays a compaction while history stays intact. Anything else is rejected with the supported list.
+AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
+journal. After a crash, explicit clear can be followed by fresh startup only when
+the previous owner and exact native group are proved absent. A dead parent alone
+is insufficient. Unrelated hook groups and edits are preserved. Unknown older
+overlays, changed files, unresolved launches and uncertain descendant exit are
+refused with ownership guidance; preserve the affected thread/lane and use a new
+one pending inspection. Windows crash leftovers without an exact tree-exit receipt
+remain refused until same-host reboot evidence is available. No saved conversation
+is loaded by overlay restoration. Worker-card Clear refuses unidentified allocation
+or schedule ownership instead of reporting success while leaving execution blocked.
 
-**Reasoning effort (AGY)**: agy 1.1.27 exposes native `--effort low|medium|high` session options. The built-in `/effort` command stores the override per backend in `thread.efforts.agy`; `auto` clears it so the next process omits `--effort`. Like `/model`, changing effort recycles the persistent process immediately when idle or after the active command completes, while `--conversation <id>` preserves context.
+Saved main ACP selections remain refused after host loss, even without a schedule
+journal. Explicit `/clear` may archive a selection when ownership guards permit,
+without executing or erasing its native history. Unconfirmed allocation and schedule
+ownership remain blockers; use a new thread when guided to do so. Thread data erasure
+has stricter proof requirements than selection reset. No backend switch is automatic.
 
-**Compact**: agy intercepts `/compact` only in its interactive TUI — over stream-json it reaches the model as plain text (verified live against agy 1.1.9: the model role-played a compaction and the transcript kept full history; internal auto-compaction still runs when the window fills). `compactWhenFull()` therefore does **summarize-then-reset** (see `executor/compactHandoff.ts`): ask the current conversation for a dense handoff summary → reset → wrap the summary into the next prompt (consumed once). Summary failure falls back to a plain reset with an honest warning. `/clear` (resetContext) discards any pending seed.
+Per-thread HOME links share authentication/configuration and programs while native
+conversation storage remains per-thread. These links are not an OS sandbox.
+Preserve current-owned-host retirement before clear, exact group joins, in-turn
+schedule purge and outbox receipts. Read-only `agy models` and `agy -p` helpers may
+remain; conversational slash text must never masquerade as a local information result.
 
 ---
 
@@ -542,10 +576,10 @@ packages/cli/src/executor/
 Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`, `~/.remote-cli/kimi-sessions/<threadId>.json`, `~/.remote-cli/zcode-sessions/<threadId>.json`, `~/.remote-cli/pi-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
 
 - `/thread delete` → `deleteData: true` (default) — session data deleted.
-- `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it, provided the working directory has not changed.
+- `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it, provided the working directory has not changed and the backend permits resume. AGY saved main selections remain refused; use explicit guarded `/clear`.
 - `/cd` to a different normalized directory goes through `ThreadExecutorPool.setWorkingDirectory`: validate the destination, remove all seven backend pointers for the thread, reset the active executor's context, and persist the new directory. Returning to an earlier directory does not restore its previous conversation. The same directory is a no-op. Thread preferences and native transcript files are preserved.
 
-Resume-failure behavior with a stale id (verified live): agy warns `conversation "<id>" not found` and transparently starts a fresh conversation; codex exits with `no rollout found for thread id` (user recovers with `/clear`).
+AGY never replaces a missing or refused saved selection with an implicit new conversation. Legacy main selections require explicit `/clear`; worker selections use their card Clear action after ownership and artifact checks. Codex retains its native missing-rollout refusal.
 
 ---
 
@@ -616,7 +650,7 @@ but unavailable compatibility value. Discovery and launch use the same policy.
 keeps bounded diagnostic task records and marks queued/running work interrupted
 after restart without replaying it. From CLI 1.6.130, one request may accept
 multiple independent tasks. Git-backed tasks run in reusable per-lane worktrees
-with up to five occupied execution slots per CLI from 1.6.131; non-Git shared directories
+with up to 20 occupied execution slots per CLI from 1.6.260 (up to 12 per Git request); non-Git shared directories
 remain code-enforced FIFO serial execution. The manager keeps the source lease
 until the queue drains and confirms exit before releasing slots. Queued tasks have no execution
 timestamp or progress card and can be cancelled without constructing an executor.

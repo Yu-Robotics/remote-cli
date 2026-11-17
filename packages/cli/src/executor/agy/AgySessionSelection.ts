@@ -5,9 +5,14 @@ import { syncDirectory } from '../../delegation/OwnershipRuntime';
 
 /** Preflight for an explicit pointer reset, including when AGY is inactive.
  * Missing ownership is never permission to resume or erase native history. */
+function present(file: string): boolean {
+  try { fs.lstatSync(file); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+}
 export function assertAgySelectionResettable(pointer: string): void {
-  if (fs.existsSync(pointer + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');
-  if (fs.existsSync(pointer + '.native-schedules')) throw new Error('AGY native schedule ownership remains; keep the original selection and use a new thread.');
+  if (present(pointer + '.allocation-unconfirmed')) throw new Error('AGY allocation ownership is unconfirmed; retained evidence cannot be discarded.');
+  if (present(pointer + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');
+  if (present(pointer + '.native-schedules')) throw new Error('AGY native schedule ownership remains; keep the original selection and use a new thread.');
 }
 
 /** Archive an unconfirmed ACP selection before unlinking it. Returns false for
@@ -33,4 +38,15 @@ export function detachAgySelection(pointer: string): boolean {
   // keeps the unresolved data-erasure obligation across fresh sessions/restarts.
   fs.unlinkSync(pointer); syncDirectory(path.dirname(pointer));
   return true;
+}
+
+/** Card reset shares the main AGY ownership preflight. It is a pointer reset,
+ * not native data erasure or discharge of an unidentified allocation. */
+export function assertAgyWorkerSelectionResettable(pointer: string): void {
+  try { assertAgySelectionResettable(pointer); }
+  catch {
+    // Use the existing card handler's safe, actionable error category. No path
+    // or native identifier from storage is forwarded to the remote caller.
+    throw new Error('The Worker context has changed. AGY allocation or schedule ownership is unconfirmed; Clear did not discard it. Preserve this lane and use a new thread or worker lane.');
+  }
 }

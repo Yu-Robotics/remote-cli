@@ -1,4 +1,11 @@
 import fs from 'fs/promises';
+import type { AgyHookLease } from '../../scheduling/agy/AgyHookOwnership';
+import { AgyChatHost } from './AgyChatHost';
+import { creationReceipt, nativeWake, type TranscriptRecord } from '../../scheduling/agy/transcript';
+import { AgyPermissions } from './AgyPermissions';
+import type { ApprovalAction } from '../../types';
+import { ActivityTracker } from '../Activity';
+import type { AcpSessionResult } from '../acp/AcpTypes';
 import { randomUUID } from 'crypto';
 import { AcpClient, type AcpTransport, type AcpEventCallbacks, type AcpSessionSetup } from '../acp/AcpClient';
 import { applyAgySessionSettings } from './AgySessionSettings';
@@ -14,39 +21,49 @@ export interface AgyAcpRuntimeOptions {
   command: string; home: string; cwd: string; threadId: string; env: NodeJS.ProcessEnv;
   model?: string; effort?: string; autoApprove: boolean;
   mcpServers?: AcpMcpServer[];
-  saveSession(id: string): void;
-  /** Local resource release only; never persists permission for a successor to resume. */
+  sessionId?: string;
+  worker?: boolean;
+  saveSession(id: string): void | Promise<void>;
+  beforeAllocation?(): void;
+  beforePrompt?(): void;
+  settledPrompt?(reusable: boolean): void;
+  /** Exact local group release only; this cannot certify empty native queues. */
   ownedSessionClosed(id: string): void;
   /** Persist before the native schedule tool can run, even if its receipt is lost. */
   retainScheduleOwner(sessionId: string, hostId: string, retired: boolean): void;
   mapTool(name: string, args: Record<string, unknown>): { name: string; input: Record<string, unknown> };
 }
 
-/** Fresh original ACP conversation. No exit mode grants a saved-session resume permit. */
+/** ACP host for fresh main chat and qualified worker continuity. Loading never grants schedule admission. */
 export class AgyAcpRuntime {
   private client?: AcpTransport;
-  private continuing = false;
-  private continuationFailure?: string;
-  private continued = false;
-  get continuationSucceeded(): boolean { return this.continued; }
   private readonly entries = new Map<string, { input: NativeScheduleInput; emit(event: NativeScheduleEvent): void | Promise<void>; current(): boolean; handle: NativeScheduleHandle; cancelled: boolean }>();
-  get continuationPending(): boolean { return this.continuing; }
 
   private host?: AgyScheduleHost;
+  private chat?: AgyChatHost;
+  private settings?: AcpSessionResult;
+  private defaults?: { model?: string; effort?: string };
+  private settingsBusy = false;
+  private scheduleOperations = 0;
+  private readonly permissions = new AgyPermissions();
   private relay?: AgyHookRelay;
-  private restore?: () => Promise<void>;
+  private restore?: AgyHookLease;
   private starting?: Promise<void>;
   private closing = false;
   private closePromise?: Promise<void>;
   private activity?: () => void;
   private closed = false;
   private allocationStarted = false;
+  get allocationUnconfirmed(): boolean { return this.allocationStarted && !this.allocatedSessionId; }
+  private relayFault = false;
+  private continuityUnsafe = false;
   private allocatedSessionId?: string;
   private active?: ExecuteOptions;
-  private activeDone?: Promise<unknown>;
   private retained = false;
   private hostId = randomUUID();
   private tools = new Map<number, string>();
+  private latestRecords: TranscriptRecord[] = [];
+  private readonly tracker = new ActivityTracker();
   private streamed = '';
   private callbacks: AcpEventCallbacks;
   constructor(private readonly options: AgyAcpRuntimeOptions) {
@@ -56,18 +73,18 @@ export class AgyAcpRuntime {
       onTextChunk: block => {
         this.activity?.();
         if (!this.retained && this.active && block.type === 'text' && typeof block.text === 'string') {
-          this.streamed += block.text; this.active.onStream?.(block.text); this.active.onDisplayText?.(block.text);
+          this.streamed += block.text; this.active.onStream?.(block.text); this.active.onDisplayText?.(block.text); this.tracker.emitPublicText(block.text);
         }
       },
-      onPermissionRequest: async (_title, choices) => this.options.autoApprove
-        ? choices.findIndex(choice => choice.kind === 'allow_once') : -1,
+      onPermissionRequest: (title, choices) => this.permissions.request(title, choices, this.active, this.options.autoApprove),
     };
   }
-  get safeFallback(): boolean { return this.closed && !this.host && !this.allocationStarted; }
-  get sessionId(): string | undefined { return this.host?.sessionId; }
+  get sessionId(): string | undefined { return this.host?.sessionId ?? this.chat?.sessionId; }
   get hasJobs(): boolean { return this.retained; }
-  get busy(): boolean { return this.continuing || !this.closed && ( !!this.active || !!this.starting || !!this.host?.schedules.busy); }
-  get blocked(): string | undefined { return this.continuationFailure ?? this.host?.schedules.status.blocked; }
+  get busy(): boolean { return this.settingsBusy || this.scheduleOperations > 0 || !this.closed && ( !!this.active || !!this.starting || !!this.host?.schedules.busy); }
+  get blocked(): string | undefined { return this.chat?.blocked ?? this.host?.schedules.status.blocked; }
+  get reusable(): boolean { return !this.continuityUnsafe && !this.blocked && !this.retained && (this.chat?.reusable ?? true)
+    && !this.latestRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'); }
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
   /** Admission to retire our host, never proof that the host has already exited. */
@@ -79,7 +96,7 @@ export class AgyAcpRuntime {
 
   async start(): Promise<void> {
     if (this.closing || this.closed) throw new Error('AGY ACP host is retired.');
-    if (this.host) return;
+    if (this.host || this.chat) return;
     if (this.starting) return this.starting;
     this.starting = this.open();
     try { await this.starting; }
@@ -96,36 +113,44 @@ export class AgyAcpRuntime {
   }
   private async openSession(setStage: (stage: AgyAcpStartupStage) => void): Promise<void> {
     const native = nativeBindings();
-    if (!native.readChunk || !native.openOutputChild) throw new Error('AGY ACP transcript handle support is unavailable.');
+    if (!native.readChunk || !native.openOutputChild) throw new Error('AGY ACP native helper support is unavailable. Reinstall remote-cli on a published Linux, macOS or Windows x64/ARM64 target.');
     setStage('hooks');
     await fs.mkdir(this.options.home, { recursive: true, mode: 0o700 });
     if (this.closing) throw new Error('AGY startup was retired.');
     this.relay = new AgyHookRelay(this.options.home, (event, payload, rows) => {
-      if (!this.host) throw new Error('AGY hook arrived before session admission.');
-      this.activity?.();
-      const decision = this.host.schedules.accept(event, payload, rows);
+      if (!this.host && !this.chat) throw new Error('AGY hook arrived before session admission.');
+      this.activity?.(); this.latestRecords = rows;
+      const decision = this.chat ? this.chat.accept(event, payload, rows) : this.host!.schedules.accept(event, payload, rows);
+      if (!this.continuityUnsafe && (event === 'PreToolUse' && decision.decision === 'deny'
+        || rows.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
+        this.continuityUnsafe = true;
+        this.options.settledPrompt?.(false);
+      }
       if (this.active && decision.decision !== 'deny') {
         if (event === 'PreToolUse') {
           const call = payload.toolCall as { id: string; name: string; args: Record<string, unknown> };
           if (call && Number.isSafeInteger(payload.stepIdx)) {
             this.tools.set(payload.stepIdx as number, call.id);
-            this.active.onToolUse?.({ id: call.id, ...this.options.mapTool(call.name, call.args) });
+            const mapped = this.options.mapTool(call.name, call.args);
+            const description = typeof call.args.toolSummary === 'string' ? call.args.toolSummary : undefined;
+            this.active.onToolUse?.({ id: call.id, ...mapped, ...(description ? { description } : {}) });
+            this.tracker.emitTool(mapped.name, mapped.input, description);
           }
         }
         for (const [step, id] of this.tools) {
           const row = rows.find(row => row.step_index === step && row.type === 'GENERIC' && row.status === 'DONE');
-          if (row) { this.active.onToolResult?.({ tool_use_id: id, content: (row.content ?? '').slice(0, 32768), is_error: false }); this.tools.delete(step); }
+          if (row) { this.active.onToolResult?.({ tool_use_id: id, content: (row.content ?? '').slice(0, 32768), is_error: event === 'PostToolUse' && !!payload.error }); this.tools.delete(step); }
         }
       }
       return decision;
-    }, () => this.host?.schedules.fence('AGY hook relay failed; native schedule state is unconfirmed.'));
+    }, () => { this.relayFault = true; this.chat?.fence('AGY hook relay failed; chat state is unconfirmed.'); this.host?.schedules.fence('AGY hook relay failed; native schedule state is unconfirmed.'); });
     this.restore = await installAgyScheduleHooks(this.options.home, await this.relay.start());
     if (this.closing) throw new Error('AGY startup was retired.');
     const args = ['acp', '--stdio', '--process-per-session', '--disable-telemetry'];
     if (this.options.autoApprove) args.push('--dangerously-skip-permissions');
     setStage('process');
-    this.client = new AcpClient(this.options.command, args, this.options.cwd, this.callbacks, true,
-      { env: this.options.env, delegationWorker: true, onStderr: () => {} });
+    this.client = this.restore.run(() => new AcpClient(this.options.command, args, this.options.cwd, this.callbacks, true,
+      { env: this.options.env, delegationWorker: true, onStderr: () => {} }));
     setStage('initialize');
     await this.client.initialize();
     if (this.closing) throw new Error('AGY startup was retired.');
@@ -133,13 +158,16 @@ export class AgyAcpRuntime {
       if (typeof session?.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(session.sessionId)) throw new Error('AGY ACP returned no valid session identity.');
       this.allocatedSessionId = session.sessionId;
       setStage('session-save');
-      try { this.options.saveSession(session.sessionId); }
+      try { await this.options.saveSession(session.sessionId); }
       catch { throw new Error('AGY ACP session identity could not be persisted. No prompt was sent.'); }
       if (this.closing) throw new Error('AGY startup was retired.');
       setStage('session-settings');
+      this.defaults = { model: session.configOptions?.find(o => o.id === 'model')?.currentValue, effort: session.configOptions?.find(o => o.id === 'thought_level')?.currentValue };
+      this.settings = session;
       await applyAgySessionSettings(session, async (id, value) => {
         if (this.closing) throw new Error('AGY startup was retired.');
         const result = await configure(id, value);
+        this.settings = result;
         if (this.closing) throw new Error('AGY startup was retired.');
         return result;
       }, this.options);
@@ -147,14 +175,26 @@ export class AgyAcpRuntime {
     };
     let session: { sessionId?: string };
     // A lost/malformed allocation reply is not proof that no ACP session exists.
+    if (!this.options.sessionId) this.options.beforeAllocation?.();
     this.allocationStarted = true;
-    setStage('session-create');
-    if (!this.client.newSessionWithSetup) throw new Error('AGY ACP initial session setup is unavailable.');
-    session = await this.client.newSessionWithSetup(this.options.cwd, this.options.mcpServers, setup);
+    setStage(this.options.sessionId ? 'session-load' : 'session-create');
+    if (this.options.sessionId) {
+      if (!this.client.loadSessionWithSetup) throw new Error('AGY ACP session load setup is unavailable.');
+      session = await this.client.loadSessionWithSetup(this.options.sessionId, this.options.cwd, this.options.mcpServers, setup);
+      if (session.sessionId !== this.options.sessionId) throw new Error('AGY loaded a different session; no prompt was sent.');
+    } else {
+      if (!this.client.newSessionWithSetup) throw new Error('AGY ACP initial session setup is unavailable.');
+      session = await this.client.newSessionWithSetup(this.options.cwd, this.options.mcpServers, setup);
+    }
     if (this.closing) throw new Error('AGY startup was retired.');
     if (!session.sessionId) throw new Error('AGY ACP returned no session identity.');
     if (this.allocatedSessionId !== session.sessionId) throw new Error('AGY ACP initial session setup was not confirmed.');
     setStage('host-admission');
+    if (this.relayFault) throw new Error('AGY hook relay failed before session admission.');
+    if (this.options.worker || this.options.sessionId) {
+      this.chat = new AgyChatHost(this.client, session.sessionId, this.options.cwd, this.options.threadId);
+      this.relay.bindSession(session.sessionId);
+    } else {
     this.host = new AgyScheduleHost(this.client, session.sessionId, {
       threadId: this.options.threadId, cwd: this.options.cwd,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -165,66 +205,110 @@ export class AgyAcpRuntime {
       },
     });
     this.host.bind(this.relay);
+    }
     void this.client.waitForExit!().then(() => {
-      if (!this.closing) this.host?.schedules.processClosed(false);
+      if (!this.closing) { this.host?.schedules.processClosed(false); this.chat?.fence('AGY process closed unexpectedly.'); }
     });
   }
 
   async execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
     await this.start();
-    if (this.active) throw new Error('AGY foreground turn is already active.');
-    this.active = options; this.streamed = ''; this.tools.clear();
+    if (this.active || this.settingsBusy) throw new Error('AGY foreground turn is already active.');
+    this.active = options; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inactive: ReturnType<typeof setTimeout> | undefined;
     this.activity = () => {
       if (inactive) clearTimeout(inactive);
-      if (options.inactivityTimeout && options.inactivityTimeout > 0) inactive = setTimeout(() => this.host!.cancelForeground(), options.inactivityTimeout);
+      if (options.inactivityTimeout && options.inactivityTimeout > 0) inactive = setTimeout(() => (this.chat ?? this.host!).cancelForeground(), options.inactivityTimeout);
     };
     this.activity();
     try {
-      if (options.timeout && options.timeout > 0) timer = setTimeout(() => this.host!.cancelForeground(), options.timeout);
-      const work = this.host!.prompt([{ type: 'text', text: options.resolvePrompt?.(this.sessionId ?? null) ?? prompt }]);
-      this.activeDone = work;
+      if (options.timeout && options.timeout > 0) timer = setTimeout(() => (this.chat ?? this.host!).cancelForeground(), options.timeout);
+      this.options.beforePrompt?.();
+      const blocks = [{ type: 'text', text: options.resolvePrompt?.(this.sessionId ?? null) ?? prompt },
+        ...(options.attachments ?? []).filter(item => item.type === 'image').map(item => ({ type: 'image', data: item.data, mimeType: item.mimeType }))];
+      const work = (this.chat ?? this.host!).prompt(blocks);
       const result = await work;
+      if (result.stopReason === 'cancelled' && !this.retained && !this.relayFault && !this.chat
+        && this.host?.schedules.status.blocked?.startsWith('AGY foreground cancelled:')) {
+        this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords);
+        this.host = undefined;
+      }
+      this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled');
       // Current native Stop gives the final text without replaying buffered ACP
       // output. With timers, this is a batch projection, not token streaming.
       if (result.output && (this.retained || !this.streamed)) {
         options.onStream?.(result.output); options.onDisplayText?.(result.output);
       }
       return { success: result.success, output: result.output, sessionAbbr: this.sessionId?.slice(0, 8),
-        ...(!result.success && { error: result.output }) };
-    } finally { if (timer) clearTimeout(timer); if (inactive) clearTimeout(inactive); this.activity = undefined; this.active = undefined; this.activeDone = undefined; this.tools.clear(); }
+        ...(!result.success && { error: result.output || 'AGY native turn failed.' }) };
+    } finally { if (timer) clearTimeout(timer); if (inactive) clearTimeout(inactive); this.permissions.cancel(); this.tracker.reset(); this.tracker.setCallback(undefined); this.activity = undefined; this.active = undefined; this.tools.clear(); }
   }
   async abort(): Promise<boolean> {
-    this.continued = false;
-    return this.host?.cancelForeground() ?? false;
+    this.permissions.cancel();
+    return (this.chat ?? this.host)?.cancelForeground() ?? false;
   }
   async withOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
-    await this.start();
-    return this.host!.schedules.withOperation(id, current, run, inTurn);
+    if (this.settingsBusy) throw new Error('AGY settings are changing; native scheduling is unavailable.');
+    this.scheduleOperations++;
+    try {
+      await this.start();
+      if (!this.host) throw new Error('Native scheduling is unavailable for loaded sessions and managed workers.');
+      return await this.host.schedules.withOperation(id, current, run, inTurn);
+    } finally { this.scheduleOperations--; }
   }
   action(id: string) { return this.host?.schedules.action(id); }
   async create(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void | Promise<void>, current: () => boolean): Promise<NativeScheduleHandle> {
-    await this.start();
-    await this.host!.qualify();
-    const entry = { input: structuredClone(input), emit, current, handle: undefined as unknown as NativeScheduleHandle, cancelled: false };
-    const actual = await this.host!.create(input, emit, current);
-    entry.handle = actual; this.entries.set(input.id, entry);
-    return {
-      get nativeId() { return entry.handle.nativeId; },
-      get retirementConfirmed() { return entry.handle.retirementConfirmed; },
-      get nativeDefinitionAbsent() { return entry.handle.nativeDefinitionAbsent; },
-      cancellationKeepsRunning: true,
-      list: () => entry.handle.list(),
-      cancel: () => { entry.cancelled = true; return entry.handle.cancel(); },
-      stop: () => entry.handle.stop(),
-    };
+    if (this.settingsBusy) throw new Error('AGY settings are changing; native scheduling is unavailable.');
+    this.scheduleOperations++;
+    try {
+      await this.start();
+      if (!this.host) throw new Error('Native scheduling is unavailable for loaded sessions and managed workers.');
+      await this.host.qualify();
+      const entry = { input: structuredClone(input), emit, current, handle: undefined as unknown as NativeScheduleHandle, cancelled: false };
+      const actual = await this.host!.create(input, emit, current);
+      entry.handle = actual; this.entries.set(input.id, entry);
+      return {
+        get nativeId() { return entry.handle.nativeId; },
+        get retirementConfirmed() { return entry.handle.retirementConfirmed; },
+        get nativeDefinitionAbsent() { return entry.handle.nativeDefinitionAbsent; },
+        cancellationKeepsRunning: true,
+        list: () => entry.handle.list(),
+        cancel: () => { entry.cancelled = true; return entry.handle.cancel(); },
+        stop: () => entry.handle.stop(),
+      };
+    } finally { this.scheduleOperations--; }
+  }
+  isWaitingInput(): boolean { return this.permissions.waiting; }
+  sendInput(input: string): boolean { return this.permissions.input(input); }
+  respondToApproval(id: string, action: ApprovalAction): boolean { return this.permissions.respond(id, action); }
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (this.client && !this.client.waitForManagedProcessGroupExit) throw new Error('AGY process group cannot be confirmed.');
+    await this.client?.waitForManagedProcessGroupExit?.();
+  }
+  async changeSettings(requested: { model?: string; effort?: string; mode?: string; resetModel?: boolean; resetEffort?: boolean }): Promise<void> {
+    if (this.busy || !this.reusable) throw new Error('AGY settings require idle chat without retained native schedules or uncertain work.');
+    this.settingsBusy = true;
+    try {
+      await this.start();
+      const selection = { mode: requested.mode, model: requested.resetModel ? this.defaults?.model : requested.model,
+        effort: requested.resetEffort ? this.defaults?.effort : requested.effort };
+      if (requested.resetModel && !selection.model || requested.resetEffort && !selection.effort) throw new Error('AGY native setting default is unavailable.');
+      // Controls revoke the original scheduling token. No later setting recreates it.
+      if (!this.chat) this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords);
+      this.host = undefined;
+      await applyAgySessionSettings(this.settings!, async (id, value) => {
+        const result = await this.client!.setConfigOption(this.sessionId!, id, value);
+        this.settings = result; return result;
+      }, selection);
+    } catch (error) { this.chat?.fence('AGY setting outcome is unconfirmed; no further prompt was sent.'); throw error; }
+    finally { this.settingsBusy = false; }
   }
   /** Join the exact tracked group before restoring hooks. Retirement does not
    * authorize loading this conversation: old SYSTEM reminders may survive. */
   close(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    this.closing = true;
+    this.closing = true; this.permissions.cancel();
     return this.closePromise ??= (async () => {
       await this.starting?.catch(() => {});
       await this.finishClose();
@@ -242,7 +326,8 @@ export class AgyAcpRuntime {
     }
     await this.relay?.close();
     await this.restore?.(); this.restore = undefined;
-    if (this.host) this.options.ownedSessionClosed(this.host.sessionId);
+    if (!this.reusable) this.options.settledPrompt?.(false);
+    if (this.host || this.chat) this.options.ownedSessionClosed(this.sessionId!);
     this.closed = true;
 
   }

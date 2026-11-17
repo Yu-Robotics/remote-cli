@@ -11,13 +11,14 @@ import type { TranscriptRecord } from '../../src/scheduling/agy/transcript';
 import { NOTIFICATION_PREFIX } from '../../src/scheduling/agy/transcript';
 import { createExecutor } from '../../src/executor';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
+import { crashAgyOverlay } from '../scheduling/agyHookCrashFixture';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 const native = vi.hoisted(() => ({
   clients: [] as any[], accept: undefined as any, fault: undefined as any,
   restore: vi.fn(async () => {}), configure: vi.fn(async () => {}), bind: vi.fn(),
   settingFailure: false, settingWait: undefined as Promise<void> | undefined, sessionId: 'synthetic-session',
-  nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
+  realHooks: false, nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
 }));
 vi.mock('os', async importOriginal => {
   const actual = await importOriginal<typeof import('os')>();
@@ -27,9 +28,10 @@ vi.mock('../../src/native/NativeBindings', () => ({ nativeBindings: () => {
   if (!native.nativeAvailable) throw new Error('Synthetic helper unavailable');
   return { readChunk: () => {}, openOutputChild: () => {} };
 } }));
-vi.mock('../../src/executor/agy/AgyDelegationConfig', () => ({ configureAgyDelegation: native.configure }));
 vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
-  installAgyScheduleHooks: async () => native.restore,
+  installAgyScheduleHooks: async (...args: any[]) => native.realHooks
+    ? (await vi.importActual<any>('../../src/scheduling/agy/AgyHookRelay')).installAgyScheduleHooks(...args)
+    : Object.assign(native.restore, { run: (callback: () => unknown) => callback() }),
   AgyHookRelay: class {
     constructor(_home: string, accept: any, fault: any) { native.accept = accept; native.fault = fault; }
     async start() { return { url: 'http://127.0.0.1:1/hook', token: 'synthetic-token' }; }
@@ -40,7 +42,7 @@ vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
 vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   session = native.sessionId; token: object | undefined = {}; cursor = 0; rows: TranscriptRecord[] = [];
   tasks = new Map<string, string>(); prompts: string[] = []; cancelled = false; closed = false;
-  controls: Array<[string, string]> = []; model = 'synthetic-default'; thought = 'low';
+  controls: Array<[string, string]> = []; model = 'synthetic-default'; thought = 'low'; mode = 'default';
   release?: (value: { stopReason: string }) => void;
   exited: Promise<void>; onExit!: () => void;
   constructor(public command: string, public args: string[], public cwd: string, public callbacks: AcpEventCallbacks, _managed: boolean, public launch: any) {
@@ -50,12 +52,14 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   state() { return { sessionId: this.session, configOptions: [
     { id: 'model', category: 'model', type: 'select', currentValue: this.model },
     { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: this.thought },
+    { id: 'mode', category: 'mode', type: 'select', currentValue: this.mode },
   ] }; }
   async configure(configId: string, value: string) {
     this.controls.push([configId, value]); await native.settingWait;
     if (native.settingFailure) throw new Error('Synthetic private native error');
     if (configId === 'model') this.model = value;
     if (configId === 'thought_level') this.thought = value;
+    if (configId === 'mode') this.mode = value;
     return this.state();
   }
   async newSessionWithSetup(_cwd: string, _servers: unknown, setup?: AcpSessionSetup) {
@@ -63,7 +67,11 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
     await setup?.(state, (id, value) => this.configure(id, value));
     this.token = {}; return state;
   }
-  async loadSession() { throw new Error('Saved ACP resume is forbidden'); }
+  async loadSession() { throw new Error('Unqualified saved ACP resume is forbidden'); }
+  async loadSessionWithSetup(id: string, _cwd: string, _servers: unknown, setup: AcpSessionSetup) {
+    this.session = id; this.token = undefined; const state = this.state(); await setup(state, (key, value) => this.configure(key, value)); return state;
+  }
+  async setConfigOption(_id: string, key: string, value: string) { this.token = undefined; return this.configure(key, value); }
   sessionAdmission(id: string) { return id === this.session ? this.token : undefined; }
   invocationStart = 0;
   hook(event: string, extra: Record<string, unknown> = {}) {
@@ -119,7 +127,7 @@ const make = () => createExecutor(new DirectoryGuard([cwd]), { type: 'agy', agy:
 beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
   native.home = home; vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
-  native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
+  native.realHooks = false; native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
   native.settingFailure = false; native.settingWait = undefined; native.sessionId = 'synthetic-session';
   native.restore.mockClear(); native.configure.mockClear(); native.bind.mockClear();
   executor = make();
@@ -140,6 +148,13 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   it('leaves native defaults unchanged when no settings are requested', async () => {
     const { runtime } = initialRuntime({ model: undefined, effort: undefined });
     await runtime.start(); expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]);
+  });
+  it('does not admit a host when hook verification failed before allocation completed', async () => {
+    let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
+    const { runtime } = initialRuntime(); const starting = runtime.start();
+    const refused = expect(starting).rejects.toThrow('stage=host-admission');
+    await vi.waitFor(() => expect(last()?.controls).toHaveLength(1)); native.fault(); release();
+    await refused; expect(last().prompts).toEqual([]); expect(native.bind).not.toHaveBeenCalled();
   });
   it('holds prompts and host admission until settings finish, after durable selection', async () => {
     let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
@@ -181,13 +196,13 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   });
   it('does not fall back after allocation when saving the initial pointer fails', async () => {
     const { runtime, ownedSessionClosed } = initialRuntime({ saveSession: () => { throw new Error('Synthetic private filesystem material'); } });
-    await expect(runtime.start()).rejects.toThrow('stage=session-save'); expect(runtime.safeFallback).toBe(false);
+    await expect(runtime.start()).rejects.toThrow('stage=session-save'); expect(last().prompts).toEqual([]);
     expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]); expect(ownedSessionClosed).not.toHaveBeenCalled();
   });
   it.each(['', '../outside', 'x'.repeat(129), 123])('never falls back after malformed allocation %#', async id => {
     native.sessionId = id as string; const { runtime, saveSession } = initialRuntime();
     await expect(runtime.start()).rejects.toThrow('stage=session-create');
-    expect(saveSession).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]); expect(runtime.safeFallback).toBe(false);
+    expect(saveSession).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]); expect(last().prompts).toEqual([]);
   });
   it('joins shutdown during initial settings without prompting or granting successor permission', async () => {
     let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
@@ -328,23 +343,25 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
     const session = executor.getSessionId();
     expect(await executor.abort()).toBe(true); await foreground;
-    expect(last().closed).toBe(true); expect(executor.getSessionId()).toBe(session);
+    expect(last().closed).toBe(false); expect(executor.getSessionId()).toBe(session);
     expect(executor.hasPendingCancellation()).toBe(false);
-    expect(native.restore).toHaveBeenCalledOnce();
-    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow('saved/legacy');
+    expect(native.restore).not.toHaveBeenCalled();
+    await expect(executor.execute('continue original')).resolves.toMatchObject({ success: true });
+    expect(native.clients).toHaveLength(1);
+    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow('unavailable');
   });
-  it.each(['setModel', 'setEffort', 'clearModel'] as const)('retires an ordinary ACP host before %s without losing context', async operation => {
+  it.each(['setModel', 'setEffort', 'clearModel'] as const)('confirms %s on the same ACP host and permanently removes schedule admission', async operation => {
     await executor.execute('hello'); const session = executor.getSessionId();
     if (operation === 'setModel') await executor.setModel('other');
     if (operation === 'setEffort') await executor.setEffort('low');
     if (operation === 'clearModel') await executor.clearModel();
-    expect(last().closed).toBe(true); expect(executor.getSessionId()).toBe(session);
+    expect(last().closed).toBe(false); expect(executor.getSessionId()).toBe(session);
     await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow();
   });
-  it.each(['timeout', 'inactivityTimeout'] as const)('bounds %s and retires ordinary cancelled hosts without losing the pointer', async field => {
+  it.each(['timeout', 'inactivityTimeout'] as const)('bounds %s and continues ordinary ACP chat without losing the pointer', async field => {
     const pending = executor.execute('hold', { [field]: 15 });
     const result = await pending;
-    expect(result.success).toBe(false); expect(last().cancelled).toBe(true); expect(last().closed).toBe(true);
+    expect(result.success).toBe(false); expect(last().cancelled).toBe(true); expect(last().closed).toBe(false);
     expect(executor.getSessionId()).toBe('synthetic-session'); expect(executor.hasPendingCancellation()).toBe(false);
   });
   it('projects in-turn native tool cards and exposes only the requested local permission choice', async () => {
@@ -364,7 +381,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     let release!: () => void;
     native.initializeWait = new Promise(resolve => { release = resolve; });
     const executing = executor.execute('must not dispatch');
-    const rejected = expect(executing).resolves.toMatchObject({ success: false });
+    const rejected = expect(executing).rejects.toThrow('stage=initialize');
     await vi.waitFor(() => expect(native.clients).toHaveLength(1));
     const closing = executor.destroy(); release(); await closing; await rejected;
     expect(last().closed).toBe(true); expect(last().prompts).toEqual([]);
@@ -460,7 +477,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(executor.withNativeScheduleOperation('op', () => false, () => executor.createNativeSchedule(input(), () => {}), false)).rejects.toThrow();
     expect(last().prompts).toEqual([]);
     await executor.destroy(); executor = make();
-    await expect(executor.withNativeScheduleOperation('op', () => true, async () => {}, false)).rejects.toThrow('fresh ACP');
+    await expect(executor.withNativeScheduleOperation('op', () => true, async () => {}, false)).rejects.toThrow('cannot safely resume');
     expect(last().session).toBe('synthetic-session');
   });
   it('refuses a saved ACP host with unknown retirement even without a schedule catalog', async () => {
@@ -492,4 +509,155 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(executor.execute('later')).rejects.toThrow('relay failed');
     expect(last().prompts).toHaveLength(1);
   });
+  it('loads only the supplied worker identity without granting schedule admission', async () => {
+    const { runtime, saveSession } = initialRuntime({ worker: true, sessionId: 'synthetic-retained' });
+    await runtime.start(); expect(saveSession).toHaveBeenCalledWith('synthetic-retained'); expect(last().token).toBeUndefined();
+    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('loaded sessions');
+    await expect(runtime.withOperation('op', () => true, async () => undefined, false)).rejects.toThrow('loaded sessions');
+    expect((await runtime.execute('new task', {})).success).toBe(true);
+    expect(last().prompts).toEqual(['new task']);
+  });
+  it('serializes confirmed mode controls with prompts and schedule admission', async () => {
+    const { runtime } = initialRuntime(); await runtime.start();
+    let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
+    const changing = runtime.changeSettings({ mode: 'plan' });
+    await vi.waitFor(() => expect(last().controls.at(-1)).toEqual(['mode', 'plan']));
+    await expect(runtime.execute('overlap', {})).rejects.toThrow('active');
+    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('settings');
+    await expect(runtime.withOperation('overlap', () => true, async () => undefined, false)).rejects.toThrow('settings');
+    release(); await changing; expect(last().mode).toBe('plan'); expect(last().token).toBeUndefined();
+    await runtime.execute('after control', {}); expect(last().prompts).toEqual(['after control']);
+    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('loaded sessions');
+  });
+  it('projects worker ERROR as failure even when ACP ends normally', async () => {
+    const { runtime } = initialRuntime({ worker: true }); await runtime.start();
+    const client = last(); client.prompt = async () => {
+      client.hook('PreInvocation', { initialNumSteps: 0 });
+      client.hook('PostInvocation'); client.hook('Stop', { terminationReason: 'ERROR', error: 'Synthetic native failure' });
+      return { stopReason: 'end_turn' };
+    };
+    expect(await runtime.execute('worker task', {})).toMatchObject({ success: false, error: 'AGY native turn failed.' });
+  });
+  it('forwards image blocks and text exactly once with activity on ordinary worker chat', async () => {
+    const { runtime } = initialRuntime({ worker: true }); await runtime.start(); const client = last();
+    const prompt = vi.spyOn(client, 'prompt'); const stream = vi.fn(), activity = vi.fn();
+    await runtime.execute('image task', { onStream: stream, onActivity: activity,
+      attachments: [{ type: 'image', data: 'c3ludGhldGlj', mimeType: 'image/png' }] });
+    expect(prompt.mock.calls[0][1]).toEqual([{ type: 'text', text: 'image task' }, { type: 'image', data: 'c3ludGhldGlj', mimeType: 'image/png' }]);
+    expect(stream).toHaveBeenCalledOnce(); expect(activity).toHaveBeenCalled();
+  });
+
+  it('preserves observed background uncertainty through foreground cancellation', async () => {
+    const { runtime } = initialRuntime(); const pending = runtime.execute('hold', {});
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last(); client.row('GENERIC', 'Synthetic unfinished native tool', 'MODEL', 'RUNNING');
+    client.hook('PostToolUse'); expect(runtime.reusable).toBe(false);
+    await runtime.abort(); expect((await pending).success).toBe(false);
+    await expect(runtime.execute('do not resume', {})).rejects.toThrow('unsettled native work');
+    expect(client.prompts).toEqual(['hold']);
+  });
+
+  it('does not clear an earlier invalid hook boundary when cancellation later confirms', async () => {
+    const { runtime } = initialRuntime(); const pending = runtime.execute('hold', {});
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    last().hook('PostInvocation', { invocationNum: 99 });
+    await runtime.abort(); expect((await pending).success).toBe(false);
+    await expect(runtime.execute('refused successor', {})).rejects.toThrow('invalid or incomplete');
+    expect(last().prompts).toEqual(['hold']);
+  });
+
+});
+
+vi.mock('../../src/delegation/OwnershipRuntime', async load => {
+  const actual = await load<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+describe('review regressions through the AGY executor and runtime', () => {
+  it('opens fresh ACP after explicit main clear of a crash-left owned overlay', async () => {
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    await fs.writeFile(pointer, JSON.stringify({ id: 'synthetic-old-main', transport: 'acp', retired: false }));
+    const threadHome = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread');
+    await fs.mkdir(threadHome, { recursive: true }); await crashAgyOverlay(threadHome);
+    executor = make(); native.realHooks = true;
+    await expect(executor.execute('refused before clear')).rejects.toThrow('explicit /clear');
+    await executor.resetContext(); expect((await executor.execute('fresh task')).success).toBe(true);
+    expect(last().prompts).toEqual(['fresh task']); expect(executor.getSessionId()).toBe('synthetic-session');
+    expect(await fs.readdir(pointer + '.detached-acp')).toHaveLength(1);
+  });
+  it.each(['schedule', 'manage_task', 'missed-hook'])('cannot persist reusable worker proof after %s followed by DONE and Stop success', async name => {
+    executor = new AgyExecutor(new DirectoryGuard([cwd]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, delegationWorker: true });
+    const pending = executor.execute('hold');
+    await vi.waitFor(() => expect(last()?.prompts).toContain('hold'));
+    const client = last(), step = client.cursor++;
+    if (name !== 'missed-hook') expect(client.hook('PreToolUse', { stepIdx: step, toolCall: { id: 'synthetic-call', name, args: {} } }).decision).toBe('deny');
+    client.row('GENERIC', `Tool is running as a background task with task id: ${client.session}/task-${step}\nTask Description: synthetic timer\nTask logs are available at: file://synthetic/log`, 'MODEL', 'DONE', step);
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(pending).rejects.toThrow();
+    await expect(executor.configureManagedTools()).resolves.toBeUndefined(); // identical configuration does no reconnect
+    expect((executor as any).acp.reusable).toBe(false);
+    await expect(executor.setModel('synthetic-next')).rejects.toThrow('uncertain work');
+    await expect(executor.execute('next task')).rejects.toThrow();
+    await executor.destroy();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    expect(JSON.parse(await fs.readFile(pointer + '.worker-policy', 'utf8'))).toMatchObject({ policy: 'hook-denial-v2', settled: false, closed: true });
+    executor = new AgyExecutor(new DirectoryGuard([cwd]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, delegationWorker: true });
+    await expect(executor.execute('unsafe load')).rejects.toThrow('explicit /clear'); expect(native.clients).toHaveLength(1);
+    await executor.resetContext(); expect((await executor.execute('fresh after clear')).success).toBe(true);
+  });
+  it('refuses controlled reconnect of a main host that returned a denial', async () => {
+    const pending = executor.execute('hold'); await vi.waitFor(() => expect(last()?.prompts).toContain('hold'));
+    expect(last().hook('PreToolUse', { stepIdx: 0, toolCall: { id: 'synthetic-deny', name: 'schedule', args: {} } }).decision).toBe('deny');
+    last().finish(); last().release({ stopReason: 'end_turn' }); await pending;
+    await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-next' })).rejects.toThrow('reconnect was refused');
+    expect(native.clients).toHaveLength(1);
+  });
+  it.each(['setModel', 'setEffort'] as const)('releases closed startup reached through %s and guides later settings to clear', async method => {
+    native.settingFailure = true;
+    await expect(executor[method](method === 'setModel' ? 'synthetic-model' : 'high')).rejects.toThrow('stage=session-settings');
+    native.settingFailure = false;
+    await expect(executor.setModel('synthetic-model')).rejects.toThrow('explicit /clear');
+    await expect(executor.setEffort('high')).rejects.toThrow('explicit /clear');
+    expect(native.clients).toHaveLength(1);
+  });
+  it('does not advertise destructive settings recovery while a confirmed control is in flight', async () => {
+    await executor.execute('first'); let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
+    const pending = executor.setModel('synthetic-next'); await vi.waitFor(() => expect(last().controls.at(-1)).toEqual(['model', 'synthetic-next']));
+    expect(executor.hasPendingSettingsChange()).toBe(false); expect(executor.isBusy()).toBe(true);
+    await expect(executor.resetContext()).rejects.toThrow('pending'); release(); await pending;
+  });
+});
+
+describe('AGY review persistence at idle boundaries', () => {
+  it('invalidates a settled worker proof immediately on an idle denial', async () => {
+    executor = new AgyExecutor(new DirectoryGuard([cwd]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, delegationWorker: true });
+    await executor.execute('clean task');
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.worker-policy');
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).settled).toBe(true);
+    last().hook('PreToolUse', { stepIdx: last().cursor++, toolCall: { id: 'idle-call', name: 'manage_task', args: {} } });
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).settled).toBe(false);
+    await executor.destroy(); expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toMatchObject({ settled: false, closed: true });
+  });
+  it('preserves allocation uncertainty reached through a settings startup', async () => {
+    native.sessionId = '';
+    await expect(executor.setModel('synthetic-model')).rejects.toThrow('stage=session-create');
+    await expect(executor.setEffort('high')).rejects.toThrow('allocation');
+    await expect(executor.resetContext()).rejects.toThrow('allocation');
+    expect(native.clients).toHaveLength(1);
+  });
+});
+
+it('lets owned restoration resolve a missing config directory before HOME relinking on fresh startup', async () => {
+  const shared = path.join(home, '.gemini', 'config'); await fs.mkdir(shared, { recursive: true });
+  await fs.writeFile(path.join(shared, 'hooks.json'), '{}');
+  const threadHome = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread');
+  await fs.mkdir(path.join(threadHome, '.gemini'), { recursive: true });
+  await fs.symlink(shared, path.join(threadHome, '.gemini', 'config'), process.platform === 'win32' ? 'junction' : 'dir');
+  await crashAgyOverlay(threadHome, { crashRename: 3 });
+  await expect(fs.lstat(path.join(threadHome, '.gemini', 'config'))).rejects.toMatchObject({ code: 'ENOENT' });
+  executor = make(); native.realHooks = true;
+  expect((await executor.execute('fresh startup')).success).toBe(true);
+  await executor.destroy();
+  expect((await fs.lstat(path.join(threadHome, '.gemini', 'config'))).isSymbolicLink()).toBe(true);
+  expect(await fs.readFile(path.join(shared, 'hooks.json'), 'utf8')).toBe('{}');
 });

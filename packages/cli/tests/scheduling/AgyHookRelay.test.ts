@@ -6,6 +6,12 @@ import http from 'http';
 import { AgyHookRelay, installAgyScheduleHooks } from '../../src/scheduling/agy/AgyHookRelay';
 import { relayHook } from '../../src/scheduling/agy/hookClient';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async load => {
+  const actual = await load<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 describe('private AGY event relay and hook overlay', () => {
   let home: string; let relay: AgyHookRelay; let descriptor: { url: string; token: string };
   let target: string; let descriptorFile: string;
@@ -68,9 +74,11 @@ describe('private AGY event relay and hook overlay', () => {
     const groups = JSON.parse(installed); expect(groups['user-hooks']).toEqual(JSON.parse(original)['user-hooks']);
     expect(groups['remote-cli-native-schedule'].PreToolUse[0].matcher).toBe('.*');
     expect(installed).not.toContain(descriptor.token);
-    await fs.writeFile(config, installed + '\n'); await expect(restore()).rejects.toThrow('changed');
-    expect(await fs.readFile(config, 'utf8')).toBe(installed + '\n');
-    await fs.writeFile(config, installed); await restore(); expect(await fs.readFile(config, 'utf8')).toBe(original);
+    await restore(); expect(await fs.readFile(config, 'utf8')).toBe(original);
+    const edited = await installAgyScheduleHooks(home, descriptor);
+    const withEdit = JSON.parse(await fs.readFile(config, 'utf8')); withEdit['new-user-group'] = { enabled: false };
+    await fs.writeFile(config, JSON.stringify(withEdit)); await edited();
+    expect(JSON.parse(await fs.readFile(config, 'utf8'))).toEqual({ ...JSON.parse(original), 'new-user-group': { enabled: false } });
   });
   it('detaches private HOME config links and restores them without changing the shared target', async () => {
     const shared = path.join(home, 'synthetic-shared-config'); await fs.mkdir(shared);

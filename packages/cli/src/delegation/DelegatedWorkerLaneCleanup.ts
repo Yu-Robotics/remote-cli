@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { assertAgyWorkerSelectionResettable, detachAgySelection } from '../executor/agy/AgySessionSelection';
 import os from 'os';
 import path from 'path';
 import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
@@ -72,9 +73,15 @@ export async function cleanupDelegatedWorkerLane(lane: DelegatedWorkerLane, home
 export async function clearDelegatedWorkerContext(lane: DelegatedWorkerLane, home?: string): Promise<void> {
   if (!isWorkerLaneExecutorId(lane.executorThreadId)) throw new Error('Invalid delegated worker executor ID');
   const homes = home ? [home] : [...new Set([process.env.HOME, os.homedir()].filter((value): value is string => Boolean(value)))];
+  // AGY-only preflight all roots before unlinking any selection. Shared lane
+  // admission, generation, artifact and exact-exit guards remain the caller's.
+  if (lane.backend === 'agy') for (const candidate of homes) {
+    assertAgyWorkerSelectionResettable(path.join(candidate, '.remote-cli', 'agy-sessions', `${lane.executorThreadId}.json`));
+  }
   for (const candidate of homes) {
     const directory = path.join(candidate, '.remote-cli', `${lane.backend}-sessions`);
-    await unlinkFile(path.join(directory, `${lane.executorThreadId}.json`));
+    const pointer = path.join(directory, `${lane.executorThreadId}.json`);
+    if (lane.backend !== 'agy' || !detachAgySelection(pointer)) await unlinkFile(pointer);
     if (lane.backend === 'dsh') await unlinkFile(path.join(directory, `${lane.executorThreadId}.handoff.json`));
   }
 }

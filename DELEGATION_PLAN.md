@@ -6,7 +6,7 @@ Allow unrestricted coordinators to choose any eligible installed backend,
 including their own. Remove only the backend-equality rejection in WorkerPolicy;
 discovery and launch retain the same sandbox and inherit-only gates. Preserve
 synthetic lane identities, fresh executor construction, isolated native pointers,
-Git worktrees, shared-directory FIFO execution, five global slots, twelve accepted
+Git worktrees, shared-directory FIFO execution, 20 global slots, twelve accepted
 tasks, explicit integration, closeout, context reset, and reclamation. Workers
 receive no recursive managed-delegation tools or coordinator transcript.
 
@@ -36,7 +36,7 @@ Non-Git directories retain that restriction in code, with no implicit Git init.
    copied. Validate captured tree entries after Git clean filters. Grant the exact
    owned execution cwd without changing global policy.
 3. Start each Git task in a fresh detached checkout anchored by private refs,
-   never a publishable worker branch. Up to five global starting/running slots
+   never a publishable worker branch. Up to 20 global starting/running slots
    permit parallel checkout-isolated work; excess tasks retain FIFO queueing.
    CLI 1.6.131 raises this global cap from the three slots in 1.6.130.
    Worktrees are not OS sandboxes or isolation from shared Git configuration.
@@ -848,7 +848,7 @@ is a framework lifecycle, not an agent prompt or another cleanup tool.
    reclamation, and preservation, plus a repository-keyed worktree metadata guard.
    Hashing and interrupted-intent verification hold only the lane guard; keep the
    shared guard limited to metadata mutations and final registration/intent checks.
-   Workers in different lanes still execute concurrently, up to the existing five
+   Workers in different lanes still execute concurrently, up to 20 global slots (12 per Git request)
    slots. These guards are not OS isolation against external processes.
 7. Keep reclamation outside the worker-stop timeout race, await actual Git exit,
    and mark the lane ready only after cleanup settles. Cleanup refusal/failure
@@ -1096,7 +1096,7 @@ performed.
   confirmed, await owned artifact collection and lane persistence without a
   competing deadline that could leave late writes after release. Preserve only
   affected lanes on collection/persistence failure and release unrelated capacity.
-- Preserve non-Git lifecycle behavior, the five-slot cap, existing Git command
+- Preserve non-Git lifecycle behavior, the 20-slot cap (12 per Git request), existing Git command
   timeouts and output limits, and the removal of repository size/file-count caps.
   No automatic task retry, Git initialization, integration, or protocol change.
 - Bound accepted Git launch/cancel response waits separately from task lifetime,
@@ -1105,7 +1105,7 @@ performed.
   timeout cancel Git, release ownership early, or acknowledge terminal delivery.
 - Regression coverage uses real temporary repositories plus controlled executors
   and gated operations: hidden edits/deletions, cancellation before native launch,
-  five lanes waiting for repository admission, bounded launch/cancel responses,
+  twelve lanes waiting for repository admission, bounded launch/cancel responses,
   slow/failing collection, and
   unconfirmed native shutdown. Live backend and Feishu acceptance remain separate.
 - Both package builds and the final 2,075 CLI / 771 Router tests passed. A parallel

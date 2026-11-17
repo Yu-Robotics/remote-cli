@@ -59,7 +59,7 @@ export function createClaudeExecutor(
 
 /**
  * Create an executor based on the executor config.
- * Supports Claude (persistent), AGY (stream-json), Codex (app-server),
+ * Supports Claude (persistent), AGY (ACP), Codex (app-server),
  * OpenCode and Kimi Code (ACP), official ZCode (app-server), and Pi (RPC).
  *
  * @param directoryGuard Directory guard instance
@@ -79,9 +79,8 @@ export function createExecutor(
   const executorType = executorConfig.type as string;
   switch (executorType) {
     case 'agy':
-      console.log('[ExecutorFactory] Using AGY CLI executor (fresh ACP / saved compatible session)');
+      console.log('[ExecutorFactory] Using AGY CLI executor (ACP-only; legacy selections require explicit clear)');
       return new AgyExecutor(directoryGuard, {
-        nativeAcp: true,
         // Per-thread model (set via /model, persisted on the thread) wins.
         model: model ?? executorConfig.agy?.model,
         effort,

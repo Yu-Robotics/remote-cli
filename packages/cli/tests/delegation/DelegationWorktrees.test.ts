@@ -891,22 +891,20 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     }
   }, phaseBudget(13));
 
-  // Five concurrent executions, queued admission and later native cleanup retain
-  // individual phase limits; the watchdog sums the six worker lifecycles.
-  it.each(['mixed', 'same-backend'] as const)('runs five isolated %s tasks concurrently and keeps a sixth queued', async mode => {
+  // Twelve independently bounded Git worker lifecycles share the request quota.
+  it.each(['mixed', 'same-backend'] as const)('runs twelve isolated %s tasks concurrently within the cumulative request quota', async mode => {
     const scope = manager.begin(parent);
     const tasks: DelegatedTaskResult[] = [];
-    const backends = mode === 'mixed' ? ['codex', 'agy', 'dsh', 'kimi', 'agy', 'codex'] : Array(6).fill(parent.backend);
+    const backends = mode === 'mixed' ? Array.from({ length: 12 }, (_, index) => ['codex', 'agy', 'dsh', 'kimi'][index % 4]) : Array(12).fill(parent.backend);
     expect(await gitPhase('discover concurrent scheduling', () => scope.invoke('remote_cli_list_backends', {}, 'discover'))).toMatchObject({
-      maxConcurrentChildren: 5, scheduling: 'isolated-worktrees', workspace: fixture.root });
+      maxConcurrentChildren: 12, scheduling: 'isolated-worktrees', workspace: fixture.root });
     for (const [index, backend] of backends.entries()) {
-      tasks.push(index < 5 ? await startExecuting(scope, `task-${index}`, backend)
-        : await start(scope, `task-${index}`, backend));
+      tasks.push(await startExecuting(scope, `task-${index}`, backend));
     }
     const first = tasks[0];
-    expect(tasks.map(task => task.state)).toEqual(['running', 'running', 'running', 'running', 'running', 'queued']);
-    expect(new Set(workers.map(worker => worker.cwd)).size).toBe(5);
-    expect(new Set(factory.mock.calls.map(call => call[3])).size).toBe(5);
+    expect(tasks.map(task => task.state)).toEqual(Array(12).fill('running'));
+    expect(new Set(workers.map(worker => worker.cwd)).size).toBe(12);
+    expect(new Set(factory.mock.calls.map(call => call[3])).size).toBe(12);
     expect(factory.mock.calls.every(call => call[3] !== parent.thread.id && call[6].delegationWorker)).toBe(true);
     expect(workers.every(worker => worker.cwd !== fixture.root)).toBe(true);
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'first worker only\n');
@@ -915,8 +913,8 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await expect(gitPhase('remote_cli_integrate fixture state', () => scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'too-soon'))).rejects.toThrow('finish');
     workers[0].finish({ success: true, output: 'Changed source' });
     expect(await result(scope, first.taskId, 'first-result')).toMatchObject({ artifact: { disposition: 'pending' } });
-    await gitPhase('execute the queued sixth worker', () => waitForExecution(scope, 'task-5', tasks[5]));
-    expect(workers).toHaveLength(6);
+    await expect(start(scope, 'over-quota', 'codex')).rejects.toThrow();
+    expect(workers).toHaveLength(12);
     expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
     workers.slice(1).forEach(worker => worker.finish({ success: true, output: 'Read-only review' }));
     const terminal = await collectAll(scope, 'remaining concurrent workers');
@@ -924,7 +922,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(await gitPhase('fixture Git rev-parse', () => gitText(fixture.root, ['rev-parse', 'HEAD']))).toBe(fixture.head);
     expect(await gitPhase('fixture Git for-each-ref', () => gitText(fixture.root, ['for-each-ref', '--format=%(refname)', 'refs/heads']))).toBe('refs/heads/main');
     await retainAndCheckCloseout(scope, first.taskId);
-  }, phaseBudget(35));
+  }, phaseBudget(65));
 
   // Two worker lifecycles and explicit integration each retain bounded operations;
   // only the outer watchdog accounts for the sum of the bounded steps.

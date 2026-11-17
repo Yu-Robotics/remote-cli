@@ -1,7 +1,13 @@
+import { AgyHookOwnershipError } from '../../src/scheduling/agy/AgyHookOwnership';
 import { describe, expect, it } from 'vitest';
 import { AgyAcpStartupError, describeAgyAcpFailure } from '../../src/executor/agy/AgyAcpDiagnostics';
 
 describe('AGY ACP startup diagnostics', () => {
+  it.each(['active', 'unknown', 'changed'] as const)('gives precise %s overlay guidance without blaming native helpers', category => {
+    const error = new AgyHookOwnershipError(category);
+    const wrapped = new AgyAcpStartupError('hooks', error);
+    expect(wrapped.message).toBe(error.message); expect(wrapped.message).not.toContain('Verify AGY');
+  });
   it.each([
     ['ACP error -32000: Authentication required', 'authentication-required', 'rpc=-32000'],
     ['Error: flags provided but not defined: -model', 'unsupported-argument', undefined],
@@ -26,7 +32,7 @@ describe('AGY ACP startup diagnostics', () => {
     const secret = 'synthetic-private-value';
     const error = Object.assign(new Error(`ACP error -32602: Unknown model ID: ${secret}; https://example.com/${secret}`), { code: secret });
     const wrapped = new AgyAcpStartupError('session-settings', error);
-    expect(wrapped.message).toBe('AGY ACP startup failed (stage=session-settings, reason=unsupported-setting, rpc=-32602).');
+    expect(wrapped.message).toBe('AGY ACP startup failed (stage=session-settings, reason=unsupported-setting, rpc=-32602). Verify AGY 1.5.10 or newer and the remote-cli native helper for your platform. No legacy transport fallback is available.');
     expect(wrapped.cause).toBeUndefined();
     expect(JSON.stringify(wrapped)).not.toContain(secret);
     expect(describeAgyAcpFailure(wrapped)).toBe(wrapped.message);

@@ -55,4 +55,14 @@ describe('AGY initial session settings confirmation', () => {
     const error = await applyAgySessionSettings(state(), configure, { model: 'synthetic-model' }).catch(error => error);
     expect(error.message).not.toContain('private'); expect(error.cause).toBeUndefined();
   });
+  it('confirms an advertised mode and rejects missing or mismatched acknowledgements', async () => {
+    const mode = (value: string) => ({ configOptions: [...state().configOptions,
+      { id: 'mode', category: 'mode', type: 'select', currentValue: value }] });
+    const configure = vi.fn().mockResolvedValue(mode('plan'));
+    await applyAgySessionSettings(mode('default'), configure, { mode: 'plan' });
+    expect(configure).toHaveBeenCalledWith('mode', 'plan');
+    await expect(applyAgySessionSettings(mode('default'), vi.fn().mockResolvedValue(mode('default')), { mode: 'plan' })).rejects.toThrow('mode selection');
+    await expect(applyAgySessionSettings(state(), configure, { mode: 'plan' })).rejects.toThrow('mode selection');
+  });
+
 });

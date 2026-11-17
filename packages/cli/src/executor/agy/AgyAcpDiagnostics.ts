@@ -1,3 +1,4 @@
+import { AgyHookOwnershipError } from '../../scheduling/agy/AgyHookOwnership';
 export type AgyAcpStartupStage = 'startup' | 'native-helper' | 'hooks' | 'process'
   | 'initialize' | 'session-create' | 'session-load' | 'session-settings' | 'session-save' | 'host-admission' | 'cleanup';
 
@@ -25,7 +26,8 @@ export function describeAgyAcpFailure(error: unknown, stage: AgyAcpStartupStage 
 /** Do not retain a raw cause: callers may print the entire Error object. */
 export class AgyAcpStartupError extends Error {
   constructor(stage: AgyAcpStartupStage, error: unknown, cleanup?: unknown) {
-    super(describeAgyAcpFailure(error, stage)
+    super(error instanceof AgyHookOwnershipError ? error.message : describeAgyAcpFailure(error, stage)
+      + ' Verify AGY 1.5.10 or newer and the remote-cli native helper for your platform. No legacy transport fallback is available.'
       + (cleanup === undefined ? '' : ` ${describeAgyAcpFailure(cleanup, 'cleanup')}`));
     this.name = 'AgyAcpStartupError';
   }

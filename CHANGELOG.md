@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.260] - 2026-11-18
+
+### Changed
+- Use ACP exclusively for AGY main and worker conversation execution. Remove persistent stream-json spawning, parsing and fallback; legacy selections require explicit clear. Keep native history, exact ownership and cleanup guards.
+- Confirm AGY live model/effort controls, route manual approvals, preserve native hook terminal errors, and record worker creation receipts before prompting. Loaded or reconfigured sessions cannot acquire fresh scheduling admission; uncertain outcomes remain refused.
+- Increase global occupied worker capacity to 20 and effective Git-request parallelism to 12. Keep the cumulative 12-task quota, serial non-Git workspaces, admission rejection at full capacity, FIFO, cancellation and exact exit/artifact slot accounting.
+- Forward AGY image inputs over ACP and retain bounded native informational helpers and explicit summarize-then-reset compaction. No automatic schedule restoration or exit-time handoff is added.
+
+### Fixed
+- Restore only proven-owned stale AGY hook overlays after exact prior owner/group exit, using per-HOME kernel exclusion and durable atomic restoration metadata. Preserve user hook edits and refuse unknown legacy or ambiguous ownership with actionable diagnostics.
+- Permanently fence AGY host continuity after any requested tool denial or observed background-task creation receipt, including DONE receipts followed by successful Stop. Older continuity receipts no longer grant worker reuse.
+- Keep worker-card Clear truthful for unconfirmed AGY allocation/schedule ownership, archive ACP selections, and guide settings attempts on refused saved main selections to explicit clear. Busy AGY transitions do not bypass shared reset admission.
+
 ## [1.6.259] - 2026-11-17
 
 ### Fixed
