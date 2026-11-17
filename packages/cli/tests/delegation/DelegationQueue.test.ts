@@ -20,10 +20,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function controlledWorker(cwd: string) {
+function controlledWorker(cwd: string, started: () => void) {
   const completion = deferred<ExecuteResult>();
   const executor: IExecutor = {
-    execute: vi.fn(() => completion.promise), abort: vi.fn().mockResolvedValue(true),
+    execute: vi.fn(() => { started(); return completion.promise; }), abort: vi.fn().mockResolvedValue(true),
     destroy: vi.fn().mockResolvedValue(undefined), waitForExit: vi.fn().mockResolvedValue(undefined), waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
     resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
   };
@@ -37,6 +37,7 @@ describe('multiple accepted delegated tasks', () => {
   let expectedShutdownFailure = false;
   let parent: DelegationParent;
   let workers: ReturnType<typeof controlledWorker>[];
+  let workerStarts: ReturnType<typeof deferred<void>>[];
   let factory: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -48,8 +49,10 @@ describe('multiple accepted delegated tasks', () => {
     vi.stubEnv('USERPROFILE', directory);
     guard = new DirectoryGuard([directory]);
     workers = [];
+    workerStarts = [];
     factory = vi.fn((_guard, _config, cwd) => {
-      const worker = controlledWorker(cwd);
+      const started = workerStarts[workers.length] ??= deferred<void>();
+      const worker = controlledWorker(cwd, started.resolve);
       workers.push(worker);
       return worker.executor;
     });
@@ -76,6 +79,13 @@ describe('multiple accepted delegated tasks', () => {
     scope.invoke('remote_cli_result', { taskId, waitSeconds: 0 }, id) as Promise<DelegatedTaskResult>;
   const readRecord = (taskId: string): DelegatedTaskRecord =>
     JSON.parse(fs.readFileSync(path.join(directory, '.remote-cli', 'delegation', `${taskId}.json`), 'utf8'));
+  // Construction precedes execute admission. Join that event under the test
+  // deadline instead of polling real filesystem finalization with a 1 s timeout.
+  const workerStarted = async (index: number) => {
+    await (workerStarts[index] ??= deferred<void>()).promise;
+    expect(workers[index].executor.execute).toHaveBeenCalledOnce();
+    return workers[index];
+  };
 
   it('drains independent FIFO tasks after early return, isolates failures, and acknowledges only a successful continuation', async () => {
     const scope = manager.begin(parent);
@@ -92,29 +102,52 @@ describe('multiple accepted delegated tasks', () => {
 
     scope.finishExecution(true);
     const collected = scope.collectPendingResults();
-    workers[0].finish({ success: false, error: 'Authentication required' });
-    await vi.waitFor(() => expect(workers).toHaveLength(2));
-    expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
-    expect(factory.mock.calls[1][1].type).toBe('agy');
-    expect(await status(scope, third.taskId, 'third-queued')).toMatchObject({ state: 'queued' });
-    workers[1].finish({ success: true, output: 'Second independent finding' });
-    await vi.waitFor(() => expect(workers).toHaveLength(3));
-    expect(factory.mock.calls[2][1].type).toBe('dsh');
-    workers[2].finish({ success: true, output: 'Third independent finding' });
-    const results = await collected;
-    expect(results.map(result => [result.taskId, result.state])).toEqual([
-      [first.taskId, 'failed'], [second.taskId, 'succeeded'], [third.taskId, 'succeeded'],
-    ]);
-    expect(vi.mocked(workers[2].executor.execute).mock.calls[0][0]).not.toContain('Second independent finding');
-    expect(manager.blocksWorkspace(directory, 'other')).toBe(false);
-    expect(scope.hasPendingResults()).toBe(true);
-    const ids = results.map(result => result.taskId);
-    scope.beginExecution(ids);
-    scope.finishExecution(false);
-    expect(scope.getRetainedResults()).toHaveLength(3);
-    scope.beginExecution(ids);
-    scope.finishExecution(true);
-    expect(await scope.collectPendingResults()).toEqual([]);
+    // If an assertion fails, close rejects this collector. Observe it now and
+    // join it before teardown can restore mocks or another test's clock.
+    void collected.catch(() => undefined);
+    const finalizationEntered = deferred<void>();
+    const finalize = deferred<void>();
+    const markReady = manager.laneStore.markReady.bind(manager.laneStore);
+    vi.spyOn(manager.laneStore, 'markReady').mockImplementation(async id => {
+      if (workers.length === 2) { finalizationEntered.resolve(); await finalize.promise; }
+      return markReady(id);
+    });
+    try {
+      workers[0].finish({ success: false, error: 'Authentication required' });
+      await workerStarted(1);
+      expect(workers).toHaveLength(2);
+      expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
+      expect(factory.mock.calls[1][1].type).toBe('agy');
+      expect(await status(scope, third.taskId, 'third-queued')).toMatchObject({ state: 'queued' });
+      workers[1].finish({ success: true, output: 'Second independent finding' });
+      await finalizationEntered.promise;
+      expect(workers).toHaveLength(2);
+      expect(await status(scope, third.taskId, 'third-awaiting-finalization')).toMatchObject({ state: 'queued' });
+      expect(manager.blocksWorkspace(directory, 'other')).toBe(true);
+      finalize.resolve();
+      await workerStarted(2);
+      expect(workers).toHaveLength(3);
+      expect(factory.mock.calls[2][1].type).toBe('dsh');
+      workers[2].finish({ success: true, output: 'Third independent finding' });
+      const results = await collected;
+      expect(results.map(result => [result.taskId, result.state])).toEqual([
+        [first.taskId, 'failed'], [second.taskId, 'succeeded'], [third.taskId, 'succeeded'],
+      ]);
+      expect(vi.mocked(workers[2].executor.execute).mock.calls[0][0]).not.toContain('Second independent finding');
+      expect(manager.blocksWorkspace(directory, 'other')).toBe(false);
+      expect(scope.hasPendingResults()).toBe(true);
+      const ids = results.map(result => result.taskId);
+      scope.beginExecution(ids);
+      scope.finishExecution(false);
+      expect(scope.getRetainedResults()).toHaveLength(3);
+      scope.beginExecution(ids);
+      scope.finishExecution(true);
+      expect(await scope.collectPendingResults()).toEqual([]);
+    } finally {
+      finalize.resolve();
+      await scope.close();
+      await Promise.allSettled([collected]);
+    }
   });
 
   it('cancels one queued task without a worker or terminal progress phase, leaving its sibling runnable', async () => {
@@ -131,7 +164,8 @@ describe('multiple accepted delegated tasks', () => {
     expect(workers[0].executor.abort).not.toHaveBeenCalled();
     expect(factory).toHaveBeenCalledTimes(1);
     workers[0].finish({ success: true, output: 'First' });
-    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await workerStarted(1);
+    expect(workers).toHaveLength(2);
     expect(factory.mock.calls[1][1].type).toBe('dsh');
     workers[1].finish({ success: true, output: 'Third' });
     expect((await scope.collectPendingResults()).map(result => result.state)).toEqual(['succeeded', 'cancelled', 'succeeded']);
@@ -396,7 +430,8 @@ describe('multiple accepted delegated tasks', () => {
     await expect(delegate(scopes[5], 'full')).rejects.toThrow('capacity');
     const firstWorker = workers.find(worker => worker.executor.getCurrentWorkingDirectory() === path.join(directory, 'project-0'))!;
     firstWorker.finish({ success: true });
-    await vi.waitFor(() => expect(workers).toHaveLength(6));
+    await workerStarted(5);
+    expect(workers).toHaveLength(6);
     await expect(delegate(scopes[5], 'still-full')).rejects.toThrow('capacity');
     await scopes[1].invoke('remote_cli_cancel', { taskId: initial[1].taskId }, 'cancel');
     expect(await delegate(scopes[5], 'retry')).toMatchObject({ state: 'running' });
