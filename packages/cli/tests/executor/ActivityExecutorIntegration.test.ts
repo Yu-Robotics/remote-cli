@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import { agyActivity } from './agyActivityFixture';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
-import os from 'os';
+import os, * as osNamespace from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { CodexAppServerExecutor } from '../../src/executor/CodexAppServerExecutor';
@@ -17,6 +17,13 @@ import type { AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/A
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 import type { ActivityProgressInfo } from '../../src/types';
 import type { IExecutor } from '../../src/executor/IExecutor';
+
+const homeFixture = vi.hoisted(() => ({ root: '' }));
+vi.mock('os', async importOriginal => {
+  const original = await importOriginal<typeof osNamespace>();
+  const homedir = () => homeFixture.root;
+  return { ...original, homedir, default: { ...original, homedir } };
+});
 
 // Fail closed for unexpected subprocesses; backend fixtures are in-process.
 vi.mock('child_process', () => ({
@@ -121,13 +128,13 @@ describe('Executor Activity Signal Integration', () => {
     return executor;
   };
   const isolateHome = (home: string) => {
+    homeFixture.root = home;
     const drive = process.platform === 'win32' ? path.parse(home).root.replace(/[\\/]$/, '') : '';
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);
     vi.stubEnv('HOMEDRIVE', drive);
     vi.stubEnv('HOMEPATH', home.slice(drive.length));
     vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
-    vi.spyOn(os, 'homedir').mockReturnValue(home);
   };
 
   beforeEach(async () => {
@@ -135,6 +142,8 @@ describe('Executor Activity Signal Integration', () => {
     tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-activity-test-')));
     executors = [];
     isolateHome(tempDir);
+    expect(os.homedir()).toBe(tempDir);
+    expect(osNamespace.homedir()).toBe(tempDir);
   });
 
   afterEach(async () => {
@@ -157,7 +166,7 @@ describe('Executor Activity Signal Integration', () => {
     await fs.mkdir(inherited);
     await fs.mkdir(fixture);
     isolateHome(inherited);
-    vi.spyOn(os, 'homedir').mockReturnValue(fixture);
+    homeFixture.root = fixture;
     isolateHome(fixture);
 
     const transport = new FakeCodexTransport();
@@ -474,6 +483,8 @@ describe('Executor Activity Signal Integration', () => {
       const client = agyActivity.clients[0];
       client.text('Investigating files'); client.tool(); client.finish(failed);
       expect((await pending).success).toBe(!failed);
+      const pointer = path.join(tempDir, '.remote-cli', 'agy-sessions', 'synthetic-agy-activity.json');
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toMatchObject({ id: client.session, transport: 'acp' });
       expect(chunks).toEqual(['Investigating files']);
       expect(activities).toEqual([{ source: 'public_text', text: 'Investigating files' }, { source: 'tool', text: 'Inspect fixture' }]);
       expect(tool).toHaveBeenCalledOnce(); expect(tool).toHaveBeenCalledWith({ id: 'synthetic-tool', name: 'Bash', input: { command: 'echo synthetic' }, description: 'Inspect fixture' });
