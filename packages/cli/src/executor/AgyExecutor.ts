@@ -71,8 +71,8 @@ const AGY_HOME_SHARED_FILES = [
   'GEMINI.md',
 ];
 const AGY_HOME_SHARED_DIRS = ['skills', 'config'];
-/** Programs and caches inside .gemini/antigravity-cli (not per-thread data). */
-const AGY_CLI_SHARED_FILES = ['settings.json', 'installation_id'];
+/** Shared login, settings, and programs inside .gemini/antigravity-cli. */
+const AGY_CLI_SHARED_FILES = ['antigravity-oauth-token', 'settings.json', 'installation_id'];
 const AGY_CLI_SHARED_DIRS = ['bin', 'builtin', 'cache', 'updater'];
 
 /**
@@ -445,7 +445,7 @@ export class AgyExecutor implements IExecutor {
         return; // lstat failed — leave the entry untouched
       }
       if (isLink) return;
-      if (name === 'oauth_creds.json' || name === 'google_accounts.json') {
+      if (name === 'oauth_creds.json' || name === 'google_accounts.json' || name === 'antigravity-oauth-token') {
         console.warn(`[AgyExecutor] Thread-local ${name} replaced its shared link; leaving both copies untouched.`);
       }
       return;
