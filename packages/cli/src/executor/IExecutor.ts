@@ -129,7 +129,7 @@ export interface IExecutor {
   /** Permit only an explicit retry of a settled-but-unconfirmed native setting. */
   canRetrySettingsChange?(setting: 'model'): boolean;
   abortStatusMessage?(): string | undefined;
-  /** Explicit context reset may stop a retained host, losing session-only schedules. */
+  /** Explicit context reset may stop the native process, losing session-only schedules. */
   stopForContextReset?(): Promise<void>;
   destroy(): Promise<void> | void;
   /** Transport-exit confirmation; insufficient by itself for disposable worker cleanup. */

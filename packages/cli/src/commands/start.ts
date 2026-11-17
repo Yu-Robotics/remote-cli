@@ -19,11 +19,8 @@ import { initializeBackendEnvironment } from '../utils/BackendEnvironment';
 import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 import { backendKeyOf } from '../types/config';
 import { MaintenanceClient } from '../maintenance/MaintenanceClient';
-import fs from 'fs';
 import path from 'path';
 import { kernelGate, type KernelGate } from '../delegation/OwnershipRuntime';
-import { RetainedFrontend, descriptorLauncher, type RetainedLauncher } from '../sessionHost/RetainedFrontend';
-import { supervisedLauncher } from '../sessionHost/RetainedHostLauncher';
 
 export { isNewerVersion } from '../utils/version';
 
@@ -31,10 +28,6 @@ export { isNewerVersion } from '../utils/version';
  * Start command options
  */
 export interface StartCommandOptions {
-  /** Explicit opt-in; the launcher owns a separately supervised pinned runtime. */
-  retainedHost?: RetainedLauncher;
-  /** Explicit opt-in to the immutable installation prepared for this device. */
-  retainedHostFile?: string;
   /** Run as daemon */
   daemon?: boolean;
   /** Exit after automatic updates so a process supervisor can restart the CLI. */
@@ -145,28 +138,7 @@ export async function startCommand(
   let routerOwner: KernelGate | undefined;
 
   try {
-    const launchFile = options.retainedHostFile ?? process.env.REMOTE_CLI_SESSION_HOST_LAUNCH;
-    if (!options.retainedHost && launchFile && process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR) throw new Error('Choose one retained host launch source.');
-    const retainedLauncher = options.retainedHost ?? (launchFile ? supervisedLauncher(launchFile)
-      : process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR ? descriptorLauncher(process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR) : undefined);
-    if (retainedLauncher) {
-      let updater: AutomaticUpdater | undefined;
-      const frontend = new RetainedFrontend(retainedLauncher, CLI_VERSION, undefined,
-        version => { void updater?.handleRouterVersion(version); });
-      await frontend.start();
-      closeStartedClient = () => frontend.close();
-      if (options.onShutdownReady?.(closeStartedClient) === false) {
-        await closeStartedClient(); return { success: false, error: 'Frontend startup was interrupted.' };
-      }
-      updater = new AutomaticUpdater(CLI_VERSION, frontend, { restartAfterUpdate: options.nonInteractive === true,
-        beforeRestart: closeStartedClient });
-      spinner.succeed(`Retained frontend ${CLI_VERSION}; native runtime ${frontend.status().runtimeVersion}.`);
-      return { success: true, daemonMode: options.daemon };
-    }
     const config = await ConfigManager.initialize();
-    if (fs.existsSync(path.join(config.getConfigDir(), 'retained-host-mode.json'))) {
-      throw new Error('This device uses a retained runtime. Start with its private frontend descriptor; no second Router client was started.');
-    }
 
     // Check if initialized
     if (!config.has('deviceId')) {

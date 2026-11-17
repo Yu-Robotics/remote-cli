@@ -28,8 +28,6 @@ describe('CLI test scheduling', () => {
     'tests/ClaudePersistentExecutor.scheduling.test.ts',
     'tests/ScheduleService.test.ts',
     'tests/MessageHandler.schedule.test.ts',
-    'tests/SessionHostRuntime.test.ts',
-    'tests/RetainedHostLauncher.test.ts',
     'tests/ScheduleRecovery.test.ts',
     'tests/delegation/ManagedNativeSessionDeletion.test.ts',
     'tests/delegation/ManagedHistoryBackends.test.ts',

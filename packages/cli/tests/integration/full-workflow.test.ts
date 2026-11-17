@@ -86,8 +86,6 @@ describe('Integration: Full Workflow', () => {
     vi.stubEnv('HOME', testHome);
     vi.stubEnv('USERPROFILE', testHome);
     vi.stubEnv('XDG_CONFIG_HOME', path.join(testHome, '.config'));
-    vi.stubEnv('REMOTE_CLI_SESSION_HOST_LAUNCH', '');
-    vi.stubEnv('REMOTE_CLI_SESSION_HOST_DESCRIPTOR', '');
   });
 
   afterEach(async () => {

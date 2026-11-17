@@ -98,14 +98,12 @@ program
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
   .option('--non-interactive', 'Exit after automatic updates for a process supervisor to restart')
-  .option('--retained-host <launch-file>', 'Connect to an independently supervised retained native host (opt-in)')
   .action(async (options) => {
     const shutdown = new ProcessShutdown();
     try {
       const result = await startCommand({
         daemon: options.daemon,
         nonInteractive: options.nonInteractive,
-        retainedHostFile: options.retainedHost,
         onShutdownReady: cleanup => shutdown.attach(cleanup),
       });
       shutdown.finishStartup();

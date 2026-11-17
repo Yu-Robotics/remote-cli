@@ -198,8 +198,6 @@ export class ScheduleService {
   private suspending = false;
   private handoffUnresolved = false;
   private suspension?: Promise<void>;
-  private hostRetirement?: Map<string, { runtime: Runtime; cancelled: boolean }>;
-  private hostsRetired = false;
 
   constructor(options: ScheduleServiceOptions) {
     this.options = { ...options };
@@ -562,7 +560,7 @@ export class ScheduleService {
     if (record.state !== 'failed' || record.creationRefused !== true || record.nativeId !== undefined
       || record.cancelRequested || record.cleanupConfirmed || record.completedOccurrences?.length || record.skippedOccurrences?.length
       || this.records.get(id) !== record || this.cleanup.has(id) || this.purged.has(id)
-      || this.fault || this.closing || this.suspending || this.hostRetirement || this.recoveryRun || this.refreshes
+      || this.fault || this.closing || this.suspending || this.recoveryRun || this.refreshes
       || this.recordOperations.has(id) || this.retainedCancellations.has(id) || this.purges.has(id)
       || this.delivering.has(id) || [...this.pending.values()].some(item => item.scheduleId === id)
       || this.options.isNativeMutationPending?.(ownerOf(record))
@@ -854,66 +852,6 @@ export class ScheduleService {
       && (LIVE.has(record.state) || recoveryOwnsWork(record) || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)));
   }
 
-  /** Admission to explicit process retirement, NOT proof of native exit or queue
-   * reconstruction. Only the original live handles can supply deletion receipts.
-   */
-  canRetireDrainedHosts(): boolean {
-    if (!this.initialized || this.closing || this.fault || this.hostRetirement || this.suspending
-      || this.handoffUnresolved || this.recoveryRun || this.operations.size || this.tasks.size
-      || this.recordOperations.size || this.pending.size || this.delivering.size || this.refreshes
-      || this.retainedCancellations.size || this.purges.size || this.cleanup.size) return false;
-    try {
-      this.catalogGate?.verify();
-      return [...this.records.values()].every(record => {
-        if (record.error || record.recovery || !this.current(record) || this.options.isNativeMutationPending?.(ownerOf(record))) return false;
-        const runtime = this.runtimes.get(record.id);
-        if (!runtime) return record.state === 'cancelled' && record.cancelRequested === true && record.cleanupConfirmed === true;
-        if (!runtime.handle || runtime.running.size || runtime.heldDeliveries.size || runtime.cancelling || runtime.releasing) return false;
-        if (record.state === 'completed') return record.rule.kind === 'once' && runtime.completed.size > 0;
-        return record.state === 'cancelled' && record.cancelRequested === true && runtime.removalConfirmed === true
-          && (runtime.handle.nativeDefinitionAbsent === true || runtime.stopped && record.cleanupConfirmed === true);
-      });
-    } catch { return false; }
-  }
-
-  /** Synchronous fence: no asynchronous gap between checking and revoking new
-   * schedule operations. Retain exact pre-exit deletion receipts for finalization.
-   */
-  beginDrainedHostRetirement(): void {
-    if (this.hostRetirement) return;
-    if (!this.canRetireDrainedHosts()) throw new Error('Native schedules are not drained for explicit host retirement.');
-    this.hostRetirement = new Map([...this.runtimes].map(([id, runtime]) => [id,
-      { runtime, cancelled: this.records.get(id)?.cancelRequested === true && runtime.removalConfirmed === true }]));
-  }
-
-  /** Called only after the owner joined its original executor groups and drained
-   * native callback ingestion. Never calls stop/cancel/releaseForRestart on a
-   * provider. Failure preserves the same retirement fence, handles and catalog.
-   */
-  async finishDrainedHostRetirement(): Promise<void> {
-    if (!this.hostRetirement) throw new Error('Explicit host retirement was not admitted.');
-    while (this.tasks.size) await Promise.allSettled([...this.tasks]);
-    await this.deliveryTail;
-    await this.serial(async () => {
-      if (this.fault) throw this.fault;
-      if (this.pending.size || this.operations.size || this.recordOperations.size || this.delivering.size) throw new Error('Native retirement still owns pending work or output.');
-      for (const [id, proof] of this.hostRetirement!) {
-        const runtime = this.runtimes.get(id), record = this.records.get(id);
-        if (runtime !== proof.runtime || !record || runtime.running.size || runtime.heldDeliveries.size
-          || !(runtime.stopped || runtime.handle?.retirementConfirmed === true)) throw new Error('Exact native host retirement is unconfirmed.');
-      }
-      for (const [id, proof] of this.hostRetirement!) {
-        proof.runtime.stopped = true;
-        proof.runtime.releaseAdmission?.(); proof.runtime.releaseAdmission = undefined;
-        // AGY invalidates its inventory view after exit. Preserve the exact
-        // deletion receipt captured BEFORE exit rather than querying a new host.
-        if (proof.cancelled) this.records.get(id)!.cleanupConfirmed = true;
-      }
-      await this.persist();
-      this.hostsRetired = true;
-    });
-  }
-
   /** Card eligibility includes retryable cleanup even for a terminal catalog record. */
   canCancel(owner: ScheduleOwner, id: string): boolean {
     this.checkReady();
@@ -1110,7 +1048,7 @@ export class ScheduleService {
 
   /** Snapshot eligibility is only admission to a handoff, never permission to install. */
   canSuspendForRestart(): boolean {
-    if (!this.initialized || this.closing || this.hostRetirement || this.fault || this.suspending || this.recoveryRun || this.operations.size || this.pending.size) return false;
+    if (!this.initialized || this.closing || this.fault || this.suspending || this.recoveryRun || this.operations.size || this.pending.size) return false;
     return [...this.records.values()].filter(record => LIVE.has(record.state) || recoveryOwnsWork(record)
       || !!this.runtimes.get(record.id) && !this.runtimes.get(record.id)!.stopped).every(record => {
       const runtime = this.runtimes.get(record.id);
@@ -1225,7 +1163,6 @@ export class ScheduleService {
   }
 
   destroy(): Promise<void> {
-    if (this.hostRetirement && !this.hostsRetired) return Promise.reject(new Error('Explicit native host retirement remains unresolved.'));
     if (this.destruction) return this.destruction;
     const preserve = !this.closing && this.hasActiveSchedules() && this.canSuspendForRestart();
     if (!preserve) this.closing = true;
@@ -1337,10 +1274,6 @@ export class ScheduleService {
       }
       if (this.fault) throw this.fault;
       const record = this.records.get(id)!;
-      if (this.hostRetirement && (event.type === 'started' || event.type === 'rebound'
-        || (event.type === 'completed' || event.type === 'skipped') && !runtime.completed.has(event.occurrenceId))) {
-        throw new Error('Unexpected native work during explicit retirement; retain the native event journal.');
-      }
       if (this.suspending && event.type === 'stopped') {
         if (event.exitConfirmed === false) throw new Error('Native handoff exit unconfirmed.');
         runtime.stopped = true; return;
@@ -1536,7 +1469,7 @@ export class ScheduleService {
 
   private canAdmitOccurrence(id: string, runtime: Runtime): boolean {
     const record = this.records.get(id);
-    return !!record && this.runtimes.get(id) === runtime && !this.closing && !this.hostRetirement && !this.fault
+    return !!record && this.runtimes.get(id) === runtime && !this.closing && !this.fault
       && !runtime.stopped && !runtime.cancelling && !runtime.recoveryAbort?.signal.aborted && !record.cancelRequested
       && LIVE.has(record.state) && this.current(record);
   }
@@ -1552,7 +1485,7 @@ export class ScheduleService {
     void task.catch(error => {
       // Persistence/protocol failures fail closed and stop native producers.
       this.fault ??= error instanceof Error ? error : new Error('Schedule service failed.');
-      if (!this.hostRetirement) for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});
+      for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});
     }).finally(() => this.tasks.delete(task));
   }
 
@@ -1586,7 +1519,7 @@ export class ScheduleService {
 
   private checkReady(): void {
     if (this.fault) throw this.fault;
-    if (!this.initialized || this.closing || this.hostRetirement || this.suspending) throw new Error('Schedule service is not initialized or is closed.');
+    if (!this.initialized || this.closing || this.suspending) throw new Error('Schedule service is not initialized or is closed.');
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -1762,7 +1695,7 @@ export class ScheduleService {
       syncDirectory(path.dirname(this.catalogPath));
     } catch (error) {
       this.fault = error instanceof Error ? error : new Error('Schedule catalog write failed.');
-      if (!this.hostRetirement) for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});
+      for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});
       throw this.fault;
     } finally { await fs.unlink(temporary).catch(() => {}); }
   }

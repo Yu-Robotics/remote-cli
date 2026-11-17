@@ -11,9 +11,6 @@ import { execFile } from 'child_process';
 import { AutomaticUpdater } from '../../src/update/AutomaticUpdater';
 import os from 'os';
 import path from 'path';
-import { RetainedFrontend } from '../../src/sessionHost/RetainedFrontend';
-import { supervisedLauncher } from '../../src/sessionHost/RetainedHostLauncher';
-import fs from 'fs';
 import { kernelGate } from '../../src/delegation/OwnershipRuntime';
 
 const initialPath = process.env.PATH;
@@ -39,11 +36,6 @@ vi.mock('fs', async importOriginal => {
   const actual = await importOriginal<typeof import('fs')>();
   return { ...actual, default: { ...actual, existsSync: vi.fn(() => false) } };
 });
-vi.mock('../../src/sessionHost/RetainedFrontend', () => ({
-  RetainedFrontend: vi.fn().mockImplementation(() => ({ start: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined), status: () => ({ runtimeVersion: '1.6.247' }) })),
-  descriptorLauncher: vi.fn(() => ({ connect: vi.fn() })),
-}));
-vi.mock('../../src/sessionHost/RetainedHostLauncher', () => ({ supervisedLauncher: vi.fn(() => ({ connect: vi.fn() })) }));
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
 vi.mock('../../src/maintenance/MaintenanceClient', () => ({
@@ -151,7 +143,7 @@ describe('start command', () => {
       })),
       set: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
-      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
+      getConfigDir: vi.fn().mockReturnValue(path.join(os.tmpdir(), 'synthetic-remote-cli')),
     };
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue(mockConfig);
 
@@ -171,6 +163,29 @@ describe('start command', () => {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
     vi.clearAllMocks();
+  });
+
+  it('keeps ordinary startup behind Router ownership and prepares schedule recovery before connecting', async () => {
+    const gate = { verify: vi.fn(), close: vi.fn() };
+    vi.mocked(kernelGate).mockReturnValueOnce(gate);
+    let shutdown!: () => Promise<void>;
+    expect(await startCommand({ nonInteractive: true, onShutdownReady: close => { shutdown = close; } }))
+      .toMatchObject({ success: true });
+    expect(kernelGate).toHaveBeenCalledWith(path.join(mockConfig.getConfigDir(), 'router-owner.lock'));
+    const handler = vi.mocked(MessageHandler).mock.results[0].value;
+    expect(handler.prepareScheduleStartup.mock.invocationCallOrder[0]).toBeLessThan(mockWsClient.connect.mock.invocationCallOrder[0]);
+    expect(AutomaticUpdater).toHaveBeenCalledWith(CLI_VERSION, handler, { restartAfterUpdate: true, beforeRestart: shutdown });
+    expect(gate.close).not.toHaveBeenCalled();
+    await shutdown();
+    expect(handler.destroy).toHaveBeenCalledOnce(); expect(mockWsClient.disconnect).toHaveBeenCalledOnce();
+    expect(gate.close).toHaveBeenCalledOnce();
+  });
+
+  it('still refuses an existing Router owner before starting native or network work', async () => {
+    vi.mocked(kernelGate).mockReturnValueOnce(undefined);
+    expect(await startCommand({})).toMatchObject({ success: false, error: 'Another client owns this device Router connection.' });
+    expect(WebSocketClient).not.toHaveBeenCalled(); expect(MessageHandler).not.toHaveBeenCalled();
+    expect(execFile).not.toHaveBeenCalled(); expect(axios.get).not.toHaveBeenCalled();
   });
 
   describe('service startup', () => {
@@ -210,7 +225,7 @@ describe('start command', () => {
       expect(WebSocketClient).toHaveBeenCalledWith('wss://test-server.com/ws', 'dev_test_12345', {
         identityLoader: expect.any(Function), automaticFileEnrollment: expect.any(AutomaticFileEnrollment), maintenanceCapabilities: configuration.maintenance,
       });
-      expect(MaintenanceClient).toHaveBeenCalledWith(mockWsClient, '/tmp/.remote-cli', 'https://test-server.com',
+      expect(MaintenanceClient).toHaveBeenCalledWith(mockWsClient, mockConfig.getConfigDir(), 'https://test-server.com',
         'dev_test_12345', expect.any(Function), configuration.maintenance);
     });
 
@@ -579,7 +594,7 @@ describe('startCommand version check integration', () => {
       })),
       set: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
-      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
+      getConfigDir: vi.fn().mockReturnValue(path.join(os.tmpdir(), 'synthetic-remote-cli')),
     };
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue(mockConfig);
 
@@ -610,57 +625,5 @@ describe('startCommand version check integration', () => {
 
     expect(result.success).toBe(true);
     expect(mockWsClient.connect).toHaveBeenCalled();
-  });
-});
-
-
-describe('retained frontend startup', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
-  it('selects the supervised launch record without starting a second Router owner', async () => {
-    const launchFile = path.join(os.tmpdir(), 'synthetic-launch.json');
-    const result = await startCommand({ retainedHostFile: launchFile });
-    expect(result.success).toBe(true);
-    expect(supervisedLauncher).toHaveBeenCalledWith(launchFile);
-    expect(ConfigManager.initialize).not.toHaveBeenCalled();
-    expect(WebSocketClient).not.toHaveBeenCalled();
-  });
-  it('refuses ambiguous descriptor and supervisor selection', async () => {
-    const prior = process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR;
-    process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR = 'synthetic-descriptor';
-    try {
-      expect((await startCommand({ retainedHostFile: 'synthetic-launch' })).error).toContain('Choose one');
-      expect(RetainedFrontend).not.toHaveBeenCalled();
-    } finally {
-      if (prior === undefined) delete process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR;
-      else process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR = prior;
-    }
-  });
-  it('wires the real update readiness seam without another Router, native executor or MessageHandler', async () => {
-    let shutdown!: () => Promise<void>;
-    const launcher = { connect: vi.fn() };
-    const result = await startCommand({ retainedHost: launcher, nonInteractive: true, onShutdownReady: close => { shutdown = close; } });
-    expect(result.success).toBe(true);
-    const frontend = vi.mocked(RetainedFrontend).mock.results[0].value;
-    expect(ConfigManager.initialize).not.toHaveBeenCalled();
-    expect(MessageHandler).not.toHaveBeenCalled(); expect(WebSocketClient).not.toHaveBeenCalled();
-    expect(AutomaticUpdater).toHaveBeenCalledWith(CLI_VERSION, frontend, { restartAfterUpdate: true, beforeRestart: shutdown });
-    const versionCallback = vi.mocked(RetainedFrontend).mock.calls[0][3]!;
-    versionCallback('1.6.999'); expect(automaticUpdaterMocks.handleRouterVersion).toHaveBeenCalledWith('1.6.999');
-    await shutdown(); expect(frontend.close).toHaveBeenCalledTimes(1);
-  });
-  it('closes only the frontend when startup was interrupted', async () => {
-    const result = await startCommand({ retainedHost: { connect: vi.fn() }, onShutdownReady: () => false });
-    expect(result.success).toBe(false);
-    expect(vi.mocked(RetainedFrontend).mock.results[0].value.close).toHaveBeenCalledOnce();
-    expect(AutomaticUpdater).not.toHaveBeenCalled();
-  });
-  it('uses the private descriptor opt-in and refuses a second legacy Router owner', async () => {
-    const prior = process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR;
-    process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR = 'synthetic-descriptor';
-    try { expect((await startCommand({})).success).toBe(true); }
-    finally { if (prior === undefined) delete process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR; else process.env.REMOTE_CLI_SESSION_HOST_DESCRIPTOR = prior; }
-    vi.mocked(fs.existsSync).mockReturnValueOnce(true);
-    expect((await startCommand({})).error).toContain('retained runtime');
-    expect(kernelGate).not.toHaveBeenCalled();
   });
 });

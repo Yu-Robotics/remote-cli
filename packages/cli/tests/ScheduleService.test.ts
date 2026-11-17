@@ -586,69 +586,6 @@ describe('ScheduleService', () => {
     await service.list(owner);
   });
 
-  it('requires exact deletion and retirement evidence in separate phases without provider management', async () => {
-    const service = make();
-    expect(service.canRetireDrainedHosts()).toBe(false);
-    await service.initialize(); await service.create(owner, input('drained', true));
-    const handle = provider.handles.get('drained')!;
-    Object.assign(handle, { cancellationKeepsRunning: true, nativeDefinitionAbsent: false, retirementConfirmed: false });
-    expect(service.canRetireDrainedHosts()).toBe(false);
-    await service.cancel(owner, 'drained');
-    expect(service.canRetireDrainedHosts()).toBe(false); // No native absence receipt.
-    Object.assign(handle, { nativeDefinitionAbsent: true });
-    expect(service.canRetireDrainedHosts()).toBe(true);
-    service.beginDrainedHostRetirement(); service.beginDrainedHostRetirement();
-    expect(service.canRetireDrainedHosts()).toBe(false);
-    expect(service.canSuspendForRestart()).toBe(false);
-    await expect(service.create(owner, input('new'))).rejects.toThrow('closed');
-    await expect(service.destroy()).rejects.toThrow('retirement remains unresolved');
-    await expect(service.finishDrainedHostRetirement()).rejects.toThrow('retirement is unconfirmed');
-    expect((await read()).records[0].cleanupConfirmed).toBeUndefined();
-    const stopCount = vi.mocked(handle.stop).mock.calls.length;
-    Object.assign(handle, { retirementConfirmed: true, nativeDefinitionAbsent: false });
-    await service.finishDrainedHostRetirement();
-    expect((await read()).records[0].cleanupConfirmed).toBe(true);
-    await service.destroy();
-    expect(handle.stop).toHaveBeenCalledTimes(stopCount);
-    expect(handle.list).not.toHaveBeenCalled(); expect(handle.cancel).toHaveBeenCalledOnce();
-  });
-
-  it('retains retirement ownership after persistence failure without provider cleanup or catalog release', async () => {
-    const service = make(); await service.initialize(); await service.create(owner, input());
-    const handle = provider.handles.get('schedule-a')!;
-    Object.assign(handle, { retirementConfirmed: false });
-    complete(); await settled(service);
-    await vi.waitFor(() => expect(service.canRetireDrainedHosts()).toBe(true));
-    service.beginDrainedHostRetirement();
-    const stopCount = vi.mocked(handle.stop).mock.calls.length;
-    Object.assign(handle, { retirementConfirmed: true });
-    const failure = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Synthetic retirement persistence failure'));
-    await expect(service.finishDrainedHostRetirement()).rejects.toThrow('Synthetic retirement persistence failure');
-    failure.mockRestore();
-    await expect(service.finishDrainedHostRetirement()).rejects.toThrow('Synthetic retirement persistence failure');
-    await expect(service.destroy()).rejects.toThrow('retirement remains unresolved');
-    expect(handle.stop).toHaveBeenCalledTimes(stopCount); expect(handle.cancel).not.toHaveBeenCalled();
-    await expect(make().initialize()).rejects.toThrow();
-    // Test-only resource disposal: production deliberately retains the gate.
-    (service as any).catalogGate.close();
-  });
-
-  it('rejects unexpected late occurrences during retirement instead of certifying drained cleanup', async () => {
-    const service = make(); await service.initialize(); await service.create(owner, input());
-    const handle = provider.handles.get('schedule-a')!;
-    Object.assign(handle, { retirementConfirmed: false });
-    complete(); await settled(service);
-    await vi.waitFor(() => expect(service.canRetireDrainedHosts()).toBe(true));
-    service.beginDrainedHostRetirement();
-    const stopCount = vi.mocked(handle.stop).mock.calls.length;
-    await expect((service as any).onEvent('schedule-a', { type: 'started', occurrenceId: 'late-unjoined' })).rejects.toThrow('Unexpected native work');
-    await expect((service as any).onEvent('schedule-a', { type: 'completed', occurrenceId: 'late-unjoined', success: true })).rejects.toThrow('Unexpected native work');
-    expect(handle.stop).toHaveBeenCalledTimes(stopCount);
-    // This directly exercises rejection. The retained runtime separately keeps
-    // the failed callback in its journal; no fabricated exit is used here.
-    (service as any).catalogGate.close();
-  });
-
   it.each([true, false])('preserves shutdown outbox only for a current owner (%s)', async ownerCurrent => {
     deliver.mockRejectedValue(new Error('Disconnected'));
     const service = make(); await service.initialize();

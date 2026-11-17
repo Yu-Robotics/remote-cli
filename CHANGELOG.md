@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.254] - 2026-11-17
+
+### Removed
+- Remove experimental retained-host mode, its launch flag, standalone host runtime, supervisor, pinned bundles, and reduced gateway profile. Ordinary startup, shared ownership safeguards, and native schedule recovery remain supported.
+- Remove retained-host configuration checks without adding a migration gate. This release does not add recovery after an abrupt stop without an exit checkpoint.
+
 ## [1.6.253] - 2026-11-17
 
 ### Fixed
