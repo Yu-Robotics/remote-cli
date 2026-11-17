@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.255] - 2026-11-17
+
+### Fixed
+- Share AGY's `antigravity-cli/antigravity-oauth-token` login file with per-thread HOME directories, including threads initialized before login. Preserve thread-local credential replacements and private conversation data.
+
+### Tests
+- Add isolated filesystem regressions for native login discovery, later login, refreshed credentials, and local replacement preservation without launching AGY.
+
 ## [1.6.254] - 2026-11-17
 
 ### Removed
