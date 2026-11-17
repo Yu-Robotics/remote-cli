@@ -1,3 +1,4 @@
+import { describeAgyAcpFailure } from './agy/AgyAcpDiagnostics';
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { spawnManaged } from './ManagedSpawn';
@@ -25,9 +26,9 @@ import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletio
 export interface AgyExecutorOptions {
   /** Fresh ACP entry; saved legacy sessions retain their existing transport. */
   nativeAcp?: boolean;
-  /** Model slug passed as --model. Leave unset to use agy's default. */
+  /** Native model slug, applied through ACP session configuration or legacy CLI arguments. */
   model?: string;
-  /** Reasoning effort passed as --effort. Leave unset to use agy's default. */
+  /** Native thinking level, applied through ACP session configuration or legacy CLI arguments. */
   effort?: string;
   /** Auto-approve all tool permissions via --dangerously-skip-permissions. Default: true. */
   autoApprove?: boolean;
@@ -212,6 +213,7 @@ export class AgyExecutor implements IExecutor {
   private resettingNativeContext = false;
   private acp?: AgyAcpRuntime;
   private acpEligible = false;
+  private acpStartupFailure?: string;
   private acpLeaseUnconfirmed = false;
   private readonly nativeAcp: boolean;
   private scheduleOwner?: { sessionId: string; hostId: string; retired: boolean };
@@ -245,6 +247,7 @@ export class AgyExecutor implements IExecutor {
   private acpRuntime(): AgyAcpRuntime {
     if (this.acp) return this.acp;
     if (((!this.acpEligible || this.conversationId)) || !this.agyHome || !this.threadId || this.proc || this.isDestroyed) {
+      if (this.acpStartupFailure) throw new Error(`${this.acpStartupFailure} This conversation continued on stream-json without native scheduling. Resolve the startup failure before starting a new AGY conversation.`);
       throw new Error('AGY scheduling requires a fresh ACP conversation. This saved/legacy conversation remains on its compatible transport; use a new AGY thread.');
     }
     const env = this.buildEnv();
@@ -282,7 +285,8 @@ export class AgyExecutor implements IExecutor {
       throw new Error('AGY schedule configuration does not match the original session.');
     }
     const runtime = this.acpRuntime();
-    await runtime.start();
+    try { await runtime.start(); }
+    catch (error) { if (!runtime.running) this.acp = undefined; throw error; }
     return runtime.create(input, emit, () => !this.isDestroyed && current() && admit());
   }
   preservesProcessOnAbort(): boolean { return !!this.acp; }
@@ -516,6 +520,7 @@ export class AgyExecutor implements IExecutor {
       this.conversationId = null; this.acpLeaseUnconfirmed = false;
       this.pendingContextSeed = null; this.contextRevision++;
       this.acpEligible = this.nativeAcp && !!this.threadId;
+      this.acpStartupFailure = undefined;
       return;
     }
     this.resettingNativeContext = true;
@@ -533,6 +538,7 @@ export class AgyExecutor implements IExecutor {
       fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
       if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
       this.acpEligible = this.nativeAcp && !!this.threadId;
+      this.acpStartupFailure = undefined;
     } finally { this.resettingNativeContext = false; }
   }
 
@@ -846,9 +852,15 @@ export class AgyExecutor implements IExecutor {
       catch (error) {
         if (runtime.safeFallback && !this.conversationId) {
           this.acp = undefined; this.acpEligible = false;
-          console.warn('[AgyExecutor] Native ACP initialization unavailable; using compatible transport without scheduling.');
+          this.acpStartupFailure = describeAgyAcpFailure(error);
+          const notice = `${this.acpStartupFailure} Continuing on stream-json; native scheduling is unavailable.`;
+          console.warn(`[AgyExecutor] ${notice}`);
+          options.onStream?.(`${notice}\n`);
           return this.executeQueued(prompt, options);
         }
+        // Release only a closed runtime. Unconfirmed cleanup must remain owned
+        // so later shutdown/reset can still join the exact native process.
+        if (!runtime.running) this.acp = undefined;
         throw error;
       }
       if (this.pendingContextSeed) {

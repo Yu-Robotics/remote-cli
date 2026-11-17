@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
+import fsSync from 'fs';
+import { AgyAcpRuntime } from '../../src/executor/agy/AgyAcpRuntime';
+import type { AcpSessionSetup } from '../../src/executor/acp/AcpClient';
 import os from 'os';
 import path from 'path';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
@@ -13,6 +16,7 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 const native = vi.hoisted(() => ({
   clients: [] as any[], accept: undefined as any, fault: undefined as any,
   restore: vi.fn(async () => {}), configure: vi.fn(async () => {}), bind: vi.fn(),
+  settingFailure: false, settingWait: undefined as Promise<void> | undefined, sessionId: 'synthetic-session',
   nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
 }));
 vi.mock('os', async importOriginal => {
@@ -34,22 +38,32 @@ vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
   },
 }));
 vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
-  session = 'synthetic-session'; token: object | undefined = {}; cursor = 0; rows: TranscriptRecord[] = [];
+  session = native.sessionId; token: object | undefined = {}; cursor = 0; rows: TranscriptRecord[] = [];
   tasks = new Map<string, string>(); prompts: string[] = []; cancelled = false; closed = false;
+  controls: Array<[string, string]> = []; model = 'synthetic-default'; thought = 'low';
   release?: (value: { stopReason: string }) => void;
   exited: Promise<void>; onExit!: () => void;
   constructor(public command: string, public args: string[], public cwd: string, public callbacks: AcpEventCallbacks, _managed: boolean, public launch: any) {
     native.clients.push(this); this.exited = new Promise(resolve => { this.onExit = resolve; });
   }
   async initialize() { await native.initializeWait; return {}; }
-  async newSession() { return { sessionId: this.session }; }
-  async loadSession(id: string) {
-    this.session = id;
-    const predecessor = native.clients.at(-2);
-    if (predecessor) { this.rows = structuredClone(predecessor.rows); this.cursor = predecessor.cursor; }
-    this.token = undefined;
-    return { sessionId: id };
+  state() { return { sessionId: this.session, configOptions: [
+    { id: 'model', category: 'model', type: 'select', currentValue: this.model },
+    { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: this.thought },
+  ] }; }
+  async configure(configId: string, value: string) {
+    this.controls.push([configId, value]); await native.settingWait;
+    if (native.settingFailure) throw new Error('Synthetic private native error');
+    if (configId === 'model') this.model = value;
+    if (configId === 'thought_level') this.thought = value;
+    return this.state();
   }
+  async newSessionWithSetup(_cwd: string, _servers: unknown, setup?: AcpSessionSetup) {
+    this.token = undefined; const state = this.state();
+    await setup?.(state, (id, value) => this.configure(id, value));
+    this.token = {}; return state;
+  }
+  async loadSession() { throw new Error('Saved ACP resume is forbidden'); }
   sessionAdmission(id: string) { return id === this.session ? this.token : undefined; }
   invocationStart = 0;
   hook(event: string, extra: Record<string, unknown> = {}) {
@@ -97,6 +111,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
 } }));
 
 let home: string, cwd: string, executor: AgyExecutor;
+const runtimes = new Set<AgyAcpRuntime>();
 const last = () => native.clients.at(-1)!;
 const input = () => ({ backend: 'agy' as const, threadId: 'synthetic-thread', id: 'job-a', cwd, prompt: 'Equal work',
   model: 'synthetic-model', effort: 'high', rule: { kind: 'cron' as const, expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } });
@@ -105,12 +120,83 @@ beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
   native.home = home; vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
   native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
+  native.settingFailure = false; native.settingWait = undefined; native.sessionId = 'synthetic-session';
   native.restore.mockClear(); native.configure.mockClear(); native.bind.mockClear();
   executor = make();
 });
-afterEach(async () => { native.exitConfirmed = true; await executor.destroy(); await fs.rm(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(async () => { native.exitConfirmed = true; await executor.destroy(); for (const runtime of runtimes) await runtime.close(); runtimes.clear(); await fs.rm(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRuntime>[0]> = {}) {
+  const pointer = path.join(home, 'synthetic-startup-pointer.json');
+  const saveSession = vi.fn((id: string) => fsSync.writeFileSync(pointer, JSON.stringify({ id, transport: 'acp', retired: false })));
+  const ownedSessionClosed = vi.fn();
+  const runtime = new AgyAcpRuntime({ command: 'synthetic-agy', home, cwd, threadId: 'synthetic-thread', env: {},
+    autoApprove: true, model: 'synthetic-model', effort: 'high', saveSession, ownedSessionClosed,
+    retainScheduleOwner: vi.fn(), mapTool: (name, input) => ({ name, input }), ...overrides });
+  runtimes.add(runtime); return { runtime, pointer, saveSession, ownedSessionClosed };
+}
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  it('leaves native defaults unchanged when no settings are requested', async () => {
+    const { runtime } = initialRuntime({ model: undefined, effort: undefined });
+    await runtime.start(); expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]);
+  });
+  it('holds prompts and host admission until settings finish, after durable selection', async () => {
+    let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
+    const { runtime, pointer } = initialRuntime(); const starting = runtime.start();
+    await vi.waitFor(() => expect(last()?.controls).toHaveLength(1));
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toMatchObject({ transport: 'acp', retired: false });
+    expect(last().token).toBeUndefined(); expect(native.bind).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]);
+    release(); await starting; expect(last().token).toBeDefined(); expect(native.bind).toHaveBeenCalledOnce();
+    await runtime.execute('hello', {}); expect(last().prompts).toEqual(['hello']);
+  });
+  it('keeps failed settings unretired and guides the next chat through explicit archival reset', async () => {
+    native.settingFailure = true;
+    await expect(executor.execute('do not send')).rejects.toThrow('stage=session-settings, reason=unsupported-setting');
+    const client = last(), pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toMatchObject({ transport: 'acp', retired: false });
+    expect(client.closed).toBe(true); expect(client.prompts).toEqual([]); expect(client.token).toBeUndefined();
+    expect((executor as any).acp).toBeUndefined(); expect((executor as any).acpLeaseUnconfirmed).toBe(true);
+    await expect(executor.execute('still refused')).rejects.toThrow('explicit /clear');
+    expect(native.clients).toHaveLength(1);
+    await executor.destroy(); executor = make();
+    await expect(executor.execute('refused after restart')).rejects.toThrow('explicit /clear');
+    await executor.resetContext(); expect(await fs.readdir(pointer + '.detached-acp')).toHaveLength(1);
+    native.settingFailure = false; native.sessionId = 'fresh-synthetic-session';
+    await executor.execute('fresh chat'); expect(last().session).toBe('fresh-synthetic-session');
+    expect(last().prompts).toEqual(['fresh chat']);
+  });
+  it('releases a closed startup failure reached through schedule creation too', async () => {
+    native.settingFailure = true;
+    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow('stage=session-settings');
+    await expect(executor.execute('do not send')).rejects.toThrow('explicit /clear'); expect(native.clients).toHaveLength(1);
+  });
+  it('retains an unconfirmed cleanup runtime until its exact group can be joined', async () => {
+    native.settingFailure = true; native.exitConfirmed = false;
+    await expect(executor.execute('do not send')).rejects.toThrow('stage=cleanup');
+    expect((executor as any).acp).toBeDefined(); expect(native.restore).not.toHaveBeenCalled();
+    native.exitConfirmed = true; await executor.destroy();
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).retired).toBe(false);
+  });
+  it('does not fall back after allocation when saving the initial pointer fails', async () => {
+    const { runtime, ownedSessionClosed } = initialRuntime({ saveSession: () => { throw new Error('Synthetic private filesystem material'); } });
+    await expect(runtime.start()).rejects.toThrow('stage=session-save'); expect(runtime.safeFallback).toBe(false);
+    expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]); expect(ownedSessionClosed).not.toHaveBeenCalled();
+  });
+  it.each(['', '../outside', 'x'.repeat(129), 123])('never falls back after malformed allocation %#', async id => {
+    native.sessionId = id as string; const { runtime, saveSession } = initialRuntime();
+    await expect(runtime.start()).rejects.toThrow('stage=session-create');
+    expect(saveSession).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]); expect(runtime.safeFallback).toBe(false);
+  });
+  it('joins shutdown during initial settings without prompting or granting successor permission', async () => {
+    let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });
+    const { runtime, ownedSessionClosed } = initialRuntime();
+    const pending = runtime.start(); const rejected = expect(pending).rejects.toThrow('stage=session-settings');
+    await vi.waitFor(() => expect(last()?.controls).toHaveLength(1));
+    const closing = runtime.close(); release(); await rejected; await closing;
+    expect(last().controls).toHaveLength(1); expect(last().prompts).toEqual([]); expect(ownedSessionClosed).not.toHaveBeenCalled();
+  });
   it.each([false, true])('refuses saved no-journal ACP chat but explicit clear preserves old history and erasure fences (retired=%s)', async retired => {
     await executor.execute('hello'); await executor.destroy();
     const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
@@ -165,7 +251,8 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(native.clients).toHaveLength(0);
     await executor.execute('hello', { onStream: stream, onDisplayText: display, resolvePrompt: id => `hello ${id}` });
     const client = last(); expect(client.prompts[0]).toBe('hello synthetic-session');
-    expect(client.args).toContain('acp'); expect(client.args).toContain('synthetic-model'); expect(client.args).toContain('high');
+    expect(client.args).toContain('acp'); expect(client.args).not.toContain('--model'); expect(client.args).not.toContain('--effort');
+    expect(client.controls).toEqual([['model', 'synthetic-model'], ['thought_level', 'high']]);
     expect(client.launch.env.HOME).toBe(path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread'));
     expect(client.launch.env.USERPROFILE).toBe(client.launch.env.HOME);
     expect(stream).toHaveBeenCalledWith('Synthetic streamed text'); expect(display).toHaveBeenCalled();

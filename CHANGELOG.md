@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.258] - 2026-11-17
+
+### Fixed
+- Configure fresh AGY ACP model and thinking-level selections through session controls instead of unsupported launch flags. Persist allocation before setup; grant host admission only after native state confirms the requested settings.
+- Fence prompts during initial ACP setup and invalidate setup on competing session controls, cancellation or process retirement. Preserve ordinary ACP backend behavior and DSH callback ownership semantics.
+- Report sanitized startup stage/category diagnostics and visible pre-allocation stream-json fallback. After allocated setup failure, keep the saved selection refused, release only a confirmed-closed runtime, and support explicit archival reset without restoring saved sessions or exit handoff.
+
+### Tests
+- Cover settings confirmation, native aliases, rejected controls, setup races/timeouts, guided refusal/reset and generic ACP backends. Live ACP model/effort switching still uses the existing unverified stream-json transition; use explicit clear for fresh ACP settings.
+
 ## [1.6.257] - 2026-11-17
 
 ### Changed

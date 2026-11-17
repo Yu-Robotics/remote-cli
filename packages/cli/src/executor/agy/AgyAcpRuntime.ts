@@ -1,6 +1,8 @@
 import fs from 'fs/promises';
 import { randomUUID } from 'crypto';
-import { AcpClient, type AcpTransport, type AcpEventCallbacks } from '../acp/AcpClient';
+import { AcpClient, type AcpTransport, type AcpEventCallbacks, type AcpSessionSetup } from '../acp/AcpClient';
+import { applyAgySessionSettings } from './AgySessionSettings';
+import { AgyAcpStartupError, type AgyAcpStartupStage } from './AgyAcpDiagnostics';
 import type { AcpMcpServer } from '../acp/AcpTypes';
 import type { ExecuteOptions, ExecuteResult } from '../IExecutor';
 import { AgyScheduleHost } from '../../scheduling/agy/AgyScheduleHost';
@@ -38,6 +40,8 @@ export class AgyAcpRuntime {
   private closePromise?: Promise<void>;
   private activity?: () => void;
   private closed = false;
+  private allocationStarted = false;
+  private allocatedSessionId?: string;
   private active?: ExecuteOptions;
   private activeDone?: Promise<unknown>;
   private retained = false;
@@ -59,7 +63,7 @@ export class AgyAcpRuntime {
         ? choices.findIndex(choice => choice.kind === 'allow_once') : -1,
     };
   }
-  get safeFallback(): boolean { return this.closed && !this.host; }
+  get safeFallback(): boolean { return this.closed && !this.host && !this.allocationStarted; }
   get sessionId(): string | undefined { return this.host?.sessionId; }
   get hasJobs(): boolean { return this.retained; }
   get busy(): boolean { return this.continuing || !this.closed && ( !!this.active || !!this.starting || !!this.host?.schedules.busy); }
@@ -78,11 +82,22 @@ export class AgyAcpRuntime {
     if (this.host) return;
     if (this.starting) return this.starting;
     this.starting = this.open();
-    try { await this.starting; } catch (error) { await this.close(); throw error; } finally { this.starting = undefined; }
+    try { await this.starting; }
+    catch (error) {
+      try { await this.close(); }
+      catch (cleanup) { throw new AgyAcpStartupError('startup', error, cleanup); }
+      throw error;
+    } finally { this.starting = undefined; }
   }
   private async open(): Promise<void> {
+    let stage: AgyAcpStartupStage = 'native-helper';
+    try { await this.openSession(next => { stage = next; }); }
+    catch (error) { throw new AgyAcpStartupError(stage, error); }
+  }
+  private async openSession(setStage: (stage: AgyAcpStartupStage) => void): Promise<void> {
     const native = nativeBindings();
     if (!native.readChunk || !native.openOutputChild) throw new Error('AGY ACP transcript handle support is unavailable.');
+    setStage('hooks');
     await fs.mkdir(this.options.home, { recursive: true, mode: 0o700 });
     if (this.closing) throw new Error('AGY startup was retired.');
     this.relay = new AgyHookRelay(this.options.home, (event, payload, rows) => {
@@ -108,16 +123,38 @@ export class AgyAcpRuntime {
     if (this.closing) throw new Error('AGY startup was retired.');
     const args = ['acp', '--stdio', '--process-per-session', '--disable-telemetry'];
     if (this.options.autoApprove) args.push('--dangerously-skip-permissions');
-    if (this.options.model) args.push('--model', this.options.model);
-    if (this.options.effort) args.push('--effort', this.options.effort);
+    setStage('process');
     this.client = new AcpClient(this.options.command, args, this.options.cwd, this.callbacks, true,
       { env: this.options.env, delegationWorker: true, onStderr: () => {} });
+    setStage('initialize');
     await this.client.initialize();
     if (this.closing) throw new Error('AGY startup was retired.');
-    const session = await this.client.newSession(this.options.cwd, this.options.mcpServers);
+    const setup: AcpSessionSetup = async (session, configure) => {
+      if (typeof session?.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(session.sessionId)) throw new Error('AGY ACP returned no valid session identity.');
+      this.allocatedSessionId = session.sessionId;
+      setStage('session-save');
+      try { this.options.saveSession(session.sessionId); }
+      catch { throw new Error('AGY ACP session identity could not be persisted. No prompt was sent.'); }
+      if (this.closing) throw new Error('AGY startup was retired.');
+      setStage('session-settings');
+      await applyAgySessionSettings(session, async (id, value) => {
+        if (this.closing) throw new Error('AGY startup was retired.');
+        const result = await configure(id, value);
+        if (this.closing) throw new Error('AGY startup was retired.');
+        return result;
+      }, this.options);
+      if (this.closing) throw new Error('AGY startup was retired.');
+    };
+    let session: { sessionId?: string };
+    // A lost/malformed allocation reply is not proof that no ACP session exists.
+    this.allocationStarted = true;
+    setStage('session-create');
+    if (!this.client.newSessionWithSetup) throw new Error('AGY ACP initial session setup is unavailable.');
+    session = await this.client.newSessionWithSetup(this.options.cwd, this.options.mcpServers, setup);
     if (this.closing) throw new Error('AGY startup was retired.');
     if (!session.sessionId) throw new Error('AGY ACP returned no session identity.');
-    this.options.saveSession(session.sessionId);
+    if (this.allocatedSessionId !== session.sessionId) throw new Error('AGY ACP initial session setup was not confirmed.');
+    setStage('host-admission');
     this.host = new AgyScheduleHost(this.client, session.sessionId, {
       threadId: this.options.threadId, cwd: this.options.cwd,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,

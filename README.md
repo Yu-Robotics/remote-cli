@@ -562,6 +562,21 @@ hook groups are retained in a private HOME overlay, never edited globally. Ordin
 chat streams ACP text until a managed timer exists; afterwards foreground output
 uses the native terminal batch to avoid replaying buffered autonomous text.
 
+From CLI 1.6.258, fresh AGY ACP conversations apply model and thinking-level
+selections through native session controls before the first prompt or schedule
+admission. Unset settings retain native defaults. Unsupported or unconfirmed
+explicit settings fail visibly with sanitized stage/category diagnostics. A failed
+allocated selection remains refused until explicit `/clear`; original history and
+uncertain-retirement evidence are retained. Failures before allocation may use
+stream-json chat with a visible explanation that scheduling is unavailable.
+
+This change covers fresh ACP startup only. Changing `/model` or `/effort` on an
+existing live ACP conversation still closes its ACP host and selects the compatible
+stream-json path; that path has no native scheduling, and resuming an ACP-created
+conversation there is unverified. Use explicit `/clear` (when ownership guards permit)
+to apply changed settings to a fresh ACP conversation. This is not a live settings
+migration or a saved-session resume guarantee.
+
 AGY automatic schedule recovery is unsupported: native hooks cannot guarantee
 fail-closed admission after coordinator loss. No exit checkpoint, automatic
 same-session schedule reconstruction, or abort continuation is used. Saved
