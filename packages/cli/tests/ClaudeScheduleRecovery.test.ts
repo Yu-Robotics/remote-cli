@@ -432,7 +432,7 @@ describe('Claude production orderly recovery', () => {
       state.schedules = service; state.scheduleInitialization = Promise.resolve(service); state.scheduleResultsSupported = true;
       vi.spyOn(state, 'detectBackends').mockResolvedValue([{ id: 'auto', label: 'Claude', installed: true }]);
       vi.spyOn(state.delegation.registry, 'list').mockResolvedValue([]);
-      (service as any).options.recoveryTimeoutMs = 20;
+      const recoveryTimeoutMs = (service as any).options.recoveryTimeoutMs;
       (service as any).options.acquireRecovery = () => {
         if (state.scheduleRecoveryThreads.has(thread.id)) throw new Error('Recovery thread admission unavailable.');
         state.scheduleRecoveryThreads.add(thread.id);
@@ -441,9 +441,6 @@ describe('Claude production orderly recovery', () => {
       let release!: () => void;
       const gate = new Promise<void>(resolve => { release = resolve; });
       let recoveryHost: typeof child;
-      const originalTimer = global.setTimeout;
-      vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: any, ...args: any[]) =>
-        originalTimer(callback, delay === 60_000 ? 100 : delay, ...args)) as any);
       let sequence = 0;
       const send = (content: string) => handler.handleMessage({ type: 'command', threadId: thread.id, openId: owner.openId,
         messageId: `timeout-${++sequence}`, content, isSlashCommand: content.startsWith('/'), timestamp: Date.now() } as any);
@@ -453,9 +450,24 @@ describe('Claude production orderly recovery', () => {
         await create(); if (sibling) await create('second');
         await service.suspendForRestart(); await executor.listModels();
         recoveryHost = child;
-        onManagement = () => raw.sessionSchedules?.scope?.id === 'restore-first' ? gate : Promise.resolve();
-        await service.recover();
+        // Keep real filesystem work and native event delivery. Advance only the
+        // intended deadline, after the first management turn actually dispatches.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        (service as any).options.recoveryTimeoutMs = 20;
+        let dispatched!: () => void;
+        const managementStarted = new Promise<void>(resolve => { dispatched = resolve; });
+        onManagement = () => {
+          if (raw.sessionSchedules?.scope?.id !== 'restore-first') return Promise.resolve();
+          dispatched(); return gate;
+        };
+        const recovering = service.recover();
+        await managementStarted;
+        expect(raw.sessionSchedules.pending.action.tool).toBe('CronList');
+        await vi.advanceTimersByTimeAsync(20);
+        await recovering;
         expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', recovery: { status: 'blocked' } });
+        expect((service as any).runtimes.get('first').handle).toBeUndefined();
+        expect(state.scheduleRecoveryThreads.size).toBe(1);
         if (sibling) {
           expect((await service.list(owner))[1]).toMatchObject({ state: 'interrupted',
             recovery: { status: 'pending', handoff: 'clean', nativeDefinitionAbsent: true } });
@@ -463,16 +475,27 @@ describe('Claude production orderly recovery', () => {
         }
         await send('Before settlement'); expect(response().success).toBe(false);
         expect(response().openId).toBe(owner.openId);
-        // Only the first restore is intentionally timed out. Give the untouched
-        // sibling normal setup time on slower filesystem and coverage runners.
-        if (sibling) (service as any).options.recoveryTimeoutMs = 2000;
-        if (lateTerminal) release();
+        // Restore the ordinary deadline before releasing admission to a sibling.
+        (service as any).options.recoveryTimeoutMs = recoveryTimeoutMs;
+        if (lateTerminal) {
+          // Cross the old fixture's 100 ms watchdog without expiring the real
+          // 60 s settlement deadline. Slow assertions must not recycle this host.
+          await vi.advanceTimersByTimeAsync(150);
+          expect(recoveryHost.stdin.end).not.toHaveBeenCalled();
+          expect(recoveryHost.kill).not.toHaveBeenCalled();
+          expect(state.scheduleRecoveryThreads.size).toBe(1);
+          release();
+        } else await vi.advanceTimersByTimeAsync(60_000);
         await vi.waitFor(() => expect(state.scheduleRecoveryThreads.size).toBe(0));
         if (sibling) {
-          await vi.waitFor(async () => expect((await service.list(owner))[1].state).toBe('active'));
+          await vi.waitFor(async () => {
+            const record = (await service.list(owner))[1];
+            expect(record.state, record.error).toBe('active');
+          });
           await vi.waitFor(() => expect(state.scheduleRecoveryThreads.size).toBe(0));
           expect((await service.list(owner))[0].state).toBe('failed');
         }
+        vi.useRealTimers();
         onManagement = undefined;
         await send('Continue the original conversation'); expect(response().success, JSON.stringify(response())).toBe(true);
         expect(executor.getSessionId()).toBe(session);
@@ -502,7 +525,10 @@ describe('Claude production orderly recovery', () => {
           await send('Continue after the stale host callback'); expect(response().success).toBe(true);
           expect(inventory.size).toBe(1);
         }
-      } finally { onManagement = undefined; release(); await executor.destroy(); await drain(); await handler.destroy(); }
+      } finally {
+        vi.useRealTimers(); onManagement = undefined; release();
+        await executor.destroy(); await drain(); await handler.destroy();
+      }
     })();
   });
 
