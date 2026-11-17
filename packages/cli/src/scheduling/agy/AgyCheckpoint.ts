@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import type { NativeScheduleInput } from '../types';
-import type { AcpTransport } from '../../executor/acp/AcpClient';
+import type { AcpSessionSetup, AcpTransport } from '../../executor/acp/AcpClient';
 
 export interface AgyCheckpointData {
   version: 1; sessionId: string; configuration: string; id: string;
@@ -93,19 +93,32 @@ export class AgyCheckpoint {
 /** A one-use local proof restores process-local admission, not a native wire
  * capability. Any native reconfiguration/cancel/close revokes it again. */
 export async function loadCheckpointSession(client: AcpTransport, permit: AgyResumePermit, cwd: string,
-  servers: Parameters<AcpTransport['loadSession']>[2]): Promise<AcpTransport> {
+  servers: Parameters<AcpTransport['loadSession']>[2], setup?: AcpSessionSetup): Promise<AcpTransport> {
   if (!permits.delete(permit)) throw new Error('AGY resume permit is invalid or already consumed.');
-  const loaded = await client.loadSession(permit.sessionId, cwd, servers);
+  if (!client.loadSessionWithSetup || !client.sessionLifecycle) throw new Error('AGY ACP checkpoint session setup is unavailable.');
+  let prepared = false;
+  let lifecycle: object | undefined;
+  const loaded = await client.loadSessionWithSetup(permit.sessionId, cwd, servers, async (session, configure) => {
+    if (session?.sessionId !== permit.sessionId) throw new Error('AGY loaded a different native conversation.');
+    const epoch = client.sessionLifecycle!();
+    if (!epoch) throw new Error('AGY checkpoint session setup was invalidated.');
+    await setup?.(session, configure);
+    if (client.sessionLifecycle!() !== epoch) throw new Error('AGY checkpoint session setup was invalidated.');
+    lifecycle = epoch;
+    prepared = true;
+  });
   if (loaded.sessionId !== permit.sessionId) throw new Error('AGY loaded a different native conversation.');
+  const unchanged = () => lifecycle !== undefined && client.sessionLifecycle!() === lifecycle;
+  if (!prepared || !unchanged()) throw new Error('AGY checkpoint session setup was not confirmed.');
   let live = true;
   const token = Object.freeze({});
   void client.waitForExit?.().then(() => { live = false; });
   return new Proxy(client, { get(target, key) {
-    if (key === 'sessionAdmission') return (id: string) => live && id === permit.sessionId ? token : undefined;
+    if (key === 'sessionAdmission') return (id: string) => live && unchanged() && id === permit.sessionId ? token : undefined;
     const value = Reflect.get(target, key);
     if (typeof value !== 'function') return value;
     return (...args: unknown[]) => {
-      if (['loadSession', 'newSession', 'setConfigOption', 'sendCancel', 'destroy', 'deleteSession'].includes(String(key))) live = false;
+      if (['loadSession', 'newSession', 'loadSessionWithSetup', 'newSessionWithSetup', 'setConfigOption', 'sendCancel', 'destroy', 'deleteSession'].includes(String(key))) live = false;
       return value.apply(target, args);
     };
   } });

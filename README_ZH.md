@@ -1740,6 +1740,8 @@ Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code
 
 From CLI 1.6.255, per-thread AGY environments also link the native login file `~/.gemini/antigravity-cli/antigravity-oauth-token`. The link is checked before each process launch, so logging in with `agy` in the normal HOME also makes a newly created login file available to existing threads. Existing thread-local credential files are preserved; reconcile them manually if login state diverges.
 
+From CLI 1.6.256, fresh AGY ACP conversations apply the selected model and thinking level through native session configuration instead of unsupported `agy acp` command-line flags. Requested settings must be confirmed before user work or scheduling is admitted; an explicit setting failure does not silently select a default model. ACP startup failures report a bounded stage and error category without raw native stderr or provider data. A conversation that already continued on stream-json retains that transport; existing history is not automatically migrated.
+
 ### 命令队列
 
 每个 thread 同时只执行一条命令，因为 Claude Code、AGY、Codex、OpenCode、Kimi Code、ZCode 和 Pi 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。

@@ -1,6 +1,7 @@
 import { AgyCheckpoint, definitionDigest, scheduleDigest, type AgyCheckpointData, type AgyResumePermit } from '../scheduling/agy/AgyCheckpoint';
 import type { NativeScheduleRecovery } from '../scheduling/types';
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
+import { describeAgyAcpFailure } from './agy/AgyAcpDiagnostics';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
@@ -26,9 +27,9 @@ import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletio
 export interface AgyExecutorOptions {
   /** Production ACP entry, including clean original-session checkpoints. Unattested saved sessions and managed workers remain compatible. */
   nativeAcp?: boolean;
-  /** Model slug passed as --model. Leave unset to use agy's default. */
+  /** Native model slug, applied through ACP session configuration or legacy CLI arguments. */
   model?: string;
-  /** Reasoning effort passed as --effort. Leave unset to use agy's default. */
+  /** Native thinking level, applied through ACP session configuration or legacy CLI arguments. */
   effort?: string;
   /** Auto-approve all tool permissions via --dangerously-skip-permissions. Default: true. */
   autoApprove?: boolean;
@@ -213,6 +214,8 @@ export class AgyExecutor implements IExecutor {
   private resettingNativeContext = false;
   private acp?: AgyAcpRuntime;
   private acpEligible = false;
+  private acpStartupFailure?: string;
+  private acpSetupFailed = false;
   private acpLeaseUnconfirmed = false;
   private readonly nativeAcp: boolean;
   private resumePermit?: AgyResumePermit;
@@ -222,7 +225,7 @@ export class AgyExecutor implements IExecutor {
     catch { return; } // Incompatible proof never grants admission or breaks legacy chat.
   }
   private resumeCleanChat(): void {
-    if (this.acp || this.resumePermit || this.proc || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false || !this.conversationId) return;
+    if (this.acp || this.resumePermit || this.proc || this.acpSetupFailed || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false || !this.conversationId) return;
     const proof = this.cleanCheckpoint();
     if (proof?.sessionId === this.conversationId && Object.keys(proof.jobs).length === 0) {
       this.resumePermit = this.checkpoint().consume(this.conversationId);
@@ -246,6 +249,7 @@ export class AgyExecutor implements IExecutor {
         await this.acp.close(); this.acp = undefined; this.restoringCheckpoint = undefined;
       },
       reconcile: async (record, context, emit) => {
+        this.assertAcpSetupSucceeded();
         const checkpoint = this.checkpoint();
         if (record.rule.kind === 'once' && Date.parse(record.rule.at) <= Date.now()) throw new Error('Expired AGY one-shot will not be reconstructed.');
         if (record.recovery?.handoff !== 'clean' || record.recovery.identity !== this.recoveryIdentity()
@@ -291,9 +295,11 @@ export class AgyExecutor implements IExecutor {
     else await this.abort();
   }
   private acpRuntime(): AgyAcpRuntime {
+    this.assertAcpSetupSucceeded();
     if (this.acp) return this.acp;
     this.resumeCleanChat();
     if (((!this.acpEligible || this.conversationId) && !this.resumePermit) || !this.agyHome || !this.threadId || this.proc || this.isDestroyed) {
+      if (this.acpStartupFailure) throw new Error(`${this.acpStartupFailure} This conversation continued on stream-json without native scheduling. Resolve the startup failure before starting a new AGY conversation.`);
       throw new Error('AGY scheduling requires a fresh ACP conversation. This saved/legacy conversation remains on its compatible transport; use a new AGY thread.');
     }
     const env = this.buildEnv();
@@ -308,8 +314,10 @@ export class AgyExecutor implements IExecutor {
         this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: false, savedAt: new Date().toISOString() });
         this.conversationId = id; this.acpLeaseUnconfirmed = true;
       },
-      retireSession: id => {
-        this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: true, savedAt: new Date().toISOString() });
+      retireSession: (id, setupFailed = false) => {
+        this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: true,
+          ...(setupFailed ? { setupFailed: true } : {}), savedAt: new Date().toISOString() });
+        this.acpSetupFailed = setupFailed;
         this.acpLeaseUnconfirmed = false;
       },
       retainScheduleOwner: (sessionId, hostId, retired) => {
@@ -320,6 +328,10 @@ export class AgyExecutor implements IExecutor {
     });
     this.resumePermit = undefined;
     return this.acp;
+  }
+
+  private assertAcpSetupSucceeded(): void {
+    if (this.acpSetupFailed) throw new Error('AGY ACP session setup failed before any prompt was sent. The saved conversation remains fenced; correct the selected settings and explicitly clear the context or start a new thread.');
   }
   async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
     if (this.configuringTools || this.resettingNativeContext || this.shutdownUncertain) throw new Error('AGY context transition is pending.');
@@ -574,6 +586,8 @@ export class AgyExecutor implements IExecutor {
       fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
       if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
       this.acpEligible = this.nativeAcp && !!this.threadId;
+      this.acpStartupFailure = undefined;
+      this.acpSetupFailed = false;
     } finally { this.resettingNativeContext = false; }
   }
 
@@ -868,6 +882,7 @@ export class AgyExecutor implements IExecutor {
   }
 
   private async executeQueued(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
+    this.assertAcpSetupSucceeded();
     if (options.attachments?.length && !this.attachmentWarningShown) {
       this.attachmentWarningShown = true;
       console.warn('[AgyExecutor] AGY input supports text only — attachments were dropped');
@@ -885,7 +900,10 @@ export class AgyExecutor implements IExecutor {
       catch (error) {
         if (runtime.safeFallback && !this.conversationId) {
           this.acp = undefined; this.acpEligible = false;
-          console.warn('[AgyExecutor] Native ACP initialization unavailable; using compatible transport without scheduling.');
+          this.acpStartupFailure = describeAgyAcpFailure(error);
+          const notice = `${this.acpStartupFailure} Continuing on stream-json; native scheduling is unavailable.`;
+          console.warn(`[AgyExecutor] ${notice}`);
+          options.onStream?.(`${notice}\n`);
           return this.executeQueued(prompt, options);
         }
         throw error;
@@ -1307,6 +1325,7 @@ export class AgyExecutor implements IExecutor {
         if (session.id) {
           this.conversationId = session.id;
           this.acpLeaseUnconfirmed = session.transport === 'acp' && session.retired !== true;
+          this.acpSetupFailed = session.transport === 'acp' && session.setupFailed === true;
           console.log(`[AgyExecutor] Loaded conversation ID: ${this.conversationId}`);
         }
       }

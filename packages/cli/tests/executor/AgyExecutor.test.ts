@@ -19,6 +19,12 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(),
 }));
 
+vi.mock('../../src/executor/agy/AgyAcpRuntime', () => ({ AgyAcpRuntime: class {
+  safeFallback = true;
+  async start() { throw new Error('ACP error -32000: Authentication required; synthetic-private-detail'); }
+  async close() {}
+} }));
+
 // Mock fs for session file operations
 vi.mock('fs', () => ({
   default: {
@@ -174,6 +180,46 @@ describe('AgyExecutor', () => {
       initialWorkingDirectory: '~/test-project',
       threadId: 'thread-1',
     });
+  });
+
+  it('reports a safe ACP fallback reason and keeps it in later scheduling errors', async () => {
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, {
+      nativeAcp: true, initialWorkingDirectory: '~/test-project', threadId: 'thread-1',
+    });
+    const onStream = vi.fn();
+    const work = executor.execute('hello', { onStream });
+    await waitForSpawn();
+    emitInit(); emitResult();
+    await expect(work).resolves.toMatchObject({ success: true });
+    expect(onStream).toHaveBeenCalledWith(expect.stringContaining('reason=authentication-required'));
+    expect(onStream.mock.calls.flat().join(' ')).toContain('native scheduling is unavailable');
+    expect(onStream.mock.calls.flat().join(' ')).not.toContain('synthetic-private-detail');
+    await expect(executor.withNativeScheduleOperation('synthetic-op', () => true, async () => undefined, false))
+      .rejects.toThrow('reason=authentication-required');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('rpc=-32000'));
+    expect(vi.mocked(console.warn).mock.calls.flat().join(' ')).not.toContain('synthetic-private-detail');
+  });
+
+  it('keeps a retired failed ACP setup fenced after recreation until an explicit reset', async () => {
+    await executor.destroy();
+    const pointer = path.join('agy-sessions', 'thread-1.json');
+    mockFs.existsSync.mockImplementation((p: string) => isTestWorkingDirectory(String(p)) || String(p).endsWith(pointer));
+    mockFs.readFileSync.mockReturnValue(JSON.stringify({
+      id: 'synthetic-failed-setup', transport: 'acp', retired: true, setupFailed: true,
+    }));
+    executor = new AgyExecutor(directoryGuard, {
+      nativeAcp: true, initialWorkingDirectory: '~/test-project', threadId: 'thread-1',
+    });
+    await expect(executor.execute('do not send')).rejects.toThrow('session setup failed');
+    await expect(executor.withNativeScheduleOperation('synthetic-op', () => true, async () => undefined, false))
+      .rejects.toThrow('session setup failed');
+    expect(spawnedProcesses).toHaveLength(0);
+    await executor.resetContext();
+    const work = executor.execute('fresh context');
+    await waitForSpawn();
+    emitInit(); emitResult();
+    await expect(work).resolves.toMatchObject({ success: true });
   });
 
   afterEach(async () => {

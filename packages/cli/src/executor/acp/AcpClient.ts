@@ -47,15 +47,25 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** Initial controls run before original-session admission. The setter is scoped
+ * to this allocation/load and expires when setup finishes or ownership changes. */
+export type AcpSessionSetup = (session: AcpSessionResult,
+  configure: (configId: string, value: string) => Promise<AcpSessionResult>) => Promise<void>;
+
 export interface AcpTransport {
   /** Process-local original-session admission identity. Never a resume or recovery
    * receipt. Revoked before load/configuration/cancel/delete, including failures. */
   sessionAdmission?(sessionId: string): object | undefined;
+  /** Allocation/load and admission-revoking controls change this local epoch. */
+  sessionLifecycle?(): object | undefined;
   createNativeSchedule?(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
     onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
   newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
   loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
+  /** Optional initial-control transaction; ordinary transport signatures stay compatible. */
+  newSessionWithSetup?(cwd: string, mcpServers: AcpMcpServer[] | undefined, setup: AcpSessionSetup): Promise<AcpSessionResult>;
+  loadSessionWithSetup?(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] | undefined, setup: AcpSessionSetup): Promise<AcpSessionResult>;
   prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }>;
   setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult>;
   compactSession?(sessionId: string): Promise<{ stopReason: string }>;
@@ -82,6 +92,8 @@ export class AcpClient implements AcpTransport {
   private readonly rl: readline.Interface;
   private nextId = 1;
   private readonly sessionAdmissions = new Map<string, object | undefined>();
+  private sessionEpoch: object = {};
+  private readonly sessionSetups = new Set<object>();
   private destroyed = false;
   private closed = false;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
@@ -114,6 +126,7 @@ export class AcpClient implements AcpTransport {
     this.rl.on('line', (line) => this.handleLine(line));
     this.child.on('error', (error) => this.rejectAllPending(error));
     this.child.on('close', (code, signal) => {
+      this.sessionEpoch = {};
       this.closed = true;
       this.clearKillTimer();
       if (!this.destroyed) {
@@ -127,23 +140,83 @@ export class AcpClient implements AcpTransport {
   }
 
   async newSession(cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
+    return this.newSessionWithSetup(cwd, mcpServers);
+  }
+
+  async newSessionWithSetup(cwd: string, mcpServers: AcpMcpServer[] = [], setup?: AcpSessionSetup): Promise<AcpSessionResult> {
     for (const id of this.sessionAdmissions.keys()) this.sessionAdmissions.set(id, undefined);
-    const result = await this.sendRequest('session/new', { cwd, mcpServers }) as AcpSessionResult;
-    if (typeof result.sessionId === 'string' && !this.sessionAdmissions.has(result.sessionId)
-      && this.sessionAdmissions.size < 1000) this.sessionAdmissions.set(result.sessionId, Object.freeze({}));
-    return result;
+    return this.prepareSession('session/new', { cwd, mcpServers }, setup);
   }
 
   async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
-    if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
-    return this.sendRequest('session/load', { sessionId, cwd, mcpServers }) as Promise<AcpSessionResult>;
+    return this.loadSessionWithSetup(sessionId, cwd, mcpServers);
+  }
+
+  async loadSessionWithSetup(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = [], setup?: AcpSessionSetup): Promise<AcpSessionResult> {
+    if (this.sessionAdmissions.has(sessionId) || this.sessionAdmissions.size < 1000) this.sessionAdmissions.set(sessionId, undefined);
+    return this.prepareSession('session/load', { sessionId, cwd, mcpServers }, setup);
+  }
+
+  private async prepareSession(method: 'session/new' | 'session/load', params: object, setup?: AcpSessionSetup): Promise<AcpSessionResult> {
+    if (this.closed) throw new Error('ACP process exited before initial session setup.');
+    const epoch = this.sessionEpoch = {};
+    const ticket = {};
+    if (setup) this.sessionSetups.add(ticket);
+    let active = true;
+    let configuring = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const current = () => {
+      if (!active || this.destroyed || this.closed || this.sessionEpoch !== epoch) throw new Error('ACP initial session setup was invalidated.');
+    };
+    try {
+      current();
+      const result = await this.sendRequest(method, params) as AcpSessionResult;
+      const id = result?.sessionId;
+      const fresh = method === 'session/new' && typeof id === 'string' && id.length > 0
+        && !this.sessionAdmissions.has(id) && this.sessionAdmissions.size < 1000;
+      // A stale or loaded identity can never become a later fresh allocation.
+      if (typeof id === 'string' && id.length > 0 && this.sessionAdmissions.size < 1000) this.sessionAdmissions.set(id, undefined);
+      current();
+      if (setup) {
+        await Promise.race([
+          setup(result, async (configId, value) => {
+            current();
+            if (configuring) throw new Error('ACP initial session controls must be sequential.');
+            if (typeof id !== 'string' || !id) throw new Error('ACP initial session identity is missing.');
+            configuring = true;
+            try {
+              const configured = await this.sendRequest('session/set_config_option', { sessionId: id, configId, value }) as AcpSessionResult;
+              current();
+              return configured;
+            } finally { configuring = false; }
+          }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => {
+            active = false;
+            reject(new Error('ACP initial session setup timed out.'));
+          }, CONTROL_REQUEST_TIMEOUT_MS * 3); }),
+        ]);
+      }
+      current();
+      if (configuring) throw new Error('ACP initial session controls are still pending.');
+      if (fresh) this.sessionAdmissions.set(id, Object.freeze({}));
+      return result;
+    } finally {
+      active = false;
+      if (timer) clearTimeout(timer);
+      this.sessionSetups.delete(ticket);
+    }
   }
 
   async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
+    if (this.sessionSetups.size) {
+      this.sessionEpoch = {};
+      throw new Error('ACP initial session setup is still pending.');
+    }
     return this.sendRequest('session/prompt', { sessionId, prompt: blocks }) as Promise<{ stopReason: string }>;
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult> {
+    this.sessionEpoch = {};
     if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     return this.sendRequest('session/set_config_option', {
       sessionId,
@@ -153,11 +226,13 @@ export class AcpClient implements AcpTransport {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    this.sessionEpoch = {};
     if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     await this.sendRequest('session/delete', { sessionId });
   }
 
   sendCancel(sessionId: string): void {
+    this.sessionEpoch = {};
     if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     this.sendNotification('session/cancel', { sessionId });
   }
@@ -165,6 +240,7 @@ export class AcpClient implements AcpTransport {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.sessionEpoch = {};
     this.rejectAllPending(new Error('ACP client destroyed'));
     this.rl.close();
     try {
@@ -182,6 +258,8 @@ export class AcpClient implements AcpTransport {
   sessionAdmission(sessionId: string): object | undefined {
     return this.closed || this.destroyed ? undefined : this.sessionAdmissions.get(sessionId);
   }
+
+  sessionLifecycle(): object | undefined { return this.closed || this.destroyed ? undefined : this.sessionEpoch; }
 
   waitForExit(): Promise<void> { return this.exited; }
 

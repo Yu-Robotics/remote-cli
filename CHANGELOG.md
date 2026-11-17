@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.256] - 2026-11-17
+
+### Fixed
+- Configure AGY ACP model and thinking-level selections through native session RPCs instead of unsupported startup flags. Confirm settings before admitting prompts or native schedules, preserving fresh-session and clean-checkpoint ownership safeguards.
+- Report bounded ACP startup stages and error categories when compatible chat fallback is safe, without exposing raw native diagnostics. Keep failed explicit settings visible instead of silently dropping them.
+
+### Tests
+- Add startup-configuration, native alias confirmation, failure, cancellation and scheduling-admission regressions; cover sanitized fallback notices and diagnostics.
+
 ## [1.6.255] - 2026-11-17
 
 ### Fixed

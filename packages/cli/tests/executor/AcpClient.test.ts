@@ -18,6 +18,7 @@ vi.mock('child_process', async (importOriginal) => {
 
 import { spawn } from 'child_process';
 import { AcpClient, type AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
+import { applyAgySessionSettings } from '../../src/executor/agy/AgySessionSettings';
 import { KimiDeletionClient } from '../../src/delegation/KimiSessionDeletion';
 
 function fakeProcess() {
@@ -66,7 +67,119 @@ describe('AcpClient', () => {
 
   afterEach(() => {
     client.destroy();
+    vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it('issues fresh admission only after initial controls finish and expires their setter', async () => {
+    let saved = false;
+    let initialConfigure: ((id: string, value: string) => Promise<unknown>) | undefined;
+    const pending = client.newSessionWithSetup(process.cwd(), [], async (session, configure) => {
+      expect(session.sessionId).toBe('synthetic-session'); saved = true; initialConfigure = configure;
+      await applyAgySessionSettings(session, configure, { model: 'synthetic-model-high', effort: 'low' });
+    });
+    const state = (thought: string) => ({ configOptions: [
+      { id: 'model', category: 'model', type: 'select', currentValue: 'synthetic-model' },
+      { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: thought },
+    ] });
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: { sessionId: 'synthetic-session', ...state('medium') } });
+    await vi.waitFor(() => expect(request(fake.lines, 'session/set_config_option')).toBeDefined());
+    expect(saved).toBe(true); expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    const model = JSON.parse(fake.lines.at(-1)!); expect(model.params.configId).toBe('model');
+    expect(model.params.value).toBe('synthetic-model-high');
+    fake.process.push({ jsonrpc: '2.0', id: model.id, result: state('high') });
+    await vi.waitFor(() => expect(JSON.parse(fake.lines.at(-1)!).params.configId).toBe('thought_level'));
+    expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    const thought = JSON.parse(fake.lines.at(-1)!); expect(thought.params.value).toBe('low');
+    expect(request(fake.lines, 'session/prompt')).toBeUndefined();
+    fake.process.push({ jsonrpc: '2.0', id: thought.id, result: state('low') }); await pending;
+    expect(client.sessionAdmission('synthetic-session')).toBeDefined();
+    const count = fake.lines.length;
+    await expect(initialConfigure!('model', 'late')).rejects.toThrow('invalidated'); expect(fake.lines).toHaveLength(count);
+  });
+
+  it.each(['cancel', 'config', 'new', 'load', 'destroy', 'close', 'delete', 'prompt'] as const)('cannot reauthorize initial setup after concurrent %s', async action => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const setup = vi.fn(async () => { await gate; });
+    const pending = client.newSessionWithSetup(process.cwd(), [], setup);
+    const rejected = expect(pending).rejects.toThrow('invalidated');
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: { sessionId: 'synthetic-session' } });
+    await vi.waitFor(() => expect(setup).toHaveBeenCalledOnce());
+    let control: Promise<unknown> | undefined;
+    if (action === 'cancel') client.sendCancel('synthetic-session');
+    if (action === 'config') control = client.setConfigOption('synthetic-session', 'model', 'other');
+    if (action === 'new') control = client.newSession(process.cwd());
+    if (action === 'load') control = client.loadSession('synthetic-session', process.cwd());
+    if (action === 'destroy') client.destroy();
+    if (action === 'close') fake.process.emit('close', 0, null);
+    if (action === 'delete') control = client.deleteSession('synthetic-session');
+    if (action === 'prompt') {
+      await expect(client.prompt('synthetic-session', [])).rejects.toThrow('setup is still pending');
+      expect(request(fake.lines, 'session/prompt')).toBeUndefined();
+    }
+    if (control) {
+      fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, result: { sessionId: 'different-session' } });
+      await control;
+    }
+    release(); await rejected; expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+  });
+
+  it('rejects a model reply arriving after cancel without sending a later thought-level control', async () => {
+    const session = { sessionId: 'synthetic-session', configOptions: [
+      { id: 'model', category: 'model', type: 'select', currentValue: 'synthetic-model' },
+      { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: 'low' },
+    ] };
+    const pending = client.newSessionWithSetup(process.cwd(), [], async (allocated, configure) => {
+      await applyAgySessionSettings(allocated, configure, { model: 'synthetic-model', effort: 'high' });
+    });
+    const rejected = expect(pending).rejects.toThrow('model selection');
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: session });
+    await vi.waitFor(() => expect(request(fake.lines, 'session/set_config_option')).toBeDefined());
+    client.sendCancel('synthetic-session');
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/set_config_option').id, result: session });
+    await rejected;
+    expect(fake.lines.map(line => JSON.parse(line)).filter(frame => frame.method === 'session/set_config_option')).toHaveLength(1);
+    expect(client.sessionAdmission('synthetic-session')).toBeUndefined(); expect(request(fake.lines, 'session/prompt')).toBeUndefined();
+  });
+
+  it('rejects stale allocation replies after cancellation and never calls their setup', async () => {
+    const setup = vi.fn(); const pending = client.newSessionWithSetup(process.cwd(), [], setup);
+    const rejected = expect(pending).rejects.toThrow('invalidated'); client.sendCancel('synthetic-session');
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: { sessionId: 'synthetic-session' } });
+    await rejected; expect(setup).not.toHaveBeenCalled(); expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    const duplicate = client.newSession(process.cwd());
+    fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, result: { sessionId: 'synthetic-session' } });
+    await duplicate; expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+  });
+
+  it('cannot grant fresh admission to an identity previously loaded from storage', async () => {
+    const loading = client.loadSession('saved-session', process.cwd());
+    fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, result: { sessionId: 'saved-session' } });
+    await loading;
+    const creating = client.newSessionWithSetup(process.cwd(), [], async () => {});
+    fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, result: { sessionId: 'saved-session' } });
+    await creating; expect(client.sessionAdmission('saved-session')).toBeUndefined();
+  });
+
+  it('does not publish initial admission when native configuration fails', async () => {
+    const pending = client.newSessionWithSetup(process.cwd(), [], async (_session, configure) => { await configure('model', 'unknown-model'); });
+    const rejected = expect(pending).rejects.toThrow();
+    fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, result: { sessionId: 'synthetic-session' } });
+    await vi.waitFor(() => expect(request(fake.lines, 'session/set_config_option')).toBeDefined());
+    fake.process.push({ jsonrpc: '2.0', id: JSON.parse(fake.lines.at(-1)!).id, error: { code: -32602, message: 'Synthetic unsupported selection' } });
+    await rejected; expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    expect(request(fake.lines, 'session/prompt')).toBeUndefined();
+  });
+
+  it('bounds a stuck initial setup and cannot publish admission on late completion', async () => {
+    vi.useFakeTimers(); let release!: () => void;
+    const setup = vi.fn(() => new Promise<void>(resolve => { release = resolve; }));
+    const pending = client.newSessionWithSetup(process.cwd(), [], setup); const rejected = expect(pending).rejects.toThrow('setup timed out');
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: { sessionId: 'synthetic-session' } });
+    await vi.advanceTimersByTimeAsync(0); expect(setup).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(30_000); await rejected; release(); await Promise.resolve();
+    expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
   });
 
   it('preserves exact native missing-ID error data for deletion reconciliation', async () => {
