@@ -836,7 +836,12 @@ export class ScheduleService {
       });
       return structuredClone(record);
     } catch (error) {
-      await this.serial(async () => { record.error = errorText(error); if (!this.fault) await this.persist(); });
+      await this.serial(async () => {
+        // A failed deletion attempt is not a new interruption. Keep the
+        // original exit/ownership diagnostic while returning the cleanup error.
+        if (record.state !== 'interrupted' || !record.error) record.error = errorText(error);
+        if (!this.fault) await this.persist();
+      });
       throw error;
     } finally { this.retainedCancellations.delete(record.id); }
   }

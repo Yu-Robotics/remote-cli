@@ -19,7 +19,9 @@ export class ScheduledSessionGuard {
       // Any existing marker, even a torn one, is already a permanent refusal.
       const stat = fs.lstatSync(filename);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe scheduled session marker');
-      fd = fs.openSync(filename, 'r');
+      // Windows FlushFileBuffers requires write access. Reopen without
+      // truncating the refusal marker or replacing its existing evidence.
+      fd = fs.openSync(filename, 'r+');
     }
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     syncDirectory(this.directory);

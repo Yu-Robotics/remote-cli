@@ -852,11 +852,14 @@ describe('managed agent delegation', () => {
     expect(scope.hasPendingResults()).toBe(true);
     await vi.waitFor(() => expect(worker.execute).toHaveBeenCalled());
     finish({ success: true, output: 'Terminal result' });
-    await vi.waitFor(() => expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Completed')));
     expect(scope.hasPendingResults()).toBe(true);
+    // Worker output precedes exit, lane persistence and final metadata pruning.
+    // Join the terminal receipt instead of giving that I/O a one-second poll.
     await expect(scope.collectPendingResults()).resolves.toEqual([
       expect.objectContaining({ taskId: task.taskId, state: 'succeeded', output: 'Terminal result' }),
     ]);
+    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Completed'));
+    expect(parent.onNotice).toHaveBeenCalledOnce();
     expect(scope.hasPendingResults()).toBe(true);
     scope.beginExecution([task.taskId]);
     expect(scope.hasPendingResults()).toBe(false);
@@ -870,6 +873,28 @@ describe('managed agent delegation', () => {
     scope.finishExecution(true);
     expect(scope.getRetainedResults()).toEqual([]);
     await expect(scope.collectPendingResults()).resolves.toEqual([]);
+  });
+
+  it('holds completion notices and receipts until final metadata pruning settles', async () => {
+    let entered!: () => void, release!: () => void;
+    const pruning = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const prune = manager.store.prune.bind(manager.store);
+    vi.spyOn(manager.store, 'prune').mockImplementation(async () => { entered(); await gate; await prune(); });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    let settled = false;
+    const receipt = scope.collectPendingResults().then(value => { settled = true; return value; });
+    try {
+      await pruning;
+      expect(worker.destroy).toHaveBeenCalledOnce();
+      expect(parent.onNotice).not.toHaveBeenCalled();
+      expect(settled).toBe(false); expect(scope.hasPendingResults()).toBe(true);
+    } finally { release(); await receipt; }
+    expect(await receipt).toEqual([expect.objectContaining({ taskId: task.taskId, state: 'succeeded' })]);
+    expect(parent.onNotice).toHaveBeenCalledOnce();
+    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Completed'));
+    expect(scope.hasPendingResults()).toBe(true);
   });
 
   it('includes an in-flight launch in the completion barrier before any worker exists', async () => {
@@ -919,7 +944,10 @@ describe('managed agent delegation', () => {
     for (let index = 0; index < 12; index++) {
       const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, `start-${index}`);
       ids.push(task.taskId);
-      await vi.waitFor(() => expect(parent.onNotice).toHaveBeenCalledTimes(index + 1));
+      // Collection retains receipts; only successful coordinator consumption
+      // may remove them. Await finalization before counting terminal notices.
+      expect((await scope.collectPendingResults()).map(result => result.taskId)).toEqual(ids);
+      expect(parent.onNotice).toHaveBeenCalledTimes(index + 1);
     }
     const results = await scope.collectPendingResults();
     expect(results.map(result => result.taskId)).toEqual(ids);

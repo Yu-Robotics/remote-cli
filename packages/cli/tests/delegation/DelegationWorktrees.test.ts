@@ -325,21 +325,20 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   const settleNativeSteps = async <T>(ids: Set<string>, readTerminal: () => T | undefined, name: string,
     labels = { capture: `capture artifact ${name}`, reclaim: `reclaim checkout ${name}` }): Promise<T> => {
     for (;;) {
-      let label = `finish collection ${name}`;
-      const finished = await gitPhase(() => label, async () => {
-        const next = await waitForSignal(() => {
-          const step = nativeSteps.find(value => ids.has(value.taskId) && !consumedSteps.has(value));
-          if (step) return { step };
-          const value = readTerminal(); return value === undefined ? undefined : { value };
-        });
-        if ('value' in next) return next;
-        consumedSteps.add(next.step); label = labels[next.step.kind];
+      // Waiting for cleanup/metadata to enter a native operation must not spend
+      // that operation's budget or mislabel an entry delay as slow Git capture.
+      const next = await gitPhase(`await native finalization ${name}`, () => waitForSignal(() => {
+        const step = nativeSteps.find(value => ids.has(value.taskId) && !consumedSteps.has(value));
+        if (step) return { step };
+        const value = readTerminal(); return value === undefined ? undefined : { value };
+      }));
+      if ('value' in next) return next.value!;
+      consumedSteps.add(next.step);
+      await gitPhase(labels[next.step.kind], async () => {
         // The manager classifies native failures. Keep the original promise and
         // assert the resulting task state rather than converting rejection to success.
         await Promise.allSettled([next.step.operation]);
-        return undefined;
       });
-      if (finished) return finished.value!;
     }
   };
   const collectFinished = async (scope: Scope, taskId: string, id: string): Promise<DelegatedTaskResult> => {
@@ -360,6 +359,48 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       return completed;
     });
   };
+
+  it.each(['capture', 'reclaim'] as const)('gives native %s entry and completion independent bounded phases', async kind => {
+    let release!: () => void;
+    const operation = trackCall(new Promise<void>(resolve => { release = resolve; }));
+    let terminal = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = settleNativeSteps(new Set(['synthetic-task']), () => terminal ? true : undefined, 'synthetic-result');
+    const outcome = running.catch(error => error);
+    try {
+      // Native finalization can enter later than worker output. Neither the
+      // entry wait nor the operation exceeds 30 seconds, but their sum does.
+      await vi.advanceTimersByTimeAsync(20_000);
+      nativeSteps.push({ taskId: 'synthetic-task', kind, operation }); notifyPhase();
+      await vi.advanceTimersByTimeAsync(20_000);
+      terminal = true; release(); notifyPhase();
+      expect(await outcome).toBe(true);
+      expect(phaseAdmissionClosed).toBe(false);
+    } finally {
+      vi.useRealTimers(); release(); await Promise.allSettled([running, operation]);
+    }
+  }, phaseBudget(2));
+
+  it.each(['capture', 'reclaim'] as const)('retains a timed-out native %s until its original operation settles', async kind => {
+    let release!: () => void;
+    const operation = trackCall(new Promise<void>(resolve => { release = resolve; }));
+    nativeSteps.push({ taskId: 'synthetic-task', kind, operation });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = settleNativeSteps(new Set(['synthetic-task']), () => undefined, 'synthetic-result');
+    const outcome = running.catch(error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect((await outcome).message).toContain(`Git lifecycle phase exceeded 30 seconds: ${kind}`);
+      expect(pendingCalls.has(operation)).toBe(true);
+      const following = vi.fn(async () => undefined);
+      await expect(gitPhase('after native timeout', following)).rejects.toThrow('Fixture is draining');
+      expect(following).not.toHaveBeenCalled();
+      expect(await fs.stat(fixture.directory)).toBeDefined();
+    } finally {
+      vi.useRealTimers(); release(); await Promise.allSettled([running, operation]);
+    }
+    expect(pendingCalls.has(operation)).toBe(false);
+  }, phaseBudget(2));
   const settleScope = async <T>(scope: Scope, name: string, terminal: Promise<T>, labels?: { capture: string; reclaim: string }): Promise<T> => {
     let settled = false, value: T | undefined, failure: unknown;
     trackCall(terminal);
@@ -701,7 +742,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
           expect(await gitPhase('complete the held terminal collection', () => collecting)).toMatchObject({ state: 'succeeded' });
         } else {
           await vi.advanceTimersByTimeAsync(5_000);
-          expect((await outcome).error).toMatchObject({ message: 'Git lifecycle phase exceeded 30 seconds: finish collection terminal-result' });
+          expect((await outcome).error).toMatchObject({ message: 'Git lifecycle phase exceeded 30 seconds: await native finalization terminal-result' });
           await expect(startInPhases(scope, 'must-not-start')).rejects.toThrow('Fixture is draining');
           expect(workers).toHaveLength(1);
           expect(pendingCalls.size).toBeGreaterThan(0);

@@ -634,7 +634,16 @@ describe('Claude abort cleanup ownership', () => {
     expect(second?.frames.filter(row => row.type === 'user').map(row => row.message.content) ?? []).toEqual(
       state === 'successor' ? ['Successor foreground'] : []);
     if (successor) { frame({ type: 'result', is_error: false, result: 'Synthetic successor result' }); await successor; }
-    expect((await service.cancel(owner, 'late-create')).state).toBe('interrupted');
+    // Confirmed process exit does not prove definitions or queued reminders
+    // absent. This legacy fixture has no retained cleanup identity/provider.
+    await expect(service.cancel(owner, 'late-create')).rejects.toThrow('native cleanup is unconfirmed');
+    expect((await service.list(owner))[0]).toMatchObject({ nativeId: 'native-late', state: 'interrupted',
+      error: 'Native conversation process exited.', cancelRequested: true });
+    expect((await service.list(owner))[0].cleanupConfirmed).toBeUndefined();
+    expect(handle.nativeDefinitionAbsent).toBe(false);
+    expect(first.frames.filter(row => row.type === 'user')).toHaveLength(1);
+    expect(second?.frames.filter(row => row.type === 'user').map(row => row.message.content) ?? []).toEqual(
+      state === 'successor' ? ['Successor foreground'] : []);
     expect(spawn).toHaveBeenCalledTimes(state === 'successor' ? 2 : 1);
     await service.destroy();
   });

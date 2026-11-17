@@ -743,8 +743,10 @@ restart. Ambiguous creation, interrupted attempts, cleanup selectors, and pendin
 results remain tracked. Records stay visible when concurrent work, persistence
 failure, or replay-fence capacity prevents safe compaction.
 
-Failed recovery attempts retain their original identity and uncertainty. An
-untouched sibling waiting for thread admission retains its pending intent; releasing
+Interrupted schedules retain their original identity and uncertainty. A failed
+cancellation preserves the original interruption reason and pending cancellation
+intent; it does not confirm native deletion. An untouched sibling waiting for
+thread admission retains its pending intent; releasing
 the exact failed runtime can permit the sibling without retrying failed work.
 Actual execution, cleanup, and result/ACK obligations remain independent.
 

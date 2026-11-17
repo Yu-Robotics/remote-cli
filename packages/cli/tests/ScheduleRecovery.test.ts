@@ -127,6 +127,22 @@ describe('schedule interruption without restart restoration', () => {
     expect(again.hasActiveSchedules(owner.threadId)).toBe(false); expect(create).toHaveBeenCalledOnce();
   });
 
+  it('preserves the interruption receipt when supported retained cleanup refuses deletion', async () => {
+    const first = await start(); await first.destroy();
+    const data = await catalog();
+    Object.assign(data.records[0], { state: 'interrupted', error: 'Confirmed original process exit' });
+    await write(data);
+    cancelRetained.mockRejectedValue(new Error('Synthetic original-session cleanup refusal'));
+    const next = make(); await next.initialize();
+    await expect(next.cancel(owner, 'job-a')).rejects.toThrow('original-session cleanup refusal');
+    expect(cancelRetained).toHaveBeenCalledOnce();
+    const again = await restart(next), record = (await again.list(owner))[0];
+    expect(record).toMatchObject({ state: 'interrupted', error: 'Confirmed original process exit',
+      cancelRequested: true, recovery: { identity: 'original-session', status: 'blocked' } });
+    expect(record.cleanupConfirmed).toBeUndefined();
+    expect(create).toHaveBeenCalledOnce(); expect(cancel).not.toHaveBeenCalled();
+  });
+
   it.each(['provider', 'identity', 'unsupported', 'owner'])('does not invent cancellation success with %s uncertainty', async variant => {
     const first = await start(); await first.destroy(); const data = await catalog();
     if (variant === 'provider') data.records[0].recovery.provider = 'different';

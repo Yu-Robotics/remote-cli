@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.259] - 2026-11-17
+
+### Fixed
+- Reopen existing DSH refusal markers with write access before flushing on Windows, without truncating evidence or bypassing file/symlink validation. Repeated marking retains the permanent refusal and all durability checks.
+- Preserve the original interruption diagnostic when retained cancellation fails. Cancellation still reports its error and retains intent; confirmed process exit is never promoted to native deletion success or permission to clean up through a successor.
+
+### Tests
+- Correct late Claude CREATE fixtures to assert unresolved deletion separately from confirmed process exit, retaining the exact handle, interruption reason and no-successor-prompt assertions.
+- Await delegation terminal receipts before asserting notice counts, with a controlled final-metadata gate. Give native artifact entry and completion separate 30-second fixture phases, with regressions for false shared-budget timeouts and continued ownership after real phase timeouts. No production Git deadlines or publication gates were relaxed.
+
 ## [1.6.258] - 2026-11-17
 
 ### Fixed
