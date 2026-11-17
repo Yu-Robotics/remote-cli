@@ -407,7 +407,7 @@ describe('Claude production orderly recovery', () => {
     const normal = inventoryProbe.getMockImplementation()!;
     inventoryProbe.mockImplementation(() => [...normal(), { pid: 9001, birth: 'other', command: 'synthetic-native --resume synthetic-original-session' }]);
     await expect(create('refused')).rejects.toThrow('Another native host');
-    expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', creationRefused: true });
+    expect(await service.list(owner)).toEqual([]);
     expect(inventory.size).toBe(0);
     inventoryProbe.mockImplementation(normal);
     expect((await create('explicit-after-exit')).state).toBe('active');

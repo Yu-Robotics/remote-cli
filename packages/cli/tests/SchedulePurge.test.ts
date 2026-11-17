@@ -444,12 +444,12 @@ describe('ScheduleService purge', () => {
     expect(f.create).not.toHaveBeenCalled();
   });
 
-  it('removes harmless explicit pre-admission failures across storage reload', async () => {
+  it('keeps compacted explicit pre-admission failures fenced across storage reload', async () => {
     const f = await fixture();
     f.create.mockRejectedValueOnce(new NativeScheduleNotAdmittedError('Synthetic refusal before admission'));
     await expect(f.service.create(owner, input('refused'))).rejects.toThrow('refusal');
     const restored = await reload(f);
-    expect(await restored.service.purge(owner, { ids: ['refused'] })).toMatchObject({ removedIds: ['refused'], errors: [] });
+    expect(await restored.service.purge(owner, { ids: ['refused'] })).toMatchObject({ removedIds: [], alreadyRemovedIds: ['refused'], errors: [] });
     expect(restored.create).not.toHaveBeenCalled();
   });
 

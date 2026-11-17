@@ -331,7 +331,7 @@ describe('Claude shared foreground scheduling integration', () => {
       } finally { raw.claudeProcess = child; child.stdin.writable = true; vi.useRealTimers(); }
     });
 
-  it('persists an actual timezone refusal so history purge needs no invented native absence', async () => {
+  it('automatically compacts an actual timezone refusal without native cleanup', async () => {
     nativeSettings = {};
     const directory = path.join(root, 'synthetic-schedule-catalog');
     const options = { directory, provider: { create: (input: NativeScheduleInput, emit: any, admit?: () => boolean) =>
@@ -344,17 +344,34 @@ describe('Claude shared foreground scheduling integration', () => {
       await service.initialize();
       await expect(service.create(owner, { id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
         rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-      expect(await service.list(owner)).toEqual([expect.objectContaining({ creationRefused: true, state: 'failed' })]);
+      expect(await service.list(owner)).toEqual([]);
       await service.destroy();
       restored = new ScheduleService(options); await restored.initialize();
       expect(await restored.purge(owner, { ids: ['timezone-refused'] })).toMatchObject({
-        removedIds: ['timezone-refused'], nativeCleanupUnresolved: [], errors: [],
+        removedIds: [], alreadyRemovedIds: ['timezone-refused'], nativeCleanupUnresolved: [], errors: [],
       });
       expect(await restored.listCleanup(owner)).toEqual([]);
       const catalog = JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
       expect(catalog.records).toEqual([]); expect(catalog.cleanup ?? []).toEqual([]);
       expect(create).not.toHaveBeenCalled(); expect(nativeTools).toEqual([]);
     } finally { await restored?.destroy(); await service.destroy(); }
+  });
+
+  it('removes a fresh timezone mismatch from the catalog without issuing Cron tools', async () => {
+    nativeSettings = { effective: { env: { TZ: 'Pacific/Auckland' } } };
+    const directory = path.join(root, 'timezone-mismatch-catalog');
+    const owner = { threadId: 'synthetic-thread', openId: 'synthetic-owner', generation: 'epoch' };
+    const service = new ScheduleService({ directory, provider: { create: (input, emit, admit) =>
+      executor.createNativeSchedule(input, emit, undefined, admit) }, deliver: vi.fn(async () => {}), isOwnerCurrent: () => true });
+    try {
+      await service.initialize();
+      await expect(service.create(owner, { id: 'timezone-mismatch', cwd: root, prompt: 'Synthetic',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toThrow('native session timezone');
+      expect(await service.list(owner)).toEqual([]); expect(nativeTools).toEqual([]);
+      const catalog = JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+      expect(catalog.purged).toEqual([{ id: 'timezone-mismatch', ...owner }]);
+      expect(catalog.cleanup ?? []).toEqual([]);
+    } finally { await service.destroy(); }
   });
 
   it('preserves uncertain adapter creation errors and their original cleanup handle', async () => {

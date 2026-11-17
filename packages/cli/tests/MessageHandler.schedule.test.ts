@@ -207,7 +207,7 @@ describe('MessageHandler native schedule closed loop', () => {
   });
 
   it.each(['backend', 'unsupported-executor'])(
-    'persists a %s refusal before executor creation and purges it without cleanup residue after reload', async reason => {
+    'compacts a %s refusal before executor creation and fences it after reload', async reason => {
       const service = await (f.handler as any).initializeSchedules() as ScheduleService;
       const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
       const create = f.executor.createNativeSchedule;
@@ -216,12 +216,12 @@ describe('MessageHandler native schedule closed loop', () => {
       await expect(service.create(owner, { id: 'preflight-refused', backend: 'claude', cwd: f.cwd, prompt: 'Synthetic task',
         rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
       expect(create).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
-      expect(await service.list(owner)).toEqual([expect.objectContaining({ creationRefused: true, state: 'failed' })]);
+      expect(await service.list(owner)).toEqual([]);
       f.setBackend('claude'); Object.assign(f.executor, { createNativeSchedule: create });
       await f.restart();
       const restored = await (f.handler as any).initializeSchedules() as ScheduleService;
       expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
-        removedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
+        removedIds: [], alreadyRemovedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
       });
       expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
         alreadyRemovedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],

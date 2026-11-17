@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { isMainThread } from 'node:worker_threads';
 import { SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
+import { ScheduleToolOperations } from '../src/scheduling/ScheduleToolScope';
 import type { ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
-import { NativeScheduleCleanupError } from '../src/scheduling/types';
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError } from '../src/scheduling/types';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner } from '../src/scheduling/types';
 
@@ -83,6 +84,148 @@ describe('ScheduleService', () => {
     await Promise.allSettled(services.map(service => service.destroy()));
     vi.restoreAllMocks();
     await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('compacts refused creation while preserving failed tool receipts and restart replay denial', async () => {
+    let service = make(); await service.initialize();
+    await service.create(owner, input('sibling', true));
+    const failure = new NativeScheduleNotAdmittedError('Synthetic native preflight refusal');
+    const gate = deferred<never>(); provider.create.mockImplementationOnce(() => gate.promise);
+    const operations = new ScheduleToolOperations();
+    const options = { owner, messageId: 'synthetic-request', backend: 'claude' as const, current: () => true, waitMs: 1,
+      run: async (_command: unknown, id: string) => [await service.create(owner, input(id))], present: vi.fn(async () => 'card') };
+    const scope = operations.scope(options);
+    const args = { requestId: 'create', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic task' };
+    const pending: any = await scope.invoke('remote_cli_schedule_create', args);
+    expect(pending.status).toBe('pending');
+    await vi.waitFor(() => expect(provider.create).toHaveBeenCalledTimes(2));
+    gate.reject(failure); await scope.drain();
+    expect(scope.unreportedFailures()).toEqual([{ ...pending, status: 'failed', error: failure.message }]);
+    const receipt = await scope.invoke('remote_cli_schedule_operation', { requestId: 'create' });
+    expect(receipt).toEqual({ ...pending, status: 'failed', error: failure.message });
+    expect(await operations.scope(options).invoke('remote_cli_schedule_create', args)).toEqual(receipt);
+    await expect(scope.invoke('remote_cli_schedule_create', { ...args, prompt: 'Changed' })).rejects.toThrow('different');
+    expect(scope.hasSideEffects).toBe(true); expect(scope.unreportedFailures()).toEqual([]);
+    expect(options.present).not.toHaveBeenCalled(); expect(provider.create).toHaveBeenCalledTimes(2);
+    expect((await service.list(owner)).map(record => record.id)).toEqual(['sibling']);
+    expect((await read()).purged).toEqual([{ id: pending.scheduleId, ...owner }]);
+    expect(await service.listCleanup(owner)).toEqual([]);
+    await service.destroy(); service = make(); await service.initialize();
+    await expect(service.create(owner, input(pending.scheduleId))).rejects.toThrow('purged');
+    expect(provider.create).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['generic', 'ambiguous', 'started', 'skipped'] as const)('retains %s evidence instead of compacting creation', async kind => {
+    if (kind === 'skipped') provider.recoveryFor = () => ({ provider: 'synthetic', strategy: 'reconstruct', handoffPolicy: 'skip-unadmitted',
+      describe: () => 'synthetic-identity', reconcile: vi.fn() });
+    const service = make(); await service.initialize();
+    const handle = { nativeId: 'uncertain-native', list: vi.fn(async () => true), cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    provider.create.mockImplementationOnce(async (_input, emit) => {
+      if (kind === 'started') emit({ type: 'started', occurrenceId: 'observed' });
+      if (kind === 'skipped') emit({ type: 'skipped', occurrenceId: 'observed', reason: 'Synthetic skipped wake' });
+      if (kind === 'ambiguous') throw new NativeScheduleCleanupError('Synthetic ambiguous mutation', handle);
+      if (kind === 'generic') throw new Error('Synthetic missing receipt');
+      throw new NativeScheduleNotAdmittedError('Contradicted refusal');
+    });
+    await expect(service.create(owner, input())).rejects.toThrow();
+    expect((await service.list(owner))[0]).not.toHaveProperty('creationRefused');
+    expect((await read()).purged ?? []).toEqual([]);
+    if (kind === 'started') {
+      // A late result remains ingestible after the create promise failed.
+      await (service as any).onEvent('schedule-a', { type: 'completed', occurrenceId: 'observed', success: true, output: 'Late result' });
+      await service.retryDeliveries(); expect(deliver).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('preserves a sibling outbox and ACK while removing only the refused attempt', async () => {
+    const ack = deferred<void>(); deliver.mockImplementationOnce(() => ack.promise);
+    const service = make({ deferDelivery: true }); await service.initialize();
+    await service.create(owner, input('sibling', true));
+    provider.emit('sibling', { type: 'started', occurrenceId: 'sibling-result' });
+    complete('sibling', 'sibling-result');
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+    provider.create.mockRejectedValueOnce(new NativeScheduleNotAdmittedError('Refused fresh attempt'));
+    await expect(service.create(owner, input('refused'))).rejects.toThrow('Refused');
+    expect((await read()).pending).toHaveLength(1);
+    expect((await service.list(owner)).map(record => record.id)).toEqual(['sibling']);
+    ack.resolve(); await service.retryDeliveries(); expect((await read()).pending).toEqual([]);
+    expect(provider.handles.get('sibling')!.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not compact a create while concurrent cancellation owns the record', async () => {
+    const service = make(); await service.initialize();
+    const gate = deferred<never>(); provider.create.mockImplementationOnce(() => gate.promise);
+    const creating = service.create(owner, input()); const rejected = expect(creating).rejects.toThrow('Refused');
+    await vi.waitFor(() => expect(provider.create).toHaveBeenCalledOnce());
+    const cancel = service.cancel(owner, 'schedule-a');
+    await vi.waitFor(async () => expect((await read()).records[0].cancelRequested).toBe(true));
+    gate.reject(new NativeScheduleNotAdmittedError('Refused before native admission'));
+    await rejected; expect((await cancel).state).toBe('cancelled');
+    expect((await service.list(owner))[0].state).toBe('cancelled');
+    expect((await read()).purged ?? []).toEqual([]);
+  });
+
+  it.each([false, true])('retains refusal evidence when compaction persistence fails (startup=%s)', async startup => {
+    const failure = new NativeScheduleNotAdmittedError('Original refusal');
+    const filename = path.join(directory, SCHEDULE_CATALOG_FILE);
+    if (startup) await fs.writeFile(filename, JSON.stringify({ version: 3, records: [{ ...owner, ...input(), backend: 'claude',
+      createdAt: now, state: 'failed', creationRefused: true, error: failure.message }], pending: [], purged: [] }));
+    const rename = fs.rename;
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      const data = JSON.parse(await fs.readFile(from, 'utf8'));
+      if (data.purged?.some((entry: any) => entry.id === 'schedule-a')) throw new Error('Synthetic compaction write failure');
+      return rename(from, to);
+    });
+    const service = make();
+    if (startup) await expect(service.initialize()).rejects.toThrow('compaction write failure');
+    else {
+      await service.initialize(); provider.create.mockRejectedValueOnce(failure);
+      await expect(service.create(owner, input())).rejects.toBe(failure);
+    }
+    expect((await read()).records[0]).toMatchObject({ state: 'failed', creationRefused: true, error: failure.message });
+    expect((await read()).purged).toEqual([]);
+    expect((service as any).records.get('schedule-a').creationRefused).toBe(true);
+    expect((service as any).purged.has('schedule-a')).toBe(false);
+  });
+
+  it('compacts only proven startup refusals before outbox pruning and preserves legacy cleanup', async () => {
+    const refused = (id: string) => ({ ...owner, ...input(id), backend: 'claude', createdAt: now, state: 'failed', creationRefused: true });
+    const unproven = { ...refused('unproven'), creationRefused: undefined };
+    const skipped = { ...refused('skipped'), creationRefused: undefined, completedOccurrences: ['native-wake'], skippedOccurrences: ['native-wake'] };
+    const outstanding = { ...refused('outstanding') };
+    const cleanup = { ...owner, id: 'legacy', backend: 'claude', cwd: directory, historyRemoved: true, reason: 'unattributed' };
+    await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 5,
+      records: [refused('refused'), unproven, skipped, outstanding],
+      pending: [{ id: 'outstanding:result', scheduleId: 'outstanding', occurrenceId: 'result', success: true, output: 'Retained output' }],
+      purged: [{ ...owner, id: 'legacy' }], cleanup: [cleanup], purgeRequests: [] }));
+    const service = make(); await service.initialize();
+    expect((await service.list(owner)).map(record => record.id)).toEqual(['unproven', 'skipped', 'outstanding']);
+    expect((await read()).pending).toHaveLength(1);
+    expect(await service.listCleanup(owner)).toEqual([cleanup]);
+    expect(provider.create).not.toHaveBeenCalled();
+    await service.retryDeliveries(); expect(deliver).toHaveBeenCalledOnce();
+    expect((await read()).purged).toEqual([{ ...owner, id: 'legacy' }, { ...owner, id: 'refused' }]);
+  });
+
+  it.each([false, true])('retains refused evidence at fence capacity (startup=%s)', async startup => {
+    const fences = Array.from({ length: 10000 }, (_, index) => ({ ...owner, id: `purged-${index}` }));
+    await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, purged: fences, pending: [],
+      records: startup ? [{ ...owner, ...input(), backend: 'claude', createdAt: now, state: 'failed', creationRefused: true }] : [] }));
+    const service = make(); await service.initialize();
+    if (!startup) {
+      provider.create.mockRejectedValueOnce(new NativeScheduleNotAdmittedError('Refused'));
+      await expect(service.create(owner, input())).rejects.toThrow('Refused');
+    }
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', creationRefused: true });
+    expect((await read()).purged).toEqual(fences);
+  });
+
+  it('retains a fresh refusal while native mutation ownership is unsettled', async () => {
+    const service = make({ isNativeMutationPending: () => true }); await service.initialize();
+    provider.create.mockRejectedValueOnce(new NativeScheduleNotAdmittedError('Refused'));
+    await expect(service.create(owner, input())).rejects.toThrow('Refused');
+    expect((await service.list(owner))[0].creationRefused).toBe(true);
+    expect((await read()).purged).toEqual([]);
   });
 
   it('persists a native definition rebound before delivering the next occurrence', async () => {

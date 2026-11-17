@@ -94,6 +94,7 @@ interface Runtime {
   running: Set<string>;
   completed: Set<string>;
   heldDeliveries: Set<string>;
+  observedOccurrence?: true;
   cancelling: boolean;
   cancelPromise?: Promise<ScheduleRecord>;
   stopPromise?: Promise<void>;
@@ -226,6 +227,9 @@ export class ScheduleService {
       if (!this.catalogGate) throw new Error('Another client owns the schedule catalog.');
       const data = await this.readCatalog();
       if (data !== undefined) this.load(data);
+      // Inspect the loaded outbox before ordinary startup pruning. Missing
+      // delivery ownership must not turn a refused row into an absence claim.
+      for (const record of [...this.records.values()]) await this.compactRefusedCreation(record);
       let changed = false;
       for (const record of this.records.values()) {
         if (['completed', 'cancelled', 'failed'].includes(record.state)) {
@@ -449,7 +453,18 @@ export class ScheduleService {
   }
 
   create(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
-    return this.operation(this.recordOperation(input.id, this.createSchedule(owner, input)));
+    const creation = this.recordOperation(input.id, this.createSchedule(owner, input));
+    return this.operation(creation.catch(async error => {
+      if (error instanceof NativeScheduleNotAdmittedError) {
+        // The create operation has settled. Concurrent cancel/purge operations
+        // retain their own record lease and must finish before any compaction.
+        await this.serial(async () => {
+          const record = this.records.get(input.id);
+          if (record && sameOwner(record, owner)) await this.compactRefusedCreation(record);
+        }).catch(() => {}); // Keep the original failure receipt; persistence faults remain fenced.
+      }
+      throw error;
+    }));
   }
 
   private async createSchedule(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
@@ -500,6 +515,7 @@ export class ScheduleService {
           if (event.type === 'rebound') return Promise.reject(new Error('Native rebound owner retired.'));
           return;
         }
+        if (event.type === 'started' || event.type === 'completed' || event.type === 'skipped') runtime.observedOccurrence = true;
         const task = this.onEvent(nativeInput.id, structuredClone(event));
         this.track(task); return task;
       }, () => this.canAdmitOccurrence(nativeInput.id, runtime));
@@ -526,7 +542,9 @@ export class ScheduleService {
       await this.serial(async () => {
         const record = this.records.get(nativeInput.id)!;
         if (LIVE.has(record.state)) { record.state = 'failed'; record.error = errorText(error); }
-        if (error instanceof NativeScheduleNotAdmittedError && !runtime.handle && !runtime.running.size && !runtime.completed.size) {
+        if (error instanceof NativeScheduleNotAdmittedError && !runtime.handle && !runtime.observedOccurrence
+          && !record.nativeId && !runtime.running.size && !runtime.completed.size
+          && !record.completedOccurrences?.length && !record.skippedOccurrences?.length) {
           record.creationRefused = true;
         }
         if (!this.fault) await this.persist();
@@ -535,6 +553,28 @@ export class ScheduleService {
       else runtime.stopped = true;
       throw error;
     }
+  }
+
+  /** Called under the catalog serial queue, never through output-erasing purge.
+   * A refusal is proof about this fresh attempt, not historical native absence. */
+  private async compactRefusedCreation(record: ScheduleRecord): Promise<void> {
+    const id = record.id, runtime = this.runtimes.get(id);
+    if (record.state !== 'failed' || record.creationRefused !== true || record.nativeId !== undefined
+      || record.cancelRequested || record.cleanupConfirmed || record.completedOccurrences?.length || record.skippedOccurrences?.length
+      || this.records.get(id) !== record || this.cleanup.has(id) || this.purged.has(id)
+      || this.fault || this.closing || this.suspending || this.hostRetirement || this.recoveryRun || this.refreshes
+      || this.recordOperations.has(id) || this.retainedCancellations.has(id) || this.purges.has(id)
+      || this.delivering.has(id) || [...this.pending.values()].some(item => item.scheduleId === id)
+      || this.options.isNativeMutationPending?.(ownerOf(record))
+      || runtime && (!runtime.stopped || runtime.handle || runtime.observedOccurrence || runtime.running.size || runtime.completed.size
+        || runtime.heldDeliveries.size || runtime.cancelling || runtime.cancelPromise || runtime.stopPromise
+        || runtime.recoveryAbort || runtime.releasing || runtime.releasePromise || runtime.releaseAdmission)
+      || this.purged.size >= MAX_PURGED_IDS) return;
+    this.purged.set(id, ownerOf(record));
+    this.records.delete(id);
+    try { await this.persist(); }
+    catch (error) { this.records.set(id, record); this.purged.delete(id); throw error; }
+    if (runtime) this.runtimes.delete(id);
   }
 
   /** Catalog lookup only; this does not probe or recreate native jobs. */

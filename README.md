@@ -797,6 +797,14 @@ The ownership APIs have Linux/macOS/Windows implementations; this change's nativ
 acceptance ran only on Linux with a simulated boot identity transition. It is not
 proof of a real machine-reboot recovery or of native macOS/Windows behavior.
 
+From CLI 1.6.253, fresh schedule attempts definitively refused before native
+admission (such as a native timezone mismatch) disappear from the task list without
+manual cleanup. Startup also compacts existing proven refusal rows. The request
+still reports its original failure, and durable ID fences prevent replay after
+restart. Ambiguous creation, restoration failures, cleanup selectors, and pending
+results remain tracked. Records stay visible when concurrent work, persistence
+failure, or replay-fence capacity prevents safe compaction.
+
 From CLI 1.6.252, failed Claude restoration becomes inactive and retains its
 original checkpoint, native ID and diagnostic. Interrupted blocked rows and a crash
 during a consumed restoration attempt do not restart that attempt on every launch;

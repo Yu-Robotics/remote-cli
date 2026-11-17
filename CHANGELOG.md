@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.253] - 2026-11-17
+
+### Fixed
+- Automatically remove failed fresh schedule attempts that the provider definitively refused before native admission, including native timezone mismatch. Compact existing proven refusal rows at startup while retaining owner-bound replay fences and the original failed request response.
+- Preserve ambiguous creations, recovery failures, cleanup obligations, concurrent operations, and pending results. Keep refused records if safe compaction cannot be persisted or replay-fence capacity is exhausted.
+
+### Tests
+- Cover synthetic native timezone refusal, request receipt retries, restart replay denial, startup compaction, cancellation races, retained results, and persistence/capacity failures.
+
 ## [1.6.252] - 2026-11-16
 
 ### Fixed
