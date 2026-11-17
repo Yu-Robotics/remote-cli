@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { AgyDeletionTarget } from '../../src/delegation/AgySessionDeletion';
-const state = vi.hoisted(() => ({ home: '', id: '11111111-1111-4111-8111-111111111111', clients: [] as any[], captureError: undefined as string | undefined, lostReply: false, group: true, promptWait: undefined as Promise<void> | undefined }));
+const state = vi.hoisted(() => ({ home: '', id: '11111111-1111-4111-8111-111111111111', clients: [] as any[], captureError: undefined as string | undefined, lostReply: false, group: true, promptWait: undefined as Promise<void> | undefined, promptStarted: undefined as (() => void) | undefined }));
 vi.mock('os', async load => { const actual = await load<typeof import('os')>(); return { ...actual, homedir: () => state.home, default: { ...actual, homedir: () => state.home } }; });
 // Keep real capture/verification. Expose only known path-free error categories in
 // this fixture; production deliberately suppresses nested filesystem messages.
@@ -40,6 +40,7 @@ vi.mock('../../src/executor/agy/AgyAcpRuntime', () => ({ AgyAcpRuntime: class {
   }
   async execute(prompt: string, options: any) {
     this.options.beforePrompt?.(); this.prompts.push(options.resolvePrompt?.(this.options.sessionId ?? state.id) ?? prompt);
+    state.promptStarted?.();
     await state.promptWait; this.options.settledPrompt?.(true); return { success: true, output: 'Synthetic terminal' };
   }
   async close() { if (!state.group) throw new Error('Unconfirmed group'); this.running = false; this.closed = true; this.options.ownedSessionClosed(this.options.sessionId ?? state.id); }
@@ -54,7 +55,7 @@ beforeEach(async () => {
   // The native realpath API also resolves Windows directory spelling/aliases.
   // The JS realpathSync walker only resolves links and can retain that spelling.
   state.home = await fs.promises.realpath(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-receipt-'))); vi.stubEnv('HOME', state.home); vi.stubEnv('USERPROFILE', state.home);
-  state.clients = []; state.captureError = undefined; state.lostReply = false; state.group = true; state.promptWait = undefined;
+  state.clients = []; state.captureError = undefined; state.lostReply = false; state.group = true; state.promptWait = undefined; state.promptStarted = undefined;
   targets = []; failures = vi.fn(async () => {}); executor = make();
 });
 afterEach(async () => { state.group = true; await executor.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(state.home, { recursive: true, force: true }); });
@@ -155,10 +156,20 @@ describe('ACP worker creation receipts before dispatch', () => {
     expect(state.clients).toHaveLength(1); await replacement.destroy();
   });
   it('invalidates settled eligibility before prompt and never infers safety from a missing policy', async () => {
-    observe(); let release!: () => void; state.promptWait = new Promise(resolve => { release = resolve; });
+    let release!: () => void; state.promptWait = new Promise(resolve => { release = resolve; });
+    let releaseReceipt!: () => void, enteredReceipt!: () => void;
+    const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve; });
+    const receiptEntered = new Promise<void>(resolve => { enteredReceipt = resolve; });
+    const promptStarted = new Promise<void>(resolve => { state.promptStarted = resolve; });
+    observe(async target => { targets.push(target); enteredReceipt(); await receiptGate; });
     const work = executor.execute('held');
-    await Promise.race([vi.waitFor(() => expect(state.clients[0]?.prompts).toHaveLength(1)),
-      work.then(() => { throw new Error('Held turn completed before prompt gate'); })]);
+    const unexpectedCompletion = work.then(() => { throw new Error('Held turn completed before prompt gate'); });
+    await Promise.race([receiptEntered, unexpectedCompletion]);
+    expect(state.clients[0].prompts).toEqual([]);
+    releaseReceipt();
+    // Observe the actual dispatch boundary, not a one-second filesystem polling budget.
+    await Promise.race([promptStarted, unexpectedCompletion]);
+    expect(state.clients[0].prompts).toHaveLength(1);
     const proof = JSON.parse(fs.readFileSync(pointer() + '.worker-policy', 'utf8')); expect(proof.settled).toBe(false);
     const replacement = make(); await expect(replacement.execute('unsafe')).rejects.toThrow('cannot safely resume'); await replacement.destroy();
     release(); await work; await executor.destroy(); fs.unlinkSync(pointer() + '.worker-policy'); executor = make();
