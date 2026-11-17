@@ -1,3 +1,4 @@
+import { agyActivity } from './agyActivityFixture';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import osDefault, * as os from 'os';
 import * as path from 'path';
@@ -14,12 +15,10 @@ vi.mock('os', async (importOriginal) => {
   return { ...original, homedir, default: { ...original, homedir } };
 });
 
-// Prompts received by agy-format user events (recorded by the stdin mock below)
-const agyPrompts: string[] = [];
 const claudeInputs: Array<{ message: { content: string }; isSlashCommand?: boolean }> = [];
 const claudeControls: Array<{ request: { subtype: string; hooks?: unknown }; respond(): void }> = [];
 
-// Mock child_process for ClaudePersistentExecutor and AgyExecutor
+// Mock child_process for ClaudePersistentExecutor; AGY uses the synthetic ACP transport.
 vi.mock('child_process', () => {
   const { EventEmitter } = require('events') as typeof import('events');
   return {
@@ -53,16 +52,12 @@ vi.mock('child_process', () => {
             } });
             return true;
           }
-          if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
-          else if (parsed.type === 'user') claudeInputs.push(parsed);
+          if (parsed.type === 'user') claudeInputs.push(parsed);
           else throw new Error('Unexpected input in concurrency fixture.');
           setTimeout(() => {
             if (closed) return;
-            const result = parsed.type === 'user' ? { type: 'result', subtype: 'success',
-              user_message_uuid: parsed.uuid, is_error: false, terminal_reason: 'completed', result: 'ok' }
-              : { event: 'result', result: {
-              conversation_id: '', status: 'SUCCESS', response: 'ok', duration_seconds: 0, num_turns: 1, usage: {},
-            } };
+            const result = { type: 'result', subtype: 'success',
+              user_message_uuid: parsed.uuid, is_error: false, terminal_reason: 'completed', result: 'ok' };
             child.stdout.emit('data', Buffer.from(JSON.stringify(result) + '\n'));
           }, 10);
           return true;
@@ -83,8 +78,8 @@ describe('Executor Concurrency & Rapid Commands', () => {
   let directoryGuard: DirectoryGuard;
 
   beforeEach(async () => {
+    agyActivity.clients = []; agyActivity.accept = undefined;
     vi.clearAllMocks();
-    agyPrompts.length = 0;
     claudeInputs.length = 0;
     claudeControls.length = 0;
     fixture.root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'executor-concurrency-')));
@@ -102,35 +97,36 @@ describe('Executor Concurrency & Rapid Commands', () => {
   });
 
   describe('AgyExecutor', () => {
-    it('should queue multiple execute calls sequentially', async () => {
-      const executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: fixture.root });
-
-      const p1 = executor.execute('First', {});
-      const p2 = executor.execute('Second', {});
-      const p3 = executor.execute('Third', {});
-
-      const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
-
-      expect(r1.success).toBe(true);
-      expect(r2.success).toBe(true);
-      expect(r3.success).toBe(true);
-
-      // All three prompts were sent in order
-      expect(agyPrompts).toEqual(['First', 'Second', 'Third']);
-      await executor.destroy();
+    it('rejects overlapping direct prompts without queueing them inside AGY', async () => {
+      const executor = new AgyExecutor(directoryGuard, { threadId: 'synthetic-agy', initialWorkingDirectory: fixture.root });
+      try {
+        const first = executor.execute('First');
+        await expect(executor.execute('Second')).rejects.toThrow('busy');
+        await expect(executor.execute('Third')).rejects.toThrow('busy');
+        await vi.waitFor(() => expect(agyActivity.clients[0]?.prompts).toHaveLength(1));
+        expect(executor.isBusy()).toBe(true);
+        const client = agyActivity.clients[0]; client.finish();
+        expect((await first).success).toBe(true); expect(executor.isBusy()).toBe(false);
+        const next = executor.execute('Explicit next');
+        await vi.waitFor(() => expect(client.prompts).toHaveLength(2)); client.finish();
+        expect((await next).success).toBe(true);
+        expect(client.prompts).toEqual([[{ type: 'text', text: 'First' }], [{ type: 'text', text: 'Explicit next' }]]);
+      } finally { await executor.destroy(); }
     });
 
-    it('should handle resetContext concurrently with execute', async () => {
-      const executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: fixture.root });
-
-      // Fire execute while immediately resetting context
-      const p1 = executor.execute('Long command', {});
-      executor.resetContext();
-
-      // It might fail or succeed depending on exact timing, but it shouldn't crash
-      const r1 = await p1;
-      expect(r1).toBeDefined();
-      await executor.destroy();
+    it('rejects and awaits a busy reset, then clears only after the admitted turn completes', async () => {
+      const executor = new AgyExecutor(directoryGuard, { threadId: 'synthetic-agy', initialWorkingDirectory: fixture.root });
+      try {
+        const work = executor.execute('Long command');
+        await expect(executor.resetContext()).rejects.toThrow('pending');
+        await vi.waitFor(() => expect(agyActivity.clients[0]?.prompts).toHaveLength(1));
+        const id = executor.getSessionId(); expect(id).toBeTruthy();
+        await expect(executor.resetContext()).rejects.toThrow('pending');
+        expect(executor.getSessionId()).toBe(id); agyActivity.clients[0].finish();
+        expect((await work).success).toBe(true);
+        await executor.resetContext(); expect(executor.getSessionId()).toBeNull();
+        expect(agyActivity.clients).toHaveLength(1);
+      } finally { await executor.destroy(); }
     });
   });
 
@@ -215,3 +211,11 @@ describe('Executor Concurrency & Rapid Commands', () => {
     });
   });
 });
+
+vi.mock('../../src/executor/acp/AcpClient', async load => {
+  const actual = await load<typeof import('../../src/executor/acp/AcpClient')>();
+  const { SyntheticAgyActivityClient } = await import('./agyActivityFixture');
+  return { ...actual, AcpClient: SyntheticAgyActivityClient };
+});
+vi.mock('../../src/scheduling/agy/AgyHookRelay', async () =>
+  (await import('./agyActivityFixture')).syntheticAgyHooks);

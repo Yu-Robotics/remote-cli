@@ -18,7 +18,7 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
   },
   agy: {
     label: 'AGY', supported: true,
-    detail: 'Fresh original ACP conversations, after native hook/receipt qualification. Existing stream-json conversations and managed workers retain their compatible transport. Native once/cron, exact cancellation and idle batch delivery are supported; cron timezone must match the host. Scheduling recovery after any exit is unsupported. Uncertain work retains ownership and requires explicit cleanup; no task is replayed.',
+    detail: 'Fresh original ACP conversations, after native hook/receipt qualification. Legacy stream-json selections refuse execution until explicit clear; managed workers use ACP without native scheduling. Native once/cron, exact cancellation and idle batch delivery are supported; cron timezone must match the host. Scheduling recovery after any exit is unsupported. Uncertain work retains ownership and requires explicit cleanup; no task is replayed.',
   },
   dsh: {
     label: 'DSH', supported: true,

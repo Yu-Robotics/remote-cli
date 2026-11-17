@@ -5,7 +5,9 @@ describe('native scheduling eligibility', () => {
   it('describes abrupt AGY interruption without granting legacy admission', () => {
     const detail = NATIVE_SCHEDULE_CAPABILITIES.agy.detail;
     expect(detail).toContain('Fresh original ACP conversations');
-    expect(detail).toContain('Existing stream-json conversations');
+    expect(detail).toContain('Legacy stream-json selections refuse execution until explicit clear');
+    expect(detail).toContain('managed workers use ACP without native scheduling');
+    expect(detail).not.toContain('retain their compatible transport');
     expect(detail).toContain('Scheduling recovery after any exit is unsupported');
     expect(detail).toContain('Uncertain work retains ownership');
     expect(detail).not.toMatch(/\d+\.\d+\.\d+/);

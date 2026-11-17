@@ -20,11 +20,22 @@ describe('managed tool registration', () => {
 
   const bridges: ManagedToolBridge[] = [];
   afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(bridges.splice(0).map(bridge => bridge.close())); });
-  it.each([ClaudePersistentExecutor, CodexAppServerExecutor, AcpExecutor, AgyExecutor, PiExecutor])('refuses control registration in managed child workers (%s)', async Executor => {
+  it.each([ClaudePersistentExecutor, CodexAppServerExecutor, AcpExecutor, PiExecutor])('refuses control registration in managed child workers (%s)', async Executor => {
     const configureDelegation = vi.fn();
     await expect(Executor.prototype.configureManagedTools.call({ delegationWorker: true, configureDelegation },
       { url: 'http://127.0.0.1:1/', token: 'fixture-token', groups: ['scheduling'] })).rejects.toThrow('child workers');
     expect(configureDelegation).not.toHaveBeenCalled();
+  });
+  it('uses the real AGY managed-child guard through configureManagedTools', async () => {
+    const worker = Object.create(AgyExecutor.prototype);
+    worker.delegationWorker = true;
+    const guard = vi.spyOn(worker, 'configureDelegation');
+    const connection = { url: 'http://127.0.0.1:1/', token: 'fixture-token', groups: ['scheduling'] };
+    try {
+      await expect(worker.configureManagedTools(connection)).rejects.toThrow('child workers');
+      expect(guard).toHaveBeenCalledOnce(); expect(guard).toHaveBeenCalledWith(connection);
+      expect(worker.delegationConnection).toBeUndefined();
+    } finally { guard.mockRestore(); }
   });
   it('keeps the legacy delegation group while explicitly isolating scheduling registration', () => {
     const connection = { url: 'http://127.0.0.1:1/', token: 'fixture-token', groups: ['scheduling'] as const };

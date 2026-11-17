@@ -552,6 +552,8 @@ native identities, and cancelling one task preserves its siblings. No executable
 version gate, client timer, model polling or alternate backend is used.
 
 From CLI 1.6.260, AGY main conversations and managed workers use ACP exclusively.
+The scheduling capability response also states that legacy selections require explicit
+clear and managed ACP workers cannot create native schedules.
 AGY 1.5.10 is the native acceptance baseline. Linux, macOS and Windows x64/ARM64
 require the matching published remote-cli native helper. Missing helpers or unsupported
 native controls fail visibly; no conversation transport fallback is attempted.

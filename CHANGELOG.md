@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.261] - 2026-11-18
+
+### Fixed
+- Correct AGY scheduling capability text: legacy stream-json selections require explicit clear, and managed workers use ACP without native scheduling. This does not change execution, ownership or cleanup policy.
+
+### Tests
+- Replace obsolete AGY stream-json activity and internal-queue fixtures with ACP/hook terminal, cancellation and overlap regressions; exercise the real managed-child registration guard.
+- Canonicalize receipt fixture HOME through the native realpath API, expose bounded capture diagnostics in tests, and verify alias/replaced-root refusal before any prompt. Windows CI remains required for platform acceptance.
+
 ## [1.6.260] - 2026-11-18
 
 ### Changed

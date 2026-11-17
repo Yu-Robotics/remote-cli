@@ -1,3 +1,6 @@
+import { spawn } from 'child_process';
+import { EventEmitter } from 'events';
+import { agyActivity } from './agyActivityFixture';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
@@ -15,14 +18,12 @@ import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/exec
 import type { ActivityProgressInfo } from '../../src/types';
 import type { IExecutor } from '../../src/executor/IExecutor';
 
-// Mock child_process for AGY tests
+// Fail closed for unexpected subprocesses; backend fixtures are in-process.
 vi.mock('child_process', () => ({
   execFile: vi.fn(),
   spawn: vi.fn(),
 }));
 
-import { spawn } from 'child_process';
-import { EventEmitter } from 'events';
 
 class FakeAcpTransport implements AcpTransport {
   initialize = vi.fn().mockResolvedValue({});
@@ -130,6 +131,7 @@ describe('Executor Activity Signal Integration', () => {
   };
 
   beforeEach(async () => {
+    agyActivity.clients = []; agyActivity.accept = undefined;
     tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-activity-test-')));
     executors = [];
     isolateHome(tempDir);
@@ -460,66 +462,37 @@ describe('Executor Activity Signal Integration', () => {
   });
 
   describe('AgyExecutor', () => {
-    it('emits agent_response text_delta and tool step activity', async () => {
-      const mockChild = new EventEmitter() as any;
-      mockChild.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
-      mockChild.stdout = new EventEmitter();
-      mockChild.stderr = new EventEmitter();
-      mockChild.kill = vi.fn(() => {
-        mockChild.emit('exit', 0, null);
-        mockChild.emit('close', 0, null);
-        return true;
-      });
-      mockChild.pid = 12345;
-
-      (spawn as any).mockReturnValue(mockChild);
-
-      const threadId = `test-agy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    it.each([false, true])('projects ACP text plus hook tool/terminal activity (native error: %s)', async failed => {
       const executor = track(new AgyExecutor(new DirectoryGuard([tempDir]), {
-        initialWorkingDirectory: tempDir,
-        threadId,
+        initialWorkingDirectory: tempDir, threadId: 'synthetic-agy-activity',
       }));
+      const activities: ActivityProgressInfo[] = [], chunks: string[] = [];
+      const tool = vi.fn(), result = vi.fn();
+      const pending = executor.execute('Run task', { onActivity: a => activities.push(a),
+        onStream: chunk => chunks.push(chunk), onToolUse: tool, onToolResult: result });
+      await vi.waitFor(() => expect(agyActivity.clients[0]?.prompts).toHaveLength(1));
+      const client = agyActivity.clients[0];
+      client.text('Investigating files'); client.tool(); client.finish(failed);
+      expect((await pending).success).toBe(!failed);
+      expect(chunks).toEqual(['Investigating files']);
+      expect(activities).toEqual([{ source: 'public_text', text: 'Investigating files' }, { source: 'tool', text: 'Inspect fixture' }]);
+      expect(tool).toHaveBeenCalledOnce(); expect(tool).toHaveBeenCalledWith({ id: 'synthetic-tool', name: 'Bash', input: { command: 'echo synthetic' }, description: 'Inspect fixture' });
+      expect(result).toHaveBeenCalledOnce(); expect(result).toHaveBeenCalledWith({ tool_use_id: 'synthetic-tool', content: 'Synthetic tool result', is_error: false });
+    });
 
-      const activities: ActivityProgressInfo[] = [];
-
-      const executePromise = executor.execute('Run task', {
-        onActivity: (a) => activities.push(a),
-      });
-
-      // Wait a tick for spawn
-      await new Promise((r) => setTimeout(r, 20));
-
-      // Simulate agy events
-      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'conv-1' }) + '\n'));
-      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
-        event: 'step_update',
-        step_update: { step_type: 'agent_response', text_delta: 'Investigating files' },
-      }) + '\n'));
-      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
-        event: 'step_update',
-        step_update: {
-          step_type: 'tool',
-          step_index: 1,
-          state: 'ACTIVE',
-          tool_name: 'run_command',
-          tool_info: { parameters: { command: 'ls -la' } },
-        },
-      }) + '\n'));
-      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
-        event: 'result',
-        result: { status: 'SUCCESS', output: 'Done' },
-      }) + '\n'));
-
-      const result = await executePromise;
-      if (!result.success) console.log('AgyExecutor test failed with result:', result);
-      expect(result.success).toBe(true);
-
-      expect(activities).toEqual([
-        { source: 'public_text', text: 'Investigating files' },
-        { source: 'tool', text: 'Running command' },
-      ]);
-
-      await executor.destroy();
+    it('preserves completed tool activity on ACP cancellation and allows same-session continuation', async () => {
+      const executor = track(new AgyExecutor(new DirectoryGuard([tempDir]), {
+        initialWorkingDirectory: tempDir, threadId: 'synthetic-agy-cancel', delegationWorker: true,
+      }));
+      const activity = vi.fn(), tool = vi.fn(), result = vi.fn();
+      const pending = executor.execute('Cancel task', { onActivity: activity, onToolUse: tool, onToolResult: result });
+      await vi.waitFor(() => expect(agyActivity.clients[0]?.prompts).toHaveLength(1));
+      const client = agyActivity.clients[0]; client.text('Before cancellation'); client.tool();
+      expect(await executor.abort()).toBe(true); expect((await pending).success).toBe(false);
+      expect(tool).toHaveBeenCalledOnce(); expect(result).toHaveBeenCalledOnce(); expect(activity).toHaveBeenCalledTimes(2);
+      const id = executor.getSessionId(), next = executor.execute('Continue');
+      await vi.waitFor(() => expect(client.prompts).toHaveLength(2)); client.finish();
+      expect((await next).success).toBe(true); expect(executor.getSessionId()).toBe(id); expect(agyActivity.clients).toHaveLength(1);
     });
   });
 
@@ -700,3 +673,11 @@ describe('Executor Activity Signal Integration', () => {
     });
   });
 });
+
+vi.mock('../../src/executor/acp/AcpClient', async load => {
+  const actual = await load<typeof import('../../src/executor/acp/AcpClient')>();
+  const { SyntheticAgyActivityClient } = await import('./agyActivityFixture');
+  return { ...actual, AcpClient: SyntheticAgyActivityClient };
+});
+vi.mock('../../src/scheduling/agy/AgyHookRelay', async () =>
+  (await import('./agyActivityFixture')).syntheticAgyHooks);
