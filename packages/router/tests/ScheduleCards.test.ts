@@ -93,7 +93,7 @@ describe('ScheduleCards', () => {
     expect((await dispatch('owner', 'card'))?.toast.type).toBe('info');
     expect(f.transport.send.mock.calls[0][1]).toMatchObject({ type: 'schedule_action', operation: 'refresh' });
     await f.result();
-    expect(JSON.stringify(f.latest())).toContain('Status refreshed');
+    expect(JSON.stringify(f.latest())).toContain('Status refreshed from the CLI schedule catalog');
     f.cards.destroy();
   });
 
@@ -255,6 +255,7 @@ describe('ScheduleCards', () => {
     await f.click('refresh'); await f.settle();
     expect(JSON.stringify(f.latest())).toContain('unknown');
     await f.click('retry'); await f.result(true, { menu: undefined });
+    expect(JSON.stringify(f.latest())).toContain('Current catalog status is unavailable');
     expect(buttons(f.latest()).find(button => button.behaviors[0].value.op === 'cancel').disabled).toBe(true);
     f.cards.destroy();
   });

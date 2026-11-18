@@ -187,9 +187,7 @@ describe('Claude sandbox launch policy', () => {
     emit({ type: 'result', subtype: 'success' });
     await expect(first).resolves.toMatchObject({ success: true });
     await expect(active.withReviewedNativeCleanup('review', () => true, host => host.inventory())).rejects.toThrow('cannot unlock native cleanup');
-    const creation = active.createNativeSchedule({ id: 'new', threadId: 'test', cwd: home, backend: 'claude',
-      prompt: 'Synthetic reminder', rule: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' } }, () => {});
-    await expect(creation).rejects.toThrow('This process cannot create a native schedule');
+    expect(active).not.toHaveProperty('createNativeSchedule');
     expect(active.nativeScheduleAction('new')).toBeUndefined();
     const chat = active.execute('Synthetic follow-up');
     await vi.advanceTimersByTimeAsync(1000);

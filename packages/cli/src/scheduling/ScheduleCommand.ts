@@ -16,9 +16,9 @@ export const SCHEDULE_USAGE = [
   '/schedule after <positive integer><m|h|d> -- <prompt>',
   '/schedule at <ISO timestamp with Z or offset> -- <prompt>',
   '/schedule cron "<five cron fields>" --tz <IANA timezone> -- <prompt>',
-  'Claude and DSH schedules require their native host process to remain running; Claude shares the foreground conversation.',
-  'Restarted schedules are marked interrupted and are never automatically recreated.',
-  'One-shot times round up to the next minute; native firing times may include jitter.',
+  'The local CLI saves new schedules across restarts. Keep it running when a task is due. Tasks run in the original conversation and results return to its Feishu thread.',
+  'One-shot times round up to the next minute. After downtime the CLI reports missed one-shots and skips missed cron runs.',
+  '/schedule list shows the local catalog. Older native schedules remain available for manual cleanup.',
 ].join('\n');
 
 export type ScheduleCommand =

@@ -1,13 +1,12 @@
 import type { AcpTransport } from '../../executor/acp/AcpClient';
 import type { AcpContentBlock } from '../../executor/acp/AcpTypes';
-import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider } from '../types';
 import { AgyHookRelay } from './AgyHookRelay';
 import { AgySessionSchedules } from './AgySessionSchedules';
 
 /** Attach to the original foreground ACP host after its hooks were installed,
  * never launch a second conversation or restore an uncertain queue. The existing
  * executor supplies fresh-session or one-use clean-checkpoint admission; unknown queues remain fenced. */
-export class AgyScheduleHost implements NativeScheduleProvider {
+export class AgyScheduleHost {
   readonly schedules: AgySessionSchedules;
   private closing = false;
   private promptActive = false;
@@ -39,9 +38,6 @@ export class AgyScheduleHost implements NativeScheduleProvider {
   /** Bind the preinstalled relay only after native session/new returned identity. */
   bind(relay: AgyHookRelay): void { relay.bindSession(this.sessionId); }
   qualify(): Promise<void> { return this.schedules.qualify(); }
-  create(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void, admit?: () => boolean): Promise<NativeScheduleHandle> {
-    return this.schedules.create(input, emit, admit);
-  }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
     if (this.closing || this.busy) throw new Error('AGY original ACP host is busy or closing.');
     this.schedules.beginForeground(); this.busy = true; this.promptActive = true; this.cancelled = false;

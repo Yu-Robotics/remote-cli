@@ -13,9 +13,9 @@ describe('ScheduleCommand', () => {
     expect(parse('/schedule capabilities')).toEqual({ kind: 'capabilities' });
     expect(parse('/schedule list')).toEqual({ kind: 'list' });
     expect(parse('/schedule cancel schedule-1')).toEqual({ kind: 'cancel', id: 'schedule-1' });
-    expect(SCHEDULE_USAGE).toContain('Claude and DSH');
-    expect(SCHEDULE_USAGE).toContain('Claude shares the foreground conversation');
-    expect(SCHEDULE_USAGE).toContain('never automatically recreated');
+    expect(SCHEDULE_USAGE).toContain('saves new schedules across restarts');
+    expect(SCHEDULE_USAGE).toContain('reports missed one-shots and skips missed cron runs');
+    expect(SCHEDULE_USAGE).toContain('/schedule list shows the local catalog');
   });
 
   it('parses explicit purge selections and rejects ambiguous or duplicate IDs', () => {

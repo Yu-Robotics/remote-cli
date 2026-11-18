@@ -1,3 +1,4 @@
+import { legacyClaudeJob } from './scheduling/legacyClaudeJob';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
@@ -6,8 +7,7 @@ import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecut
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ScheduleToolOperations } from '../src/scheduling/ScheduleToolScope';
 import { SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
-import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleInput } from '../src/scheduling/types';
-import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
+import { ScheduleService } from '../src/scheduling/ScheduleService';
 import { claudeCodeHooks } from '../src/hooks/ClaudeCodeHooks';
 
 /** In-memory native transport only. No backend executable or model is invoked. */
@@ -28,7 +28,6 @@ describe('Claude shared foreground scheduling integration', () => {
   const receipt = (text: string, id: string) => frame({ type: 'user', message: { role: 'user', content: [
     { type: 'tool_result', tool_use_id: id, content: text, is_error: false },
   ] } });
-  const created = (id: string) => `Scheduled recurring job ${id} (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).`;
 
   beforeEach(async () => {
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'claude-shared-session-')));
@@ -193,22 +192,13 @@ describe('Claude shared foreground scheduling integration', () => {
     raw.scheduleHooksReady = false;
     await expect(executor.withReviewedNativeCleanup('review', () => true, async () => {}, true)).rejects.toThrow('changed during');
   });
-  async function reserve(id = 'job-a') {
-    const input: NativeScheduleInput = { id, cwd: root, prompt: 'Use the latest conversation state',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } };
-    const events = vi.fn();
-    const pending = executor.withNativeScheduleOperation(id, () => true, () => executor.createNativeSchedule(input, events), true);
-    await vi.waitFor(() => expect(executor.nativeScheduleAction(id)).toBeDefined());
-    const action = executor.nativeScheduleAction(id)!;
-    hook(action, `tool-${id}`); receipt(created(`native-${id}`), `tool-${id}`);
-    const handle = await pending;
+  function reserve(id = 'job-a') {
     raw.sessionSchedules.foregroundEnded();
-    return { handle, action, events };
+    return legacyClaudeJob(raw.sessionSchedules, id, 'native-' + id);
   }
 
   it('creates a host schedule in the MCP caller turn and preserves subsequent user turns and session identity', async () => {
-    const nativeCreate = vi.fn(async () => { throw new Error('Unexpected native schedule creation'); });
-    const service = new ScheduleService({ directory: path.join(root, 'schedules'), provider: { create: nativeCreate },
+    const service = new ScheduleService({ directory: path.join(root, 'schedules'),
       hostDispatch: vi.fn(), deliver: vi.fn(), isOwnerCurrent: () => true, now: () => Date.UTC(2026, 0, 1) });
     await service.initialize();
     const display = vi.fn();
@@ -239,7 +229,7 @@ describe('Claude shared foreground scheduling integration', () => {
       expect(completed).toMatchObject({ status: 'succeeded', records: [{ id: accepted.scheduleId, state: 'active' }] });
       expect(completed).not.toHaveProperty('nativeAction');
       expect(await service.list(owner)).toMatchObject([{ id: accepted.scheduleId, engine: 'host', sessionId: 'original-native-session' }]);
-      expect(nativeAction).not.toHaveBeenCalled(); expect(nativeCreate).not.toHaveBeenCalled();
+      expect(nativeAction).not.toHaveBeenCalled();
       expect(wire.filter(row => row.type === 'user')).toHaveLength(1);
       expect(present).toHaveBeenCalledOnce();
       frame({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Your task is scheduled.' }] } });
@@ -260,7 +250,7 @@ describe('Claude shared foreground scheduling integration', () => {
     const job = await reserve();
     frame({ type: 'command_lifecycle', state: 'started', wakeup_source: 'schedule_wakeup', command_uuid: 'occurrence-a' });
     frame({ type: 'control_request', request_id: 'submit-a', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: job.action.input.prompt } } });
+      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: job.prompt } } });
     expect(executor.isBusy()).toBe(true);
     const onStream = vi.fn(); let foregroundDone = false;
     const next = executor.execute('A later user message', { onStream }).then(value => { foregroundDone = true; return value; });
@@ -298,37 +288,21 @@ describe('Claude shared foreground scheduling integration', () => {
     await expect(foreground).resolves.toMatchObject({ success: true });
   });
 
-  it('reconciles an owned job only on the existing idle host without initialization or recreation', async () => {
-    const job = await reserve();
-    const host = raw.claudeProcess;
-    const start = vi.spyOn(raw, 'startProcess');
-    const catalog = vi.spyOn(executor, 'listModels');
-    await executor.reconcileNativeSchedule('cleanup', () => true, () => job.handle.cancel());
-    expect(nativeTools).toEqual(['CronDelete']);
-    expect(raw.claudeProcess).toBe(host);
-    expect(start).not.toHaveBeenCalled(); expect(catalog).not.toHaveBeenCalled();
-    await executor.reconcileNativeSchedule('cleanup-again', () => true, () => job.handle.cancel());
-    expect(nativeTools).toEqual(['CronDelete']);
-    await job.handle.stop();
-    expect(raw.sessionSchedules.hasJobs).toBe(false);
-    expect(raw.scheduleCleanupHost).toBeUndefined();
-  });
-
-  it('rejects a missing native action at foreground completion instead of deadlocking operation drain', async () => {
-    const foreground = executor.execute('Request a schedule but omit its native action');
-    const pending = executor.withNativeScheduleOperation('missing', () => true, () => executor.createNativeSchedule({
-      id: 'missing', cwd: root, prompt: 'Synthetic', rule: { kind: 'cron', expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
-    }, vi.fn()), true);
-    const failure = expect(pending).rejects.toThrow('ended');
-    await vi.waitFor(() => expect(executor.nativeScheduleAction('missing')).toBeDefined());
-    result(lastUser().uuid); await foreground; await failure;
-    expect(raw.sessionSchedules.hasJobs).toBe(false);
-  });
-
   it('does not reserve jobs, start model management, or change native identity for ordinary turns', async () => {
     const foreground = executor.execute('Ordinary chat'); result(lastUser().uuid); await foreground;
     expect(raw.sessionSchedules.hasJobs).toBe(false); expect(nativeTools).toHaveLength(0);
     expect(raw.sessionId).toBe('original-native-session');
+  });
+
+  it('expires an unacknowledged inventory request when its foreground turn ends', async () => {
+    const foreground = executor.execute('Review existing native timers');
+    const pending = executor.withNativeScheduleOperation('inventory', () => true,
+      () => raw.sessionSchedules.reviewedInventory(() => true), true);
+    const failure = expect(pending).rejects.toThrow('ended');
+    await vi.waitFor(() => expect(executor.nativeScheduleAction('inventory')).toEqual({ tool: 'CronList', input: {} }));
+    result(lastUser().uuid); await foreground; await failure;
+    expect(executor.nativeScheduleAction('inventory')).toBeUndefined();
+    expect(nativeTools).toEqual([]);
   });
 
   it('drops a queued management turn whose authorization expired without sending another native prompt', async () => {
@@ -342,150 +316,11 @@ describe('Claude shared foreground scheduling integration', () => {
     expect(wire.filter(row => row.type === 'user')).toHaveLength(1); expect(nativeTools).toHaveLength(0);
   });
 
-  it('rejects native creation for restricted sandboxes and managed child workers', async () => {
-    const input: NativeScheduleInput = { id: 'rejected', cwd: root, prompt: 'Synthetic',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
-    vi.spyOn(raw.sandbox, 'isRestricted').mockReturnValue(true);
-    const restricted = executor.createNativeSchedule(input, vi.fn());
-    await expect(restricted).rejects.toThrow('sandbox');
-    await expect(restricted).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-    vi.spyOn(raw.sandbox, 'isRestricted').mockReturnValue(false); raw.delegationWorker = true;
-    await expect(executor.withNativeScheduleOperation('worker', () => true, async () => {}, true)).rejects.toThrow('owner');
-    const worker = executor.createNativeSchedule(input, vi.fn());
-    await expect(worker).rejects.toThrow('sandbox');
-    await expect(worker).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-    raw.delegationWorker = false; expect(nativeTools).toHaveLength(0);
-  });
-
-  it.each(['modelChange', 'isDestroyed', 'isStopping', 'hooks', 'cwd', 'protocol', 'ownership', 'model-race'])(
-    'refuses %s before calling the session adapter or admitting an occurrence', async reason => {
-      const input: NativeScheduleInput = { id: 'refused', cwd: root, prompt: 'Synthetic',
-        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
-      const create = vi.spyOn(raw.sessionSchedules, 'create');
-      const admit = vi.fn(() => true); const events = vi.fn();
-      const original = { modelChange: raw.modelChange,
-        isDestroyed: raw.isDestroyed, isStopping: raw.isStopping, scheduleHooksReady: raw.scheduleHooksReady };
-      if (['modelChange', 'isDestroyed', 'isStopping'].includes(reason)) raw[reason] = true;
-      if (reason === 'hooks') raw.scheduleHooksReady = false;
-      if (reason === 'cwd') input.cwd = path.join(root, 'different-directory');
-      if (reason === 'protocol' || reason === 'ownership') {
-        input.recovery = { version: 1, provider: 'fixture', strategy: 'reconstruct', identity: '{}' };
-        vi.spyOn(raw.turnLedger, 'supported').mockReturnValue(reason === 'ownership');
-        if (reason === 'ownership') vi.spyOn(raw, 'scheduleHostOwnership').mockReturnValue({
-          reserve: () => { throw new Error('Synthetic ownership reservation refused'); },
-        });
-      }
-      if (reason === 'model-race') vi.spyOn(raw, 'readNativeScheduleTimezone').mockImplementation(async () => {
-        raw.modelChange = true; return 'UTC';
-      });
-      try {
-        await expect(executor.createNativeSchedule(input, events, () => true, admit)).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-        expect(create).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled();
-        expect(nativeTools).toEqual([]); expect(wire.filter(row => row.type === 'user')).toEqual([]);
-      } finally { Object.assign(raw, original); }
-    });
-
-  it.each(['unavailable', 'write-throw', 'write-callback', 'timeout', 'host-changed'])(
-    'classifies %s timezone preflight failure as never admitted', async reason => {
-      vi.useFakeTimers();
-      const child = raw.claudeProcess;
-      const create = vi.spyOn(raw.sessionSchedules, 'create');
-      if (reason === 'unavailable') child.stdin.writable = false;
-      else child.stdin.write.mockImplementation((line: string, callback?: (error?: Error) => void) => {
-        if (reason === 'write-throw') throw new Error('Synthetic settings write failed');
-        if (reason === 'write-callback') callback?.(new Error('Synthetic settings write failed'));
-        if (reason === 'host-changed') {
-          raw.claudeProcess = { ...child };
-          raw.pendingControlRequests.get(JSON.parse(line).request_id).resolve(nativeSettings);
-        }
-        return true;
-      });
-      try {
-        const failure = executor.createNativeSchedule({ id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
-          rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn()).catch(error => error);
-        if (reason === 'timeout') await vi.advanceTimersByTimeAsync(10_001);
-        expect(await failure).toBeInstanceOf(NativeScheduleNotAdmittedError);
-        expect(create).not.toHaveBeenCalled(); expect(raw.pendingControlRequests.size).toBe(0);
-        expect(nativeTools).toEqual([]);
-      } finally { raw.claudeProcess = child; child.stdin.writable = true; vi.useRealTimers(); }
-    });
-
-  it.each(['timezone', 'missing-tools'])('automatically compacts a %s refusal without native cleanup', async reason => {
-    if (reason === 'timezone') nativeSettings = {};
-    else frame({ type: 'system', subtype: 'init', session_id: 'original-native-session',
-      tools: ['ToolSearch'], capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
-    const directory = path.join(root, 'synthetic-schedule-catalog');
-    const options = { directory, provider: { create: (input: NativeScheduleInput, emit: any, admit?: () => boolean) =>
-      executor.createNativeSchedule(input, emit, undefined, admit) }, deliver: vi.fn(async () => {}), isOwnerCurrent: () => true };
-    const owner = { threadId: 'synthetic-thread', openId: 'synthetic-owner', generation: 'epoch' };
-    const service = new ScheduleService(options);
-    let restored: ScheduleService | undefined;
-    const create = vi.spyOn(raw.sessionSchedules, 'create');
-    const timezone = vi.spyOn(raw, 'readNativeScheduleTimezone');
-    try {
-      await service.initialize();
-      await expect(service.create(owner, { id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
-        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-      if (reason === 'missing-tools') expect(timezone).not.toHaveBeenCalled();
-      expect(await service.list(owner)).toEqual([]);
-      await service.destroy();
-      restored = new ScheduleService(options); await restored.initialize();
-      expect(await restored.purge(owner, { ids: ['timezone-refused'] })).toMatchObject({
-        removedIds: [], alreadyRemovedIds: ['timezone-refused'], nativeCleanupUnresolved: [], errors: [],
-      });
-      expect(await restored.listCleanup(owner)).toEqual([]);
-      const catalog = JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
-      expect(catalog.records).toEqual([]); expect(catalog.cleanup ?? []).toEqual([]);
-      expect(create).not.toHaveBeenCalled(); expect(nativeTools).toEqual([]);
-    } finally { await restored?.destroy(); await service.destroy(); }
-  });
-
-  it('removes a fresh timezone mismatch from the catalog without issuing Cron tools', async () => {
-    nativeSettings = { effective: { env: { TZ: 'Pacific/Auckland' } } };
-    const directory = path.join(root, 'timezone-mismatch-catalog');
-    const owner = { threadId: 'synthetic-thread', openId: 'synthetic-owner', generation: 'epoch' };
-    const service = new ScheduleService({ directory, provider: { create: (input, emit, admit) =>
-      executor.createNativeSchedule(input, emit, undefined, admit) }, deliver: vi.fn(async () => {}), isOwnerCurrent: () => true });
-    try {
-      await service.initialize();
-      await expect(service.create(owner, { id: 'timezone-mismatch', cwd: root, prompt: 'Synthetic',
-        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toThrow('native session timezone');
-      expect(await service.list(owner)).toEqual([]); expect(nativeTools).toEqual([]);
-      const catalog = JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
-      expect(catalog.purged).toEqual([{ id: 'timezone-mismatch', ...owner }]);
-      expect(catalog.cleanup ?? []).toEqual([]);
-    } finally { await service.destroy(); }
-  });
-
-  it('preserves uncertain adapter creation errors and their original cleanup handle', async () => {
-    const handle = { nativeId: 'unconfirmed-synthetic', list: vi.fn(), cancel: vi.fn(), stop: vi.fn() };
-    const failure = new NativeScheduleCleanupError('Synthetic mutation without a receipt', handle);
-    const create = vi.spyOn(raw.sessionSchedules, 'create').mockRejectedValueOnce(failure);
-    await expect(executor.createNativeSchedule({ id: 'uncertain', cwd: root, prompt: 'Synthetic',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn())).rejects.toBe(failure);
-    expect(create).toHaveBeenCalledOnce(); expect(failure.handle).toBe(handle);
-    expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
-  });
-
-  it('uses the effective native timezone without exposing unrelated native settings', async () => {
-    nativeSettings = { effective: { env: { TZ: 'Pacific/Auckland', SYNTHETIC_PRIVATE: 'do-not-forward-fixture' } }, sources: [] };
-    const input: NativeScheduleInput = { id: 'timezone', cwd: root, prompt: 'Synthetic',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
-    await expect(executor.withNativeScheduleOperation('timezone', () => true,
-      () => executor.createNativeSchedule(input, vi.fn()), true)).rejects.toMatchObject({
-      constructor: NativeScheduleNotAdmittedError, message: expect.stringContaining('Pacific/Auckland'),
-    });
-    expect(executor.nativeScheduleAction('timezone')).toBeUndefined();
-    expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('do-not-forward-fixture'));
-    nativeSettings = {};
-    const unverified = executor.createNativeSchedule(input, vi.fn());
-    await expect(unverified).rejects.toThrow('timezone could not be verified');
-    await expect(unverified).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-    nativeSettings = { effective: { disableAllHooks: true } };
-    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toMatchObject({
-      constructor: NativeScheduleNotAdmittedError, message: expect.stringContaining('active SDK callback hooks'),
-    });
-    expect(nativeTools).toHaveLength(0);
+  it('denies unreserved CronCreate on a guarded foreground turn', () => {
+    expect(executor).not.toHaveProperty('createNativeSchedule');
+    hook({ tool: 'CronCreate', input: { cron: '* * * * *', prompt: 'Unmanaged' } }, 'unexpected');
+    expect(wire.at(-1).response.response.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(raw.sessionSchedules.hasJobs).toBe(false);
   });
 
   it('fails closed when native hook policy rejects the resumed ownership guard', async () => {
@@ -494,5 +329,14 @@ describe('Claude shared foreground scheduling integration', () => {
     nativeSettings = { effective: { disableAllHooks: true }, sources: [] };
     await expect(raw.performControlInitialization()).rejects.toThrow('active SDK callback hooks');
     expect(raw.scheduleHooksReady).toBe(false);
+  });
+
+  it('reads only the effective native timezone for retained cancellation', async () => {
+    nativeSettings = { effective: { env: { TZ: 'Pacific/Auckland', SYNTHETIC_PRIVATE: 'do-not-forward-fixture' } } };
+    await expect(raw.readNativeScheduleTimezone()).resolves.toBe('Pacific/Auckland');
+    nativeSettings = {};
+    await expect(raw.readNativeScheduleTimezone()).rejects.toThrow('timezone could not be verified');
+    expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('do-not-forward-fixture'));
+    expect(nativeTools).toEqual([]);
   });
 });

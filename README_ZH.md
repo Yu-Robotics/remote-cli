@@ -579,6 +579,13 @@ Clearing the conversation with `/clear` or `/new` also removes its locally
 managed schedules and their stored history. Legacy native cleanup may still
 require the original session.
 
+Both `/schedule list` and **Refresh status** display records stored by the CLI.
+To inspect legacy Claude definitions on their original native host, use
+`/schedule cleanup review` in the bound conversation.
+
+DSH blocks native scheduling tools in foreground conversations and delegated
+workers. Create managed schedules in the original foreground conversation.
+
 Use the managed ID from `/schedule list` to cancel future runs. Work already
 dispatched may still finish. Results awaiting Feishu delivery can be retried
 when a compatible Router reconnects. After an upgrade, existing native tasks
@@ -987,7 +994,7 @@ supervisor restart behavior; foreground clients activate an installed version at
 the next manual start. Native Linux qualification does not imply macOS/Windows
 support, and unqualified DSH recovery remains unavailable.
 
-`/schedule list` and the model list tool inspect native state on demand without
+In the legacy implementation, `/schedule list` and the model list tool inspected native state on demand without
 cancelling jobs. Inventory errors preserve existing task state and execution
 admission; verified native absence is reported as interrupted without claiming
 execution completion. Unresolved cleanup remains visible and requires explicit
@@ -1000,9 +1007,9 @@ displayed timestamps include an explicit timezone.
 When both CLI and Router support schedule cards, creation and list replies offer
 **Refresh status** and **Cancel** controls. Cancellation requires confirmation
 on the card and is shown as successful only after the original CLI acknowledges
-it. Refresh queries native state on demand; it does not start periodic polling
-or replay a scheduled occurrence. Claude controls may use a native management
-turn. These controls apply to the card's original
+it. Through CLI 1.6.264, refresh could query native state through a Claude management
+turn. Current versions read the CLI catalog when the user selects refresh.
+These controls apply to the card's original
 user, device, and thread even after switching the selected thread or backend.
 
 If an operation times out, its outcome is unknown. Retry confirmation before

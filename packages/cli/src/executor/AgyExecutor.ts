@@ -9,7 +9,6 @@ import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { IExecutor, ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
 import type { ApprovalAction } from '../types';
-import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
@@ -538,17 +537,6 @@ export class AgyExecutor implements IExecutor {
     return (await this.runtime(true)).withOperation(id, current, run, inTurn);
   }
   nativeScheduleAction(id: string) { return this.acp?.action(id); }
-  async createNativeSchedule(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void | Promise<void>, current: () => boolean = () => true, admit: () => boolean = () => true): Promise<NativeScheduleHandle> {
-    if (this.transitioning || this.isDestroyed || this.shutdownUncertain) throw new Error('AGY context transition is pending.');
-    if (this.delegationWorker) throw new Error('Managed workers cannot create native schedules.');
-    if (input.cwd !== this.currentWorkingDirectory || input.threadId !== this.threadId || input.model !== this.model || input.effort !== this.effort) throw new Error('AGY schedule configuration does not match the original session.');
-    const runtime = await this.runtime(true);
-    try { return await runtime.create(input, emit, () => !this.isDestroyed && current() && admit()); }
-    catch (error) {
-      if (runtime.allocationUnconfirmed) this.allocationUnconfirmed = true;
-      if (!runtime.running) this.acp = undefined; throw error;
-    }
-  }
   async getAccountUsage(): Promise<string | null> {
     let env: NodeJS.ProcessEnv;
     try {

@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
 import type { HookPayload } from '../../src/scheduling/agy/AgySessionSchedules';
+import type { NativeScheduleEvent } from '../../src/scheduling/types';
 import type { TranscriptRecord } from '../../src/scheduling/agy/transcript';
 import { NOTIFICATION_PREFIX } from '../../src/scheduling/agy/transcript';
 import { createExecutor } from '../../src/executor';
@@ -145,6 +146,21 @@ const runtimes = new Set<AgyAcpRuntime>();
 const last = () => native.clients.at(-1)!;
 const input = () => ({ backend: 'agy' as const, threadId: 'synthetic-thread', id: 'job-a', cwd, prompt: 'Equal work',
   model: 'synthetic-model', effort: 'high', rule: { kind: 'cron' as const, expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+/** A previously acknowledged task and its ownership journal on this synthetic ACP host. */
+async function legacyJob(emit: (event: NativeScheduleEvent) => void = () => {}, definition = input()) {
+  await executor.withNativeScheduleOperation('fixture-legacy-inventory', () => true, async () => {}, false);
+  const runtime = executor['acp']!;
+  const schedules = runtime['host']!.schedules;
+  const nativeId = last().session + '/task-' + last().cursor++;
+  const description = 'Timer: synthetic, Prompt: ' + definition.prompt;
+  const job = { input: definition, id: nativeId, description, emit, admit: () => true,
+    cancelled: false, absent: false, firstPossibleWake: Date.now() + 60_000 };
+  await schedules['options'].beforeMutation!();
+  schedules['jobs'].set(definition.id, job);
+  schedules['ready'] = true;
+  last().tasks.set(nativeId, description);
+  return schedules['handle'](job);
+}
 const make = () => createExecutor(new DirectoryGuard([cwd]), { type: 'agy', agy: { model: 'synthetic-model' } }, cwd, 'synthetic-thread', undefined, 'high') as AgyExecutor;
 beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
@@ -353,11 +369,6 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await executor.execute('fresh chat'); expect(last().session).toBe('fresh-synthetic-session');
     expect(last().prompts).toEqual(['fresh chat']);
   });
-  it('releases a closed startup failure reached through schedule creation too', async () => {
-    native.settingFailure = true;
-    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow('stage=session-settings');
-    await expect(executor.execute('do not send')).rejects.toThrow('explicit /clear'); expect(native.clients).toHaveLength(1);
-  });
   it('retains an unconfirmed cleanup runtime until its exact group can be joined', async () => {
     native.settingFailure = true; native.exitConfirmed = false;
     await expect(executor.execute('do not send')).rejects.toThrow('stage=cleanup');
@@ -445,7 +456,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(client.launch.env.USERPROFILE).toBe(client.launch.env.HOME);
     expect(stream).toHaveBeenCalledWith('Synthetic streamed text'); expect(display).toHaveBeenCalled();
     const events: any[] = [];
-    const handle = await executor.withNativeScheduleOperation('op', () => true, () => executor.createNativeSchedule(input(), e => events.push(e)), false);
+    const handle = await legacyJob(e => events.push(e));
     expect(native.clients).toHaveLength(1); expect(handle.nativeId).toMatch(/^synthetic-session\/task-/);
     const retained = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.native-schedules'), 'utf8'));
     expect(retained).toMatchObject({ sessionId: executor.getSessionId(), retired: false });
@@ -458,24 +469,9 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await handle.cancel(); expect(await handle.list()).toBe(false);
     expect(handle.retirementConfirmed).toBe(false);
   });
-  it('authorizes in-turn MCP actions without nesting a client prompt, including initial qualification', async () => {
-    await executor.withNativeScheduleOperation('legacy-host', () => true, async () => {}, false);
-    const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
-    const work = executor.withNativeScheduleOperation('op', () => true, () => executor.createNativeSchedule(input(), () => {}), true);
-    await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('manage_task'));
-    expect(executor.hasPendingScheduleMutation()).toBe(true);
-    expect(executor.nativeScheduleAction('wrong')).toBeUndefined();
-    last().tool(executor.nativeScheduleAction('op'));
-    await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('schedule'));
-    last().tool(executor.nativeScheduleAction('op'));
-    const handle = await work;
-    expect(executor.hasPendingScheduleMutation()).toBe(false);
-    expect(handle.nativeId).toBeTruthy(); expect(last().prompts).toEqual(['hold']);
-    last().finish('Creation acknowledged'); last().release({ stopReason: 'end_turn' }); await foreground;
-  });
   it('retains cancelled ownership when an ordinary tool leaves unknown background work', async () => {
     const events: any[] = [];
-    await executor.createNativeSchedule(input(), e => events.push(e));
+    await legacyJob(e => events.push(e));
     last().hook('PreToolUse', { stepIdx: 200, toolCall: { id: 'ordinary', name: 'run_command', args: {} } });
     const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last().release).toBeTypeOf('function'));
     expect(await executor.abort()).toBe(true); expect((await foreground).success).toBe(false);
@@ -496,8 +492,31 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(executor.execute('resume')).rejects.toThrow('unconfirmed');
     expect(native.clients).toHaveLength(1);
   });
+  it('authorizes exact in-turn cancellation receipts and projects their tool cards on the original turn', async () => {
+    const handle = await legacyJob();
+    const onToolUse = vi.fn(), onToolResult = vi.fn();
+    const pending = executor.execute('hold', { onToolUse, onToolResult });
+    await vi.waitFor(() => expect(last().release).toBeTypeOf('function'));
+    expect(await last().callbacks.onPermissionRequest('Synthetic tool', [
+      { kind: 'reject_once', optionId: 'no' }, { kind: 'allow_once', optionId: 'yes' },
+    ])).toBe(1);
+    const cancelling = executor.withNativeScheduleOperation('cancel', () => true, () => handle.cancel(), true);
+    for (const args of [{ Action: 'list' }, { Action: 'kill', TaskId: handle.nativeId }, { Action: 'list' }]) {
+      const action = { tool: 'manage_task', input: args };
+      await vi.waitFor(() => expect(executor.nativeScheduleAction('cancel')).toEqual(action));
+      expect(executor.nativeScheduleAction('wrong')).toBeUndefined();
+      expect(executor.hasPendingScheduleMutation()).toBe(true);
+      last().tool(action);
+    }
+    await cancelling;
+    expect(executor.hasPendingScheduleMutation()).toBe(false);
+    expect(onToolUse).toHaveBeenCalledTimes(3);
+    expect(onToolResult).toHaveBeenCalledWith(expect.objectContaining({ is_error: false }));
+    expect(last().prompts).toEqual(['hold']);
+    last().finish(); last().release({ stopReason: 'end_turn' }); await pending;
+  });
   it('never reconstructs scheduled ACP work or produces an exit checkpoint', async () => {
-    const handle = await executor.createNativeSchedule(input(), () => {});
+    const handle = await legacyJob();
     const original = executor.getSessionId(), old = last(), prompts = [...old.prompts];
     await executor.destroy();
     expect(old.prompts).toEqual(prompts);
@@ -508,7 +527,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   });
   it('keeps cancelled original ACP history without claiming automatic resume safety', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const handle = await executor.createNativeSchedule(input(), () => {}); await handle.cancel();
+    const handle = await legacyJob(); await handle.cancel();
     const original = executor.getSessionId(); await executor.destroy(); executor = make();
     await expect(executor.execute('must not assume native hook safety')).rejects.toThrow('cannot safely resume');
     expect(executor.getSessionId()).toBe(original); expect(native.clients).toHaveLength(1);
@@ -522,7 +541,6 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(native.restore).not.toHaveBeenCalled();
     await expect(executor.execute('continue original')).resolves.toMatchObject({ success: true });
     expect(native.clients).toHaveLength(1);
-    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow('unavailable');
   });
   it.each(['setModel', 'setEffort', 'clearModel'] as const)('confirms %s on the same ACP host and permanently removes schedule admission', async operation => {
     await executor.execute('hello'); const session = executor.getSessionId();
@@ -530,27 +548,12 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     if (operation === 'setEffort') await executor.setEffort('low');
     if (operation === 'clearModel') await executor.clearModel();
     expect(last().closed).toBe(false); expect(executor.getSessionId()).toBe(session);
-    await expect(executor.createNativeSchedule(input(), () => {})).rejects.toThrow();
   });
   it.each(['timeout', 'inactivityTimeout'] as const)('bounds %s and continues ordinary ACP chat without losing the pointer', async field => {
     const pending = executor.execute('hold', { [field]: 15 });
     const result = await pending;
     expect(result.success).toBe(false); expect(last().cancelled).toBe(true); expect(last().closed).toBe(false);
     expect(executor.getSessionId()).toBe('synthetic-session'); expect(executor.hasPendingCancellation()).toBe(false);
-  });
-  it('projects in-turn native tool cards and exposes only the requested local permission choice', async () => {
-    await executor.withNativeScheduleOperation('legacy-host', () => true, async () => {}, false);
-    const onToolUse = vi.fn(), onToolResult = vi.fn();
-    const pending = executor.execute('hold', { onToolUse, onToolResult });
-    await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
-    expect(await last().callbacks.onPermissionRequest('Synthetic tool', [{ kind: 'reject_once', optionId: 'no' }, { kind: 'allow_once', optionId: 'yes' }])).toBe(1);
-    const create = executor.withNativeScheduleOperation('op', () => true, () => executor.createNativeSchedule(input(), () => {}), true);
-    await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('manage_task'));
-    last().tool(executor.nativeScheduleAction('op'));
-    await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('schedule'));
-    last().tool(executor.nativeScheduleAction('op')); await create;
-    expect(onToolUse).toHaveBeenCalledTimes(2); expect(onToolResult).toHaveBeenCalledWith(expect.objectContaining({ is_error: false }));
-    last().finish(); last().release({ stopReason: 'end_turn' }); await pending;
   });
   it('joins startup before shutdown and never admits a session after concurrent destroy', async () => {
     let release!: () => void;
@@ -564,7 +567,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   });
   it.each(['delete', 'reset', 'directory'] as const)('joins the owned host before %s after cancellation before the first wake', async operation => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const handle = await executor.createNativeSchedule(input(), () => {});
+    const handle = await legacyJob();
     await handle.cancel();
     expect(handle.nativeDefinitionAbsent).toBe(true); expect(handle.retirementConfirmed).toBe(true);
     const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
@@ -596,7 +599,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
 
   it.each(['delete', 'reset'] as const)('rechecks a checkpoint fence acquired during owned retirement before %s erases data', async operation => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    const handle = await executor.createNativeSchedule(input(), () => {}); await handle.cancel();
+    const handle = await legacyJob(); await handle.cancel();
     const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
     last().waitForManagedProcessGroupExit = async () => { await fs.mkdir(pointer + '.checkpoint.lock'); };
     try {
@@ -610,14 +613,14 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   it.each(['lock', 'foreign-owner', 'unknown-host', 'live-sibling', 'unconfirmed-exit'] as const)(
     'preserves AGY context deletion evidence for %s', async fault => {
       vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-      const handle = await executor.createNativeSchedule(input(), () => {});
+      const handle = await legacyJob();
       await handle.cancel();
       const raw = executor as any, runtime = raw.acp, owner = { ...raw.scheduleOwner };
       const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
       if (fault === 'lock') await fs.mkdir(pointer + '.checkpoint.lock');
       if (fault === 'foreign-owner') raw.scheduleOwner.sessionId = 'other-session';
       if (fault === 'unknown-host') raw.acp = undefined;
-      if (fault === 'live-sibling') await executor.createNativeSchedule({ ...input(), id: 'sibling' }, () => {});
+      if (fault === 'live-sibling') await legacyJob(undefined, { ...input(), id: 'sibling' });
       if (fault === 'unconfirmed-exit') native.exitConfirmed = false;
       try {
         await expect(executor.deleteThreadData('synthetic-thread')).rejects.toThrow();
@@ -632,7 +635,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     });
 
   it('permits explicit fresh-context reset only after exact group retirement, never a scheduled resume', async () => {
-    await executor.createNativeSchedule(input(), () => {});
+    await legacyJob();
     await expect(executor.resetContext()).rejects.toThrow('unresolved ownership');
     await executor.stopForContextReset(); await executor.resetContext();
     expect(executor.getSessionId()).toBeNull();
@@ -640,20 +643,18 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(native.clients).toHaveLength(1);
   });
   it('does not certify group retirement or remove hooks on uncertain exit', async () => {
-    await executor.createNativeSchedule(input(), () => {}); native.exitConfirmed = false;
+    await legacyJob(); native.exitConfirmed = false;
     await expect(executor.destroy()).rejects.toThrow('unconfirmed');
     expect(native.restore).not.toHaveBeenCalled();
     const retained = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.native-schedules'), 'utf8'));
     expect(retained.retired).toBe(false);
     native.exitConfirmed = true; await (executor as any).acp.close();
   });
-  it('fails before native mutation for changed owner/settings and preserves legacy saved identity', async () => {
-    await expect(executor.createNativeSchedule({ ...input(), cwd: home }, () => {})).rejects.toThrow('configuration');
-    await expect(executor.withNativeScheduleOperation('op', () => false, () => executor.createNativeSchedule(input(), () => {}), false)).rejects.toThrow();
-    expect(last().prompts).toEqual([]);
-    await executor.destroy(); executor = make();
-    await expect(executor.withNativeScheduleOperation('op', () => true, async () => {}, false)).rejects.toThrow('cannot safely resume');
-    expect(last().session).toBe('synthetic-session');
+  it('exposes no executor or runtime method to install a native definition', async () => {
+    expect(executor).not.toHaveProperty('createNativeSchedule');
+    await executor.execute('ordinary chat');
+    expect(executor['acp']).not.toHaveProperty('create');
+    expect(last().tasks.size).toBe(0);
   });
   it('refuses a saved ACP host with unknown retirement even without a schedule catalog', async () => {
     await executor.execute('hello');
@@ -687,7 +688,6 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   it('loads only the supplied worker identity without granting schedule admission', async () => {
     const { runtime, saveSession } = initialRuntime({ worker: true, sessionId: 'synthetic-retained' });
     await runtime.start(); expect(saveSession).toHaveBeenCalledWith('synthetic-retained'); expect(last().token).toBeUndefined();
-    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('loaded sessions');
     await expect(runtime.withOperation('op', () => true, async () => undefined, false)).rejects.toThrow('loaded sessions');
     expect((await runtime.execute('new task', {})).success).toBe(true);
     expect(last().prompts).toEqual(['new task']);
@@ -698,11 +698,9 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const changing = runtime.changeSettings({ mode: 'plan' });
     await vi.waitFor(() => expect(last().controls.at(-1)).toEqual(['mode', 'plan']));
     await expect(runtime.execute('overlap', {})).rejects.toThrow('active');
-    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('settings');
     await expect(runtime.withOperation('overlap', () => true, async () => undefined, false)).rejects.toThrow('settings');
     release(); await changing; expect(last().mode).toBe('plan'); expect(last().token).toBeUndefined();
     await runtime.execute('after control', {}); expect(last().prompts).toEqual(['after control']);
-    await expect(runtime.create(input(), () => {}, () => true)).rejects.toThrow('loaded sessions');
   });
   it('projects worker ERROR as failure even when ACP ends normally', async () => {
     const { runtime } = initialRuntime({ worker: true }); await runtime.start();

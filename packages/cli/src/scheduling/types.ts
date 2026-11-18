@@ -28,9 +28,10 @@ export interface NativeScheduleInput {
 
 export type HostScheduleInput = Omit<NativeScheduleInput, 'engine' | 'backend' | 'recovery'> & {
   engine: 'host';
-  backend?: BackendKey;
+  backend: BackendKey;
+  sessionId: string;
+  bindingEpoch: string;
 };
-export type ScheduleInput = NativeScheduleInput | HostScheduleInput;
 
 /** Legacy catalog shape retained for exact cleanup and diagnostics, never a resume capability. */
 export interface ScheduleOwnershipMetadata {
@@ -86,14 +87,6 @@ export interface NativeScheduleHandle {
   cancel(): Promise<void>;
   /** Retire this job; a shared provider must never stop other jobs or their conversation. */
   stop(): Promise<void>;
-}
-
-export interface NativeScheduleProvider {
-  /** Pure cleanup lookup; does not start a native host or grant execution. */
-  cleanupFor?(input: NativeScheduleInput): NativeScheduleCleanup | undefined;
-  /** Admission is checked at each future wake, independently of deletion authority and completion delivery. */
-  create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void | Promise<void>,
-    canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle>;
 }
 
 /** Provider proved refusal before starting native admission or mutation. Not absence evidence. */

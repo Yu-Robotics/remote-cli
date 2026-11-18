@@ -46,34 +46,6 @@ function processFixture() {
 }
 
 describe('DshAcpClient', () => {
-  it('routes delayed projections by native message identity rather than whichever foreground request is waiting', async () => {
-    const onTextChunk = vi.fn(); const client = create({ onTextChunk });
-    const scope = (client as any).scheduleScope;
-    (client as any).scheduleEnabled = true;
-    (client as any).foregroundSession = 'dsh-session';
-    const send = (method: string, params: unknown) => fixture.child.push({ jsonrpc: '2.0', method, params });
-    const classify = (messageId: string, foreground: boolean) => send('_remote_cli/session_schedule_event',
-      { version: 2, scope, kind: 'projection', sessionId: 'dsh-session', messageId, foreground });
-    classify('scheduled', false); classify('foreground', true);
-    for (const messageId of ['scheduled', 'foreground', 'unknown']) send('session/update', { sessionId: 'dsh-session',
-      update: { sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: messageId } } });
-    await vi.waitFor(() => expect(onTextChunk).toHaveBeenCalledOnce());
-    expect(onTextChunk).toHaveBeenCalledWith({ type: 'text', text: 'foreground' });
-    (client as any).foregroundSession = undefined;
-    send('session/update', { sessionId: 'dsh-session', update: { sessionUpdate: 'agent_message_chunk', messageId: 'foreground', content: { type: 'text', text: 'late' } } });
-    await new Promise(resolve => setImmediate(resolve)); expect(onTextChunk).toHaveBeenCalledOnce();
-  });
-  it('keeps the foreground outcome when native ACP settles after an unrelated autonomous turn', async () => {
-    const client = create(); await client.initialize();
-    delete fixture.replies['session/prompt'];
-    (client as any).scheduleEnabled = true;
-    const running = client.prompt('dsh-session', [{ type: 'text', text: 'foreground' }]);
-    const frame = fixture.frames.at(-1)!;
-    fixture.child.push({ jsonrpc: '2.0', method: '_remote_cli/session_schedule_event', params: {
-      version: 2, scope: (client as any).scheduleScope, kind: 'foregroundEnd', sessionId: 'dsh-session', stopReason: 'end_turn' } });
-    fixture.child.push({ jsonrpc: '2.0', id: frame.id, result: { stopReason: 'error' } });
-    expect(await running).toEqual({ stopReason: 'end_turn' });
-  });
   let home: string;
   let fixture: ReturnType<typeof processFixture>;
   let clients: DshAcpClient[];
@@ -96,40 +68,6 @@ describe('DshAcpClient', () => {
     } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
   });
 
-  it('keeps native create, occurrence delivery and exact cancellation without recovery IPC or shutdown RPC', async () => {
-    const client = create(); await client.initialize();
-    const input = { id: 'synthetic-job', cwd: home, prompt: 'Synthetic reminder',
-      rule: { kind: 'cron' as const, expression: '* * * * *', timezone: 'UTC' } };
-    const emit = vi.fn();
-    const requests = () => fixture.frames.filter(frame => frame.method === '_remote_cli/session_schedule_command');
-    await expect(client.createNativeSchedule('dsh-session', input, emit, () => false)).rejects.toThrow('context changed');
-    expect(requests()).toEqual([]);
-    const receipt = (request: any, result: object) => fixture.child.push({ jsonrpc: '2.0',
-      method: '_remote_cli/session_schedule_event', params: { version: 2, scope: request.params.scope,
-        kind: 'receipt', requestId: request.params.requestId, result } });
-    const creating = client.createNativeSchedule('dsh-session', input, emit);
-    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('inspect'));
-    receipt(requests().at(-1), { ready: true, sessionId: 'dsh-session' });
-    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('create'));
-    receipt(requests().at(-1), { nativeId: 'synthetic-native', sessionId: 'dsh-session' });
-    const handle = await creating;
-    for (const event of [{ type: 'started', occurrenceId: 'synthetic-occurrence' },
-      { type: 'completed', occurrenceId: 'synthetic-occurrence', success: true, output: 'Synthetic result' }]) {
-      fixture.child.push({ jsonrpc: '2.0', method: '_remote_cli/session_schedule_event', params: {
-        version: 2, scope: requests()[0].params.scope, kind: 'event', id: input.id, sessionId: 'dsh-session', event } });
-    }
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(2));
-    expect(emit.mock.calls[1][0]).toMatchObject({ type: 'completed', success: true, output: 'Synthetic result' });
-    const cancelling = handle.cancel();
-    await vi.waitFor(() => expect(requests().at(-1)?.params.operation).toBe('cancel'));
-    expect(requests().at(-1).params.id).toBe(input.id);
-    receipt(requests().at(-1), { deleted: true }); await cancelling;
-    expect(handle.nativeDefinitionAbsent).toBe(true);
-    client.destroy(); await client.waitForExit();
-    expect(handle.nativeDefinitionAbsent).toBe(false);
-    expect(requests().map(frame => frame.params.operation)).toEqual(['inspect', 'create', 'cancel']);
-  });
-
   it('adds a managed history overlay without changing tool HOME or the ordinary privacy overlay', async () => {
     const historyPatch = '- id: session-persistence-jsonl\n  config:\n    root: "synthetic-owned-root"\n';
     expect(() => new DshAcpClient('synthetic-dsh', home, {}, 1000, false, historyPatch)).toThrow('managed worker');
@@ -137,10 +75,13 @@ describe('DshAcpClient', () => {
     const client = new DshAcpClient('synthetic-dsh', home, {}, 1000, true, historyPatch);
     clients.push(client);
     const [, args, options] = vi.mocked(spawn).mock.calls[0] as any[];
-    expect(fs.readFileSync(args[3], 'utf8')).toContain(historyPatch);
+    const overlay = fs.readFileSync(args[3], 'utf8');
+    expect(overlay).toContain(historyPatch);
+    expect(overlay).toContain('"inject":["acpAppStartup","remoteCliScheduleGuardReady"]');
+    expect(overlay).toContain('NativeScheduleToolGuard.js');
     expect(options.env.HOME).toBe(home);
     expect(options.env.DSH_HOME).toBe(home);
-    expect(fs.readFileSync(args[3], 'utf8')).toContain('mode: DISABLED');
+    expect(overlay).toContain('mode: DISABLED');
   });
 
   it('uses a private per-process overlay for both upload paths without modifying the parent environment', async () => {
@@ -150,6 +91,11 @@ describe('DshAcpClient', () => {
     expect(command).toBe('custom-dsh');
     expect(args.slice(0, 3)).toEqual(['--profile', 'acp', '--patch']);
     const patch = args[3];
+    const overlay = fs.readFileSync(patch, 'utf8');
+    expect(overlay).toContain('"inject":["acpAppStartup","remoteCliScheduleGuardReady"]');
+    expect(overlay).toContain('NativeScheduleToolGuard.js');
+    expect(overlay).not.toMatch(/storage-domain|session-controller|session-schedule-bridge/);
+    expect(client).not.toHaveProperty('createNativeSchedule');
     expect(fs.readFileSync(patch, 'utf8')).toContain('session-log-deepseek\n  config:\n    enabled: false');
     expect(fs.readFileSync(patch, 'utf8')).toContain('session-telemetry-otel\n  config:\n    mode: DISABLED');
     if (process.platform !== 'win32') expect(fs.statSync(patch).mode & 0o777).toBe(0o600);

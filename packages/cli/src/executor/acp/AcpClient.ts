@@ -58,8 +58,6 @@ export interface AcpTransport {
   sessionAdmission?(sessionId: string): object | undefined;
   /** Allocation/load and admission-revoking controls change this local epoch. */
   sessionLifecycle?(): object | undefined;
-  createNativeSchedule?(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void | Promise<void>, current?: () => boolean): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
   newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
   loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[], assertCurrent?: () => void): Promise<AcpSessionResult>;

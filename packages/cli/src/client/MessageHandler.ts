@@ -70,8 +70,8 @@ import { SessionControl, type PiBindingState } from '../session/SessionControl';
 import { ScheduleService, HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, type HostResult, type SchedulePurgeSelection, type SchedulePurgeResult } from '../scheduling/ScheduleService';
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
-import { assertHostScheduleBackend, assertNativeScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
-import { NativeScheduleNotAdmittedError, type ScheduleOwner, type ScheduleRecord } from '../scheduling/types';
+import { assertHostScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
+import type { ScheduleOwner, ScheduleRecord } from '../scheduling/types';
 
 /**
  * Detected backend information
@@ -3629,40 +3629,11 @@ You can also use natural language commands to control Claude Code CLI.`,
         isNativeMutationPending: owner => this.threadPool.getExistingExecutor(owner.threadId)?.hasPendingScheduleMutation?.() ?? false,
         withPurgeVerification: (record, context, accept) => verifySchedulePurge(record,
           this.schedulePurgeHosts.get(record.threadId), context.isCurrent, accept),
-        provider: { cleanupFor: input => {
+        cleanupFor: input => {
           if (input.engine === 'host') return undefined;
           if (!input.threadId || this.threadPool.getBackendKey(input.threadId) !== input.backend) return undefined;
           return this.threadPool.getExecutor(input.threadId).nativeScheduleCleanup;
-        }, create: (input, onEvent, canAdmitOccurrence) => {
-          const backend = input.backend === undefined ? 'claude' : input.backend;
-          let executor: IExecutor;
-          let generation: string;
-          try {
-            if (input.engine === 'host') throw new Error('Host schedules cannot create native timer definitions.');
-            assertNativeScheduleBackend(backend);
-            if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
-            if (this.threadPool.getBackendKey(input.threadId) !== backend) throw new Error('Foreground scheduling backend changed before native admission.');
-            executor = this.threadPool.getExecutor(input.threadId);
-            if (!executor.createNativeSchedule) throw new Error('The original executor does not support native session scheduling.');
-            generation = this.scheduleGeneration(input.threadId);
-          } catch (error) {
-            throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule provider refused admission.');
-          }
-          return executor.createNativeSchedule!(input, event => {
-            const settled = onEvent(event);
-            // A foreground message confirmed into the thread queue while an
-            // autonomous native occurrence was running must be retried when
-            // that occurrence reaches a terminal state. The executor's own
-            // queue wake does not know about MessageHandler's queue.
-            if (event.type === 'completed' || (event.type === 'stopped' && event.exitConfirmed !== false)) {
-              queueMicrotask(() => { void this.startNextQueuedCommand(input.threadId!); });
-            }
-            return settled;
-          }, () => {
-            try { return !this.isDestroyed && this.scheduleGeneration(input.threadId!) === generation
-              && this.threadPool.getBackendKey(input.threadId!) === backend; } catch { return false; }
-          }, canAdmitOccurrence);
-        } },
+        },
         isOwnerCurrent: owner => {
           // Shutdown blocks delivery separately; it does not invalidate persisted ownership.
           if (owner.bindingEpoch !== undefined && (!this.wsClient.isConnected() || !this.scheduleBinding)) return undefined;
@@ -3966,8 +3937,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       const needsVerification = backend === 'claude' && !!executor.withReviewedNativeCleanup && (cleanup.some(item => ids.includes(item.id) && item.backend === 'claude' && !!item.attribution && !!item.nativeId) || records.some(record => ids.includes(record.id)
         && record.engine !== 'host' && record.backend === 'claude' && !!record.recovery && !!record.nativeId && !record.cleanupConfirmed && !record.creationRefused && !['active', 'running', 'creating'].includes(record.state)));
       const needsNative = needsVerification || ['claude', 'agy'].includes(backend) && records.some(record => ids.includes(record.id)
-        && record.engine !== 'host' && record.backend === backend && (service.canCancel(owner, record.id)
-          || backend === 'agy' && service.needsNativePurge(owner, record.id)));
+        && record.engine !== 'host' && record.backend === backend && service.canCancel(owner, record.id));
       if (!needsNative) return await run();
       if (!executor.withNativeScheduleOperation) throw new Error('Native cleanup admission is unavailable.');
       if (!inTurnCurrent && executor.configureManagedTools) {
@@ -4119,8 +4089,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           + cleanup.map(item => `${item.id} (${item.backend}; ${item.reason}${item.nativeId ? `; native ID ${item.nativeId}` : ''}${item.attribution ? `; original session ${item.attribution.sessionId}` : ''}) — ${cleanupDetail(item.reason)}`).join('\n')
           + '\nRetry /schedule purge <managed-id,...>; use cleanup review/delete for exact native definitions in their original bound session.';
       }
-      if (storedOnly) output = `Native cancellation cleanup is pending. This is the stored catalog, not a fresh native inventory. Retry /abort; /clear stops the host and loses session-only schedules.\n\n${output}`;
-      if (updateSnapshot) output = `Automatic update: stored catalog only, not fresh native inventory. Unconfirmed work remains fenced; inspect the CLI diagnostic before an explicit service stop/restart.\n\n${output}`;
+      if (storedOnly) output = `Showing the stored catalog. Native cancellation cleanup is pending. Retry /abort to finish cleanup.\n\n${output}`;
+      if (updateSnapshot) output = `Showing the stored catalog during the automatic update. Check the CLI diagnostics before stopping or restarting the service.\n\n${output}`;
       respond({ success: true, scheduleMenu: updateSnapshot ? undefined : menuFor(owner, records), output });
     } catch (error) {
       respond({ success: false, error: error instanceof Error ? error.message : 'Schedule operation failed.' });

@@ -1,5 +1,8 @@
 # DSH native scheduling provider
 
+This document records the native adapter design and acceptance results for
+1.6.232. For current scheduling behavior, see [Scheduled tasks](../README.md#scheduled-tasks).
+
 ## Integration boundary and remaining limits
 
 The provider and packaged host plugins are integrated through the existing

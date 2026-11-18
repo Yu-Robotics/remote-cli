@@ -17,7 +17,6 @@ import type { ExecuteOptions, ExecuteResult } from '../IExecutor';
 import { AgyScheduleHost } from '../../scheduling/agy/AgyScheduleHost';
 import { AgyHookRelay, installAgyScheduleHooks } from '../../scheduling/agy/AgyHookRelay';
 import { nativeBindings } from '../../native/NativeBindings';
-import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../../scheduling/types';
 
 export interface AgyAcpRuntimeOptions {
   command: string; home: string; cwd: string; threadId: string; env: NodeJS.ProcessEnv;
@@ -42,7 +41,6 @@ export interface AgyAcpRuntimeOptions {
 /** ACP host for fresh main chat and qualified worker continuity. Loading never grants schedule admission. */
 export class AgyAcpRuntime {
   private client?: AcpTransport;
-  private readonly entries = new Map<string, { input: NativeScheduleInput; emit(event: NativeScheduleEvent): void | Promise<void>; current(): boolean; handle: NativeScheduleHandle; cancelled: boolean }>();
 
   private host?: AgyScheduleHost;
   private chat?: AgyChatHost;
@@ -107,8 +105,7 @@ export class AgyAcpRuntime {
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
   /** Admission to retire our host, never proof that the host has already exited. */
   get canRetireForContextReset(): boolean {
-    return !this.busy && !this.pendingMutation && (!this.retained || this.entries.size > 0
-      && [...this.entries.values()].every(entry => entry.cancelled && entry.handle.retirementConfirmed === true));
+    return !this.busy && !this.pendingMutation && (!this.retained || this.host?.schedules.cancelledBeforeWake === true);
   }
   get running(): boolean { return !!this.client && !this.closed; }
 
@@ -342,27 +339,6 @@ export class AgyAcpRuntime {
     } finally { this.scheduleOperations--; }
   }
   action(id: string) { return this.host?.schedules.action(id); }
-  async create(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void | Promise<void>, current: () => boolean): Promise<NativeScheduleHandle> {
-    if (this.settingsBusy) throw new Error('AGY settings are changing; native scheduling is unavailable.');
-    this.scheduleOperations++;
-    try {
-      await this.start();
-      if (!this.host) throw new Error('Native scheduling is unavailable for loaded sessions and managed workers.');
-      await this.host.qualify();
-      const entry = { input: structuredClone(input), emit, current, handle: undefined as unknown as NativeScheduleHandle, cancelled: false };
-      const actual = await this.host!.create(input, emit, current);
-      entry.handle = actual; this.entries.set(input.id, entry);
-      return {
-        get nativeId() { return entry.handle.nativeId; },
-        get retirementConfirmed() { return entry.handle.retirementConfirmed; },
-        get nativeDefinitionAbsent() { return entry.handle.nativeDefinitionAbsent; },
-        cancellationKeepsRunning: true,
-        list: () => entry.handle.list(),
-        cancel: () => { entry.cancelled = true; return entry.handle.cancel(); },
-        stop: () => entry.handle.stop(),
-      };
-    } finally { this.scheduleOperations--; }
-  }
   isWaitingInput(): boolean { return this.permissions.waiting || !!this.answerQuestion; }
   sendInput(input: string): boolean {
     if (!this.answerQuestion) return this.permissions.input(input);

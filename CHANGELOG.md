@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.267] - 2026-11-19
+
+### Changed
+- Use the CLI timer for new schedule definitions and retain legacy ownership and cleanup records across upgrades.
+- Align schedule help and Feishu refresh feedback with the local task catalog.
+- Block unmanaged native scheduling in both DSH foreground conversations and delegated workers.
+
 ## [1.6.266] - 2026-11-18
 
 ### Changed

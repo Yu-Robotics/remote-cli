@@ -2,7 +2,7 @@ import type { SchedulePurgeResult, SchedulePurgeSelection } from './ScheduleServ
 import type { NativeCleanupReview } from './ReviewedNativeCleanup';
 import { createHash } from 'crypto';
 import { parseScheduleCommand, type ScheduleCommand, validateScheduleId } from './ScheduleCommand';
-import { NATIVE_SCHEDULE_CAPABILITIES } from './ScheduleCapabilities';
+import { HOST_SCHEDULE_CAPABILITIES } from './ScheduleCapabilities';
 import type { ScheduleOwner, ScheduleRecord } from './types';
 
 export type ScheduleOperation = Extract<ScheduleCommand, { kind: 'create' | 'cancel' }> | { kind: 'list' };
@@ -13,7 +13,7 @@ interface Options {
   owner: ScheduleOwner;
   bindingEpoch?: string;
   messageId: string;
-  backend: keyof typeof NATIVE_SCHEDULE_CAPABILITIES;
+  backend: keyof typeof HOST_SCHEDULE_CAPABILITIES;
   current(): boolean;
   run(command: ScheduleOperation, scheduleId: string, allowNativeAction: () => void): Promise<ScheduleRecord[]>;
   reviewCleanup?(id: string): Promise<NativeCleanupReview>;
@@ -94,7 +94,7 @@ export class ScheduleToolScope {
     if (!object(args)) throw new Error('Invalid scheduling arguments.');
     if (name === 'remote_cli_schedule_capabilities') {
       keys(args, []);
-      return { backend: this.options.backend, capability: NATIVE_SCHEDULE_CAPABILITIES[this.options.backend],
+      return { backend: this.options.backend, capability: HOST_SCHEDULE_CAPABILITIES[this.options.backend],
         now: new Date().toISOString(), hostTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
     }
     if (typeof args.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(args.requestId)) throw new Error('A stable requestId is required.');

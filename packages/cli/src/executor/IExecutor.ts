@@ -154,16 +154,10 @@ export interface IExecutor {
   checkHostScheduleSession?(sessionId: string): void;
   /** Exact retained cancellation only; never restores execution or starts a host. */
   nativeScheduleCleanup?: import('../scheduling/types').NativeScheduleCleanup;
-  /** Native timing in the existing foreground conversation; never fork its history. */
-  createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void | Promise<void>, isOwnerCurrent?: () => boolean,
-    canAdmitOccurrence?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
   /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
   withReviewedNativeCleanup?<T>(id: string, current: () => boolean,
     run: (session: NativeCleanupSession) => Promise<T>, inTurn?: boolean): Promise<T>;
   withNativeScheduleOperation?<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T>;
-  /** Reconcile an accepted mutation after its foreground scope retires; never start a new host. */
-  reconcileNativeSchedule?<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T>;
   nativeScheduleAction?(id: string): import('../scheduling/types').NativeScheduleToolAction | undefined;
   /** Register scoped control-tool groups without enabling delegation or changing native timing support. */
   configureManagedTools?(connection?: import('../managed/contract').ManagedToolConnection): Promise<void>;

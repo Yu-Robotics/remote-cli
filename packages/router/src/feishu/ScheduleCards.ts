@@ -187,7 +187,8 @@ export class ScheduleCards {
       }
       state.notice = message.success ? (pending.request.operation === 'cancel'
         ? (menu?.entries.some(entry => entry.id === selectedId && entry.state === 'cancelled' && !entry.canCancel) ? 'Cancellation confirmed by the CLI.'
-          : 'The CLI confirmed the request. Check the current task status below or refresh it.') : 'Status refreshed by the CLI.')
+          : 'The CLI confirmed the request. Check the current task status below or refresh it.')
+        : (menu ? 'Status refreshed from the CLI schedule catalog.' : 'Current catalog status is unavailable. Use /schedule list.'))
         : (pending.request.operation === 'cancel' ? 'Cancellation was not confirmed. Refresh the status or retry cleanup.' : 'Status refresh failed. Try again or use /schedule list.');
       this.changed(state);
       await state.chain;

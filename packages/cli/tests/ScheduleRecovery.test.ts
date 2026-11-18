@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ScheduleService, SCHEDULE_CATALOG_FILE, type ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
-import type { NativeScheduleEvent, NativeScheduleInput, NativeScheduleProvider, ScheduleOwner } from '../src/scheduling/types';
+import type { NativeScheduleInput, ScheduleRecord, ScheduleOwner } from '../src/scheduling/types';
 
 const owner: ScheduleOwner = { threadId: 'thread-a', openId: 'owner-a', generation: 'generation-a' };
 const epoch = Date.parse('2030-01-01T00:00:00Z');
@@ -12,34 +12,32 @@ describe('schedule interruption without restart restoration', () => {
   let directory: string;
   let services: ScheduleService[];
   let current: boolean;
-  let emit: (event: NativeScheduleEvent) => void | Promise<void>;
   let deliver: ReturnType<typeof vi.fn>;
-  let cancel: ReturnType<typeof vi.fn>;
-  let stop: ReturnType<typeof vi.fn>;
   let cancelRetained: ReturnType<typeof vi.fn>;
-  let create: ReturnType<typeof vi.fn>;
-  let list: ReturnType<typeof vi.fn>;
-  let provider: NativeScheduleProvider;
+  let cleanupFor: ScheduleServiceOptions['cleanupFor'];
   const catalog = async () => JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
   const write = (value: unknown) => fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify(value));
   const input = (id = 'job-a'): NativeScheduleInput => ({ id, backend: 'claude', cwd: directory, prompt: 'Synthetic reminder',
     rule: { kind: 'cron', expression: '*/5 * * * *', timezone: 'UTC' } });
   const make = (options: Partial<ScheduleServiceOptions> = {}) => {
-    const service = new ScheduleService({ directory, provider, deliver, now: () => epoch, isOwnerCurrent: () => current, ...options });
+    const service = new ScheduleService({ directory, cleanupFor, deliver, now: () => epoch, isOwnerCurrent: () => current, ...options });
     services.push(service); return service;
   };
-  const start = async () => { const service = make(); await service.initialize(); await service.create(owner, input()); return service; };
+  const row = (id = 'job-a'): ScheduleRecord => ({ ...owner, ...input(id), backend: 'claude', createdAt: epoch,
+    state: 'active', nativeId: 'synthetic-native', recovery: { version: 1, provider: 'fixture', strategy: 'reattach',
+      status: 'blocked', identity: 'original-session' } });
+  const start = async () => {
+    await write({ version: 2, records: [row()], pending: [] });
+    const service = make(); await service.initialize(); return service;
+  };
   const restart = async (service: ScheduleService) => { await service.destroy(); const next = make(); await next.initialize(); return next; };
   beforeEach(async () => {
     directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'schedule-interruption-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
     vi.stubEnv('HOME', directory); vi.stubEnv('USERPROFILE', directory);
     services = []; current = true;
-    deliver = vi.fn(async () => {}); cancel = vi.fn(async () => {}); stop = vi.fn(async () => {});
-    cancelRetained = vi.fn(async () => {}); list = vi.fn(async () => true);
-    create = vi.fn(async (_input, listener) => { emit = listener; return { nativeId: 'synthetic-native', cancel, stop, list }; });
-    provider = { create, cleanupFor: () => ({ provider: 'fixture', strategy: 'reattach',
-      describe: () => 'original-session', cancelRetained }) };
+    deliver = vi.fn(async () => {}); cancelRetained = vi.fn(async () => {});
+    cleanupFor = () => ({ provider: 'fixture', strategy: 'reattach', describe: () => 'original-session', cancelRetained });
   });
   afterEach(async () => {
     await Promise.allSettled(services.map(service => service.destroy()));
@@ -54,8 +52,7 @@ describe('schedule interruption without restart restoration', () => {
     const next = make(); await next.initialize(); await next.retryDeliveries();
     expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', recovery: { status: 'blocked', identity: 'original-session' },
       error: expect.stringContaining('not recreated or resumed') });
-    expect(create).toHaveBeenCalledOnce(); expect(list).not.toHaveBeenCalled();
-    expect(cancel).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled(); expect(cancelRetained).not.toHaveBeenCalled();
+    expect(cancelRetained).not.toHaveBeenCalled();
     expect(next).not.toHaveProperty('recover'); expect(next.canRestartWithoutActiveWork()).toBe(true);
     expect(next.hasActiveSchedules(owner.threadId)).toBe(true);
   });
@@ -68,21 +65,18 @@ describe('schedule interruption without restart restoration', () => {
   });
 
   it.each(['agy', 'dsh'] as const)('keeps %s historical uncertainty out of live quota and management admission', async backend => {
-    provider.cleanupFor = undefined;
-    const first = make(); await first.initialize();
-    for (let i = 0; i < 5; i++) await first.create(owner, { ...input(`old-${i}`), backend });
-    const next = await restart(first);
+    cleanupFor = undefined;
+    await write({ version: 2, records: Array.from({ length: 5 }, (_, i) => ({ ...row(`old-${i}`), backend, recovery: undefined })), pending: [] });
+    const next = make({ hostDispatch: vi.fn() }); await next.initialize();
     expect(next.hasActiveSchedules()).toBe(false);
     expect(next.canCancel(owner, 'old-0')).toBe(false);
     await expect(next.cancel(owner, 'old-0')).rejects.toThrow('unconfirmed');
     expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
-    await next.create({ ...owner, threadId: 'other-thread' }, { ...input('new-job'), backend });
-    expect(create).toHaveBeenCalledTimes(6);
+    await next.create({ ...owner, threadId: 'other-thread' }, { ...input('new-job'), engine: 'host', sessionId: 'session', bindingEpoch: 'binding', backend });
     const result = await next.purge(owner, { ids: ['old-0'] });
     expect(result.historyRemovedIds).toEqual(['old-0']);
     expect(await next.listCleanup(owner)).toMatchObject([{ id: 'old-0', reason: 'native_absence_unknown' }]);
     expect(next.hasActiveSchedules(owner.threadId)).toBe(false);
-    expect(cancel).not.toHaveBeenCalled(); expect(list).not.toHaveBeenCalled();
   });
 
   it.each([1, 2, 3, 4, 5, 6])('preserves version %s history and outbox without executing a job', async version => {
@@ -97,14 +91,13 @@ describe('schedule interruption without restart restoration', () => {
     expect((await catalog()).version).toBe(6);
     expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', prompt: input().prompt, skippedOccurrences: ['skipped'] });
     expect(next.hasPendingResults()).toBe(true); await next.retryDeliveries();
-    expect(deliver).toHaveBeenCalledOnce(); expect(create).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledOnce();
     expect((await catalog()).records[0].completedOccurrences).toEqual(['finished', 'skipped']);
   });
 
   it('does not call native management or write an exit checkpoint during destruction', async () => {
     const first = await start(); const before = await catalog(); await first.destroy();
-    expect(await catalog()).toEqual(before); expect(stop).not.toHaveBeenCalled(); expect(cancel).not.toHaveBeenCalled();
-    await emit({ type: 'started', occurrenceId: 'late' }); await emit({ type: 'completed', occurrenceId: 'late', success: true });
+    expect(await catalog()).toEqual(before);
     expect(await catalog()).toEqual(before); expect(deliver).not.toHaveBeenCalled();
   });
 
@@ -114,7 +107,7 @@ describe('schedule interruption without restart restoration', () => {
     await write(data); let next = make(); await next.initialize();
     expect(next.hasActiveSchedules(owner.threadId)).toBe(true);
     next = await restart(next); expect((await next.list(owner))[0].state).toBe('failed');
-    expect(next.hasActiveSchedules(owner.threadId)).toBe(true); expect(create).toHaveBeenCalledOnce();
+    expect(next.hasActiveSchedules(owner.threadId)).toBe(true);
   });
 
   it('coalesces exact retained cancellation and preserves its receipt across restart', async () => {
@@ -124,7 +117,7 @@ describe('schedule interruption without restart restoration', () => {
     await vi.waitFor(() => expect(cancelRetained).toHaveBeenCalledOnce());
     expect((await catalog()).records[0].cancelRequested).toBe(true); finish(); await Promise.all([first, second]);
     const again = await restart(next); expect((await again.list(owner))[0]).toMatchObject({ state: 'cancelled', cleanupConfirmed: true });
-    expect(again.hasActiveSchedules(owner.threadId)).toBe(false); expect(create).toHaveBeenCalledOnce();
+    expect(again.hasActiveSchedules(owner.threadId)).toBe(false);
   });
 
   it('preserves the interruption receipt when supported retained cleanup refuses deletion', async () => {
@@ -140,19 +133,18 @@ describe('schedule interruption without restart restoration', () => {
     expect(record).toMatchObject({ state: 'interrupted', error: 'Confirmed original process exit',
       cancelRequested: true, recovery: { identity: 'original-session', status: 'blocked' } });
     expect(record.cleanupConfirmed).toBeUndefined();
-    expect(create).toHaveBeenCalledOnce(); expect(cancel).not.toHaveBeenCalled();
   });
 
   it.each(['provider', 'identity', 'unsupported', 'owner'])('does not invent cancellation success with %s uncertainty', async variant => {
     const first = await start(); await first.destroy(); const data = await catalog();
     if (variant === 'provider') data.records[0].recovery.provider = 'different';
     if (variant === 'identity') delete data.records[0].recovery;
-    if (variant === 'unsupported') provider.cleanupFor = undefined;
+    if (variant === 'unsupported') cleanupFor = undefined;
     if (variant === 'owner') cancelRetained.mockImplementation(async () => { current = false; });
     await write(data); const next = make(); await next.initialize();
     await expect(next.cancel(owner, 'job-a')).rejects.toThrow();
     expect((await catalog()).records[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
-    expect((await catalog()).records[0].cleanupConfirmed).toBeUndefined(); expect(create).toHaveBeenCalledOnce();
+    expect((await catalog()).records[0].cleanupConfirmed).toBeUndefined();
   });
 
   it('rejects future catalog versions without rewriting bytes', async () => {

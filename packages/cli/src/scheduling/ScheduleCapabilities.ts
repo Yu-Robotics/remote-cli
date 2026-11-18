@@ -42,8 +42,6 @@ export const HOST_SCHEDULE_CAPABILITIES = {
   },
 } as const satisfies Record<BackendKey, ScheduleCapability>;
 
-export const NATIVE_SCHEDULE_CAPABILITIES = HOST_SCHEDULE_CAPABILITIES;
-
 export function isHostScheduleBackend(value: unknown): value is BackendKey {
   return typeof value === 'string' && Object.hasOwn(HOST_SCHEDULE_CAPABILITIES, value);
 }
@@ -67,8 +65,8 @@ export function assertNativeScheduleBackend(backend: string): asserts backend is
 
 /** Product capabilities are deliberately distinct from an available adapter. */
 export const SCHEDULE_CAPABILITIES = [
-  'Scheduled tasks by backend',
-  ...Object.values(NATIVE_SCHEDULE_CAPABILITIES).map(capability =>
+  'CLI-hosted scheduled tasks by backend',
+  ...Object.values(HOST_SCHEDULE_CAPABILITIES).map(capability =>
     `- ${capability.label}: ${capability.supported ? 'supported (runtime checks required)' : 'temporarily unsupported'}. ${capability.detail}`),
   '',
   'The local CLI keeps new task definitions across restarts. Keep it running when a task is due. Cron uses the specified IANA timezone and skips firings missed while the CLI was offline.',

@@ -1,30 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import { syncDirectory } from '../../delegation/OwnershipRuntime';
 
 /** A refusal marker, never positive recovery evidence. Keep it across cancel, purge and context reset. */
 export class ScheduledSessionGuard {
   constructor(private readonly directory: string, private readonly threadId: string, private readonly catalog?: string) {}
   private filename(sessionId: string): string {
     return path.join(this.directory, `scheduled-${createHash('sha256').update(sessionId).digest('hex')}.fence`);
-  }
-  mark(sessionId: string): void {
-    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const filename = this.filename(sessionId);
-    let fd: number;
-    try { fd = fs.openSync(filename, 'wx', 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      // Any existing marker, even a torn one, is already a permanent refusal.
-      const stat = fs.lstatSync(filename);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe scheduled session marker');
-      // Windows FlushFileBuffers requires write access. Reopen without
-      // truncating the refusal marker or replacing its existing evidence.
-      fd = fs.openSync(filename, 'r+');
-    }
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    syncDirectory(this.directory);
   }
   assertResume(sessionId: string): void {
     try { fs.lstatSync(this.filename(sessionId)); }

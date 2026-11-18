@@ -491,167 +491,8 @@ describe('Claude abort cleanup ownership', () => {
     const start = vi.spyOn(raw, 'startProcess');
     expect((await native.execute('Expired cleanup', { nativeScheduleManagement: true, nativeScheduleCurrent: () => false })).success).toBe(false);
     expect(start).not.toHaveBeenCalled();
-    const cleanup = vi.fn(async () => 'already closed');
-    expect(await native.reconcileNativeSchedule('retired', () => true, cleanup)).toBe('already closed');
-    expect(start).not.toHaveBeenCalled();
   });
 
-  it('refuses cleanup during shutdown, successor work or changed generation without invoking its callback', async () => {
-    const native = executor(), raw = native as any;
-    fakePipe(raw);
-    const run = vi.fn(async () => {});
-    raw.isStopping = true;
-    await expect(native.reconcileNativeSchedule('job', () => true, run)).rejects.toThrow('cleanup is pending');
-    raw.isStopping = false; raw.isProcessing = true;
-    await expect(native.reconcileNativeSchedule('job', () => true, run)).rejects.toThrow('cleanup is pending');
-    raw.isProcessing = false;
-    await expect(native.reconcileNativeSchedule('job', () => false, run)).rejects.toThrow('cleanup is pending');
-    expect(run).not.toHaveBeenCalled();
-  });
-
-  it('late accepted CREATE retains retryable ownership while busy and recovers under a fresh cleanup scope', async () => {
-    const adapter = new ClaudeSessionSchedules({ send: vi.fn(), manage: vi.fn(async () => {
-      adapter.foregroundDispatched('cleanup-message', true); return { success: true }; }),
-      wake: vi.fn(), timezone: 'UTC', timeoutMs: 1000 });
-    adapter.accept({ type: 'system', subtype: 'init', tools: ['CronCreate', 'CronList', 'CronDelete'],
-      capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
-    adapter.foregroundDispatched('synthetic-create-turn');
-    let current = true;
-    const reserved = deferred();
-    const events = vi.fn();
-    let handle: any;
-    const main = executor(), raw = main as any;
-    fakePipe(raw); raw.sessionSchedules = adapter; raw.scheduleHooksReady = true;
-    const f = makeHandler(main);
-    const service = new ScheduleService({ directory: path.join(root, 'catalog'), isOwnerCurrent: () => true,
-      deliver: async () => {}, provider: { create: async (input, emit) => {
-        const promise = adapter.create(input, event => { events(event); emit(event); }, () => true, 'UTC');
-        reserved.resolve(); handle = await promise; return handle;
-      } } });
-    await service.initialize(); f.raw.schedules = service;
-    const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: f.raw.scheduleGeneration('thread') };
-    // A legacy native creation was already admitted before the foreground retired.
-    const creating = main.withNativeScheduleOperation('managed-probe', () => current, () => service.create(owner, {
-      id: 'managed-probe', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
-    }), true);
-    await reserved.promise;
-    const action = adapter.action('managed-probe')!;
-    expect(action.tool).toBe('CronCreate');
-    adapter.accept({ type: 'control_request', request_id: 'synthetic-hook', request: {
-      subtype: 'hook_callback', callback_id: SCHEDULE_HOOK, tool_use_id: 'synthetic-create',
-      input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } });
-    expect((adapter as any).authorized.size).toBe(1);
-    current = false; raw.isProcessing = true;
-    adapter.accept({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'synthetic-create',
-      content: 'Scheduled recurring job native-probe (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).', is_error: false }] } });
-    expect((await creating).nativeId).toBe('native-probe');
-    const cleanup = main.reconcileNativeSchedule('managed-probe', () => true, () => service.cancel(owner, 'managed-probe'));
-    await expect(cleanup).rejects.toThrow('cleanup is pending');
-    await cleanup.catch(error => service.retainCleanupError(owner, 'managed-probe', error));
-    const records = await service.list(owner);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ id: 'managed-probe', nativeId: 'native-probe', state: 'active' });
-    expect(records[0].error).toContain('cleanup is pending');
-    expect(adapter.hasJobs).toBe(true);
-    expect((adapter as any).pending).toBeUndefined();
-    expect(f.ws.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'schedule_tool_card' }));
-    // Prove a fresh owner-bound scope can recover the same handle without recreating the job.
-    raw.isProcessing = false;
-    const recovered = main.reconcileNativeSchedule('cleanup-probe', () => true, () => service.cancel(owner, 'managed-probe'));
-    // Cancellation intent must reach durable storage before native deletion.
-    await vi.waitFor(() => expect((adapter as any).pending).toBeDefined());
-    const deletion = (adapter as any).pending.action;
-    expect(deletion).toEqual({ tool: 'CronDelete', input: { id: 'native-probe' } });
-    adapter.accept({ type: 'control_request', request_id: 'synthetic-delete-hook', request: {
-      subtype: 'hook_callback', callback_id: SCHEDULE_HOOK, tool_use_id: 'synthetic-delete',
-      input: { hook_event_name: 'PreToolUse', tool_name: deletion.tool, tool_input: deletion.input } } });
-    adapter.accept({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'synthetic-delete',
-      content: 'Cancelled job native-probe.', is_error: false }] } });
-    expect((await recovered).state).toBe('cancelled');
-    expect(adapter.hasJobs).toBe(false);
-    expect(handle.nativeId).toBe('native-probe');
-    await service.destroy(); adapter.processClosed(); raw.sessionSchedules = undefined;
-  });
-
-  it.each(['closed', 'successor'] as const)('review: late CREATE persistence after %s preserves confirmed close without a cleanup prompt', async state => {
-    vi.useFakeTimers();
-    const main = executor(), raw = main as any;
-    raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
-    const first = nativePipe(); const startup = raw.startProcess();
-    await vi.advanceTimersByTimeAsync(1000); await startup;
-    const adapter: ClaudeSessionSchedules = raw.schedules(); raw.scheduleHooksReady = true;
-    const frame = (value: object) => raw.handleOutputLine(JSON.stringify(value));
-    frame({ type: 'system', subtype: 'init', session_id: 'synthetic-session',
-      tools: ['CronCreate', 'CronList', 'CronDelete'], capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
-    const foreground = main.execute('Create synthetic reminder').catch(error => error);
-    const f = makeHandler(main), reserved = deferred(), persisting = deferred(), release = deferred();
-    let current = true, handle: any, held = false;
-    const service = new ScheduleService({ directory: path.join(root, 'late-catalog'), isOwnerCurrent: () => true,
-      deliver: async () => {}, provider: { create: async (input, emit) => {
-        const pending = adapter.create(input, emit, () => true, 'UTC'); reserved.resolve();
-        handle = await pending; return handle;
-      } } });
-    await service.initialize(); f.raw.schedules = service;
-    const originalPersist = (service as any).persist.bind(service);
-    vi.spyOn(service as any, 'persist').mockImplementation(async () => {
-      if (handle && !held) { held = true; persisting.resolve(); await release.promise; }
-      await originalPersist();
-    });
-    const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: f.raw.scheduleGeneration('thread') };
-    await Promise.resolve();
-    const creating = main.withNativeScheduleOperation('late-create', () => current, () => service.create(owner, {
-      id: 'late-create', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
-    }), true);
-    await reserved.promise;
-    const action = adapter.action('late-create')!;
-    frame({ type: 'control_request', request_id: 'create-hook', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-      tool_use_id: 'create-tool', input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } });
-    frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'create-tool', is_error: false,
-      content: 'Scheduled recurring job native-late (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).' }] } });
-    await persisting.promise; current = false;
-    expect(await main.abort()).toBe(true); await foreground;
-    expect(adapter.hasJobs).toBe(false);
-    let second: ReturnType<typeof nativePipe> | undefined, successor: Promise<any> | undefined;
-    if (state === 'successor') {
-      second = nativePipe(); successor = main.execute('Successor foreground');
-      await vi.advanceTimersByTimeAsync(1000);
-      // A resumed foreground host must install its ownership guard before chat.
-      const initialize = second.frames.find(row => row.request?.subtype === 'initialize');
-      expect(initialize.request.hooks.UserPromptSubmit).toHaveLength(1);
-      expect(second.frames.some(row => row.type === 'user')).toBe(false);
-      frame({ type: 'control_response', response: { subtype: 'success', request_id: initialize.request_id, response: { models: [] } } });
-      await vi.advanceTimersByTimeAsync(0);
-      const settings = second.frames.find(row => row.request?.subtype === 'get_settings');
-      frame({ type: 'control_response', response: { subtype: 'success', request_id: settings.request_id, response: { effective: { env: {} } } } });
-      await vi.advanceTimersByTimeAsync(0);
-    }
-    release.resolve(); await creating;
-    const cleanup = main.reconcileNativeSchedule('late-create', () => true, () => service.cancel(owner, 'late-create'));
-    await expect(cleanup).rejects.toThrow(state === 'successor' ? 'cleanup is pending' : 'native cleanup is unconfirmed');
-    const records = await service.list(owner);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ nativeId: 'native-late', state: 'interrupted', error: 'Native conversation process exited.' });
-    const runtime = (service as any).runtimes.get('late-create');
-    expect(runtime.handle).toBe(handle); expect(runtime.stopped).toBe(true);
-    expect(first.frames.filter(row => row.type === 'user')).toHaveLength(1);
-    expect(second?.frames.filter(row => row.type === 'user').map(row => row.message.content) ?? []).toEqual(
-      state === 'successor' ? ['Successor foreground'] : []);
-    if (successor) { frame({ type: 'result', is_error: false, result: 'Synthetic successor result' }); await successor; }
-    // Confirmed process exit does not prove definitions or queued reminders
-    // absent. This legacy fixture has no retained cleanup identity/provider.
-    await expect(service.cancel(owner, 'late-create')).rejects.toThrow('native cleanup is unconfirmed');
-    expect((await service.list(owner))[0]).toMatchObject({ nativeId: 'native-late', state: 'interrupted',
-      error: 'Native conversation process exited.', cancelRequested: true });
-    expect((await service.list(owner))[0].cleanupConfirmed).toBeUndefined();
-    expect(handle.nativeDefinitionAbsent).toBe(false);
-    expect(first.frames.filter(row => row.type === 'user')).toHaveLength(1);
-    expect(second?.frames.filter(row => row.type === 'user').map(row => row.message.content) ?? []).toEqual(
-      state === 'successor' ? ['Successor foreground'] : []);
-    expect(spawn).toHaveBeenCalledTimes(state === 'successor' ? 2 : 1);
-    await service.destroy();
-  });
 });
 
 /** Real executor, handler, service and adapter; only the native transport is scripted. */
@@ -700,46 +541,6 @@ async function retainedFixture() {
 describe('Claude retained cancellation integration', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!;
-  it('revokes a scheduled reservation in the real output callback before a successor foreground can invoke it', async () => {
-    const f = await retainedFixture();
-    const initial = f.main.execute('Synthetic creation setup'); await Promise.resolve();
-    const initialId = f.frames.filter(row => row.type === 'user').at(-1).uuid;
-    const created = f.main.withNativeScheduleOperation('create', () => true, () => f.main.createNativeSchedule({
-      id: 'scheduled-job', cwd: root, prompt: 'Synthetic scheduled content',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
-    }, vi.fn()), true);
-    await vi.waitFor(() => expect(f.main.nativeScheduleAction('create')).toBeDefined());
-    const action = f.main.nativeScheduleAction('create')!;
-    f.hook(action, 'create-tool');
-    f.frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'create-tool',
-      content: 'Scheduled recurring job native-owned (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).' }] } });
-    const handle = await created; f.terminal(initialId); await initial;
-    f.frame({ type: 'command_lifecycle', command_uuid: 'scheduled-wake', wakeup_source: 'schedule_wakeup', state: 'started' });
-    f.frame({ type: 'control_request', request_id: 'submit', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: action.input.prompt } } });
-    const pending = f.main.withNativeScheduleOperation('scheduled-cancel', () => true, () => handle.cancel(), true);
-    const failed = expect(pending).rejects.toThrow('no longer current');
-    expect(f.main.nativeScheduleAction('scheduled-cancel')).toEqual({ tool: 'CronDelete', input: { id: 'native-owned' } });
-    f.frame({ type: 'result', uuid: 'scheduled-result', result: 'Synthetic scheduled result' });
-    expect(f.main.nativeScheduleAction('scheduled-cancel')).toBeUndefined();
-    f.frame({ type: 'command_lifecycle', command_uuid: 'scheduled-wake', state: 'completed' });
-    await failed;
-    const next = f.main.execute('Unrelated next foreground'); await Promise.resolve();
-    const nextId = f.frames.filter(row => row.type === 'user').at(-1).uuid;
-    f.hook({ tool: 'CronDelete', input: { id: 'native-owned' } }, 'stale-delete');
-    expect(f.frames.at(-1).response.response).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
-    const review = f.main.withNativeScheduleOperation('fresh', () => true, () => f.raw.schedules().reviewedInventory(() => true), true);
-    f.hook({ tool: 'CronList', input: {} }, 'fresh-list');
-    f.frame({ type: 'user', tool_use_result: { jobs: [] }, message: { content: [
-      { type: 'tool_result', tool_use_id: 'fresh-list', content: 'Synthetic inventory' },
-    ] } });
-    expect(await review).toEqual([]);
-    f.terminal(nextId); await next;
-    expect(f.frames.filter(row => row.type === 'user').map(row => row.message.content)).toEqual([
-      'Synthetic creation setup', 'Unrelated next foreground',
-    ]);
-  });
-
   it.each(['error', 'timeout'] as const)('drains an explicitly requested cleanup review after foreground %s without a native result frame', async reason => {
     const f = await retainedFixture();
     const foreground = f.main.execute('Synthetic inventory request', reason === 'timeout' ? { timeout: 500 } : {})
@@ -833,7 +634,7 @@ describe('Claude retained cancellation integration', () => {
     expect(f.main.hasPendingCancellation()).toBe(true); expect(f.main.isBusy()).toBe(true);
     const h = makeHandler(f.main);
     const service = new ScheduleService({ directory: path.join(root, 'readonly-catalog'), isOwnerCurrent: () => true,
-      provider: { create: async () => { throw new Error('No native creation allowed'); } }, deliver: async () => {} });
+      deliver: async () => {} });
     await service.initialize(); h.raw.schedules = service;
     vi.spyOn(h.raw, 'initializeSchedules').mockResolvedValue(service); h.raw.scheduleManagement.add('thread');
     const nativeManagement = vi.spyOn(f.main, 'withNativeScheduleOperation');
@@ -853,36 +654,6 @@ describe('Claude retained cancellation integration', () => {
     expect(f.child.stdin.end).not.toHaveBeenCalled();
   });
 
-  it('reconciles an error-after-commit CREATE through retained service ownership without new host or replay', async () => {
-    const f = await retainedFixture(), h = makeHandler(f.main);
-    let current = true;
-    const service = new ScheduleService({ directory: path.join(root, 'retained-catalog'), isOwnerCurrent: () => true,
-      deliver: async () => {}, provider: { create: (input, emit) => f.main.createNativeSchedule(input, emit, () => current) } });
-    await service.initialize(); h.raw.schedules = service;
-    const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: h.raw.scheduleGeneration('thread') };
-    const foreground = f.main.execute('Create reminder').catch(error => error); await Promise.resolve();
-    const creating = f.main.withNativeScheduleOperation('mutation-job', () => current, () => service.create(owner, {
-      id: 'mutation-job', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
-    }), true).catch((error: Error) => error);
-    await vi.waitFor(() => expect(f.main.nativeScheduleAction('mutation-job')).toBeDefined());
-    const action = f.main.nativeScheduleAction('mutation-job')!; f.hook(action, 'creation-tool');
-    f.inventory.set('native-owned', String(action.input.prompt));
-    current = false;
-    const abort = f.main.abort(); await Promise.resolve();
-    f.frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'creation-tool', is_error: true, content: 'Synthetic rejected receipt after commit' }] } });
-    expect(await abort).toBe(true); await foreground; expect(await creating).toBeInstanceOf(Error);
-    expect(f.inventory.size).toBe(0); expect(f.child.stdin.end).not.toHaveBeenCalled();
-    const actions = f.frames.filter(row => row.type === 'user' && row.message.content.startsWith('Perform this authorized'))
-      .map(row => JSON.parse(row.message.content.split('\n').at(-1)));
-    expect(actions.map(row => row.tool)).toEqual(['CronList', 'CronDelete', 'CronList']);
-    expect(actions[1].input).toEqual({ id: 'native-owned' });
-    const runtime = (service as any).runtimes.get('mutation-job');
-    expect(runtime.handle).toBeDefined(); expect(runtime.stopped).toBe(true);
-    expect(await service.list(owner)).toHaveLength(1);
-    expect(spawn).not.toHaveBeenCalled(); await service.destroy();
-  });
-
   it('stops only background tasks linked to the captured foreground tool and checks retirement separately', async () => {
     const f = await retainedFixture(); const foreground = f.main.execute('Spawn owned work').catch(error => error);
     await Promise.resolve();
@@ -893,30 +664,6 @@ describe('Claude retained cancellation integration', () => {
     expect(await f.main.abort()).toBe(true); await foreground;
     expect(f.frames.filter(row => row.request?.subtype === 'stop_task').map(row => row.request.task_id)).toEqual(['owned-task']);
   });
-  it('keeps failed cleanup owned and fences settings/new work, then retries inventory without recreating', async () => {
-    vi.useFakeTimers(); const f = await retainedFixture();
-    const foreground = f.main.execute('Create synthetic job').catch(error => error); await Promise.resolve();
-    const creation = f.main.withNativeScheduleOperation('uncertain-job', () => true, () => f.main.createNativeSchedule({
-      id: 'uncertain-job', cwd: root, prompt: 'Synthetic uncertain reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
-    }, vi.fn()), true).catch(error => error);
-    await vi.advanceTimersByTimeAsync(0);
-    const action = f.main.nativeScheduleAction('uncertain-job')!; f.hook(action, 'uncertain-tool');
-    f.inventory.set('native-uncertain', String(action.input.prompt)); f.holdManagement(true);
-    const stopped = f.main.abort(); const failure = expect(stopped).rejects.toThrow('timed out');
-    await vi.advanceTimersByTimeAsync(60001); await failure; await foreground; await creation;
-    expect(f.main.hasPendingCancellation()).toBe(true);
-    expect((await f.main.execute('Must not start')).success).toBe(false);
-    expect((await f.main.configureSandbox('off')).success).toBe(false);
-    await expect(f.main.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] })).rejects.toThrow('busy');
-    const run = vi.fn(); await expect(f.main.reconcileNativeSchedule('uncertain-job', () => true, run)).rejects.toThrow('pending');
-    expect(run).not.toHaveBeenCalled(); expect(f.child.stdin.end).not.toHaveBeenCalled();
-    // Complete the previous management turn; retry must not overlap that still-running native turn.
-    f.terminal(f.frames.filter(row => row.type === 'user').at(-1).uuid, true); f.holdManagement(false);
-    expect(await f.main.abort()).toBe(true); expect(f.inventory.size).toBe(0);
-    expect(f.main.hasPendingCancellation()).toBe(false); expect(spawn).not.toHaveBeenCalled();
-  });
-
   it('does not interrupt a naturally completed turn or an autonomous-only turn', async () => {
     const f = await retainedFixture(); const active = f.main.execute('Natural completion'); await Promise.resolve();
     const id = f.frames.filter(row => row.type === 'user').at(-1).uuid;

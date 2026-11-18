@@ -1,3 +1,4 @@
+import { legacyClaudeJob } from './scheduling/legacyClaudeJob';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
@@ -88,27 +89,13 @@ function completed(id: string) {
   frame({ type: 'result', uuid: `result-${id}`, user_message_uuid: id, user_message_uuids: [id], result: 'Synthetic response', is_error: false });
   frame({ type: 'command_lifecycle', command_uuid: id, state: 'completed' });
 }
-async function reserve() {
-  raw.sessionSchedules.foregroundDispatched('synthetic-create-turn');
-  const events = vi.fn();
-  const pending = executor.withNativeScheduleOperation('synthetic-job', () => true, () => executor.createNativeSchedule({
-    id: 'synthetic-job', cwd: root, prompt: 'Synthetic recurring work',
-    rule: { kind: 'cron', expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
-  }, events), true);
-  await tick();
-  const action = executor.nativeScheduleAction('synthetic-job')!;
-  frame({ type: 'control_request', request_id: 'create-hook', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-    tool_use_id: 'create-tool', input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } });
-  frame({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'create-tool',
-    content: 'Scheduled recurring job native-job (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).', is_error: false }] } });
-  const handle = await pending;
-  raw.sessionSchedules.foregroundEnded();
-  return { handle, action, events };
+function reserve() {
+  return legacyClaudeJob(raw.sessionSchedules, 'synthetic-job', 'native-job');
 }
 function scheduled(job: Awaited<ReturnType<typeof reserve>>, end = true) {
   frame({ type: 'command_lifecycle', command_uuid: 'schedule-occurrence', state: 'started', wakeup_source: 'schedule_wakeup' });
   frame({ type: 'control_request', request_id: 'wake-hook', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-    input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: job.action.input.prompt } } });
+    input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: job.prompt } } });
   if (end) endScheduled();
 }
 function endScheduled() {
@@ -174,7 +161,7 @@ describe('Claude in-process model ownership', () => {
     frame({ type: 'control_request', request_id: 'list-hook', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
       tool_use_id: 'list-tool', input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } });
     frame({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'list-tool',
-      content: `native-job — ${job.action.input.prompt.split('\n')[0]} [session-only]`, is_error: false }] } });
+      content: `native-job — ${job.prompt.split('\n')[0]} [session-only]`, is_error: false }] } });
     completed(management.uuid); expect(await listed).toBe(true);
     expect(spawn).toHaveBeenCalledOnce(); expect(child.stdin.end).not.toHaveBeenCalled();
   });

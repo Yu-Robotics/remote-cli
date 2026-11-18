@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { nativeRule } from '../claude/rules';
 import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError } from '../types';
-import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider, NativeScheduleToolAction } from '../types';
+import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleToolAction } from '../types';
 import { creationReceipt, creationDescription, deletionReceipt, inventoryReceipt, matchesWake, nativeWake, nativeRestartNotice, type TranscriptRecord } from './transcript';
 
 export type HookPayload = Record<string, unknown>;
@@ -35,7 +35,7 @@ export interface AgySessionScheduleOptions {
 /** Session-scoped native provider. Timers only monitor admission/receipt waits, no
  * implicit restart/replay. Hook callbacks must originate from the private relay.
  * Recovery is deliberately absent: native inventory cannot prove queue absence. */
-export class AgySessionSchedules implements NativeScheduleProvider {
+export class AgySessionSchedules {
   private readonly hostId: string;
   private readonly jobs = new Map<string, Job>();
   private operation?: Operation;
@@ -44,6 +44,9 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   private scope?: { id: string; current(): boolean; inTurn: boolean; ended?: boolean };
   get busy(): boolean { return this.boundary !== undefined || !!this.operation; }
   get hasJobs(): boolean { return this.jobs.size > 0; }
+  get cancelledBeforeWake(): boolean {
+    return this.jobs.size > 0 && [...this.jobs.values()].every(job => job.cancelled && (this.exited || job.retiredBeforeWake === true));
+  }
   get pendingMutation(): boolean { return !!this.operation || !!this.scope; }
   // The admitted management scope is not itself an unsettled native receipt.
   // Keep it in pendingMutation for host transitions, but allow its own purge.

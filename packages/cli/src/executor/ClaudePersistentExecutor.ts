@@ -2,8 +2,8 @@ import type { NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import { NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from '../scheduling/types';
-import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleCleanup } from '../scheduling/types';
+import { NativeScheduleNotAdmittedError } from '../scheduling/types';
+import type { NativeScheduleCleanup } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
@@ -607,22 +607,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     };
   }
 
-  private ownedScheduleHandle(handle: NativeScheduleHandle, input: NativeScheduleInput): NativeScheduleHandle {
-    if (!input.recovery) return handle;
-    // describe() runs before creation reserves ownership. Capture the actual
-    // admitted incarnation here, never a later host's token in the getter.
-    const identity = { ...JSON.parse(input.recovery.identity), ownerToken: this.scheduleHostOwnership().ownerToken };
-    const executor = this;
-    return { ...handle,
-      get nativeId() { return handle.nativeId; },
-      get nativeDefinitionAbsent() { return handle.nativeDefinitionAbsent; },
-      get cleanupIdentity() { return JSON.stringify({ ...identity, sessionId: executor.sessionId,
-        model: executor.model, effort: executor.effort,
-        effectiveModel: executor.acknowledgedModel || executor.reportedModel || executor.model }); },
-
-    };
-  }
-
   private sessionSchedules?: ClaudeSessionSchedules;
   private scheduleHooksReady = false;
   private scheduleGuardRequired = false;
@@ -695,42 +679,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return adapter.inToolOperation(id, () => current() && invocation() && this.claudeProcess === child
       && !this.isDestroyed && !this.isStopping && !this.abortOperation, run, inTurn);
   }
-  async reconcileNativeSchedule<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T> {
-    if (!current() || this.isDestroyed || this.hasUncertainShutdown() || this.abortOperation
-      || this.isBusy() || this.scheduleCleanupHost) {
-      throw new Error(`Schedule ${id} cleanup is pending; retry explicit cancellation when the native session is idle.`);
-    }
-    // A confirmed close already retired the old handle. Never initialize a replacement host here.
-    if (!this.claudeProcess) return run();
-    if (!this.sessionSchedules || !this.scheduleHooksReady) throw new Error('Native cleanup ownership is unavailable.');
-    const child = this.claudeProcess;
-    this.scheduleCleanupHost = child;
-    try {
-      return await this.sessionSchedules.inToolOperation(id,
-        () => current() && this.claudeProcess === child && !this.isStopping && !this.abortOperation, run, false);
-    } finally { this.scheduleCleanupHost = undefined; }
-  }
-
   nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
-  async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean,
-    canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
-    let timezone: string;
-    try {
-      if (this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
-        || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
-      if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
-      this.schedules().assertCreationCapability();
-      timezone = await this.readNativeScheduleTimezone();
-      if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
-      if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude schedule ownership protocol is unsupported.');
-      if (input.recovery) this.scheduleHostOwnership().reserveForNewJob(this.claudeProcess!.pid!, this.claudeCommand);
-    } catch (error) {
-      // No adapter admission or native schedule mutation has started here.
-      throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule preflight refused admission.');
-    }
-    return this.ownedScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, canAdmitOccurrence), input);
-  }
-
   private async readNativeScheduleTimezone(): Promise<string> {
     const timezone = await this.readScheduleHookPolicy() ?? this.nativeScheduleTimezone;
     if (typeof timezone === 'string' && timezone.length <= 128 && timezone) {

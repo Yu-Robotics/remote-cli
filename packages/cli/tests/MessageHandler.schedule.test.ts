@@ -1,33 +1,18 @@
-import { agyScheduleHarness } from './scheduling/SyntheticAgyScheduleHost';
 import { ScheduleCards } from '../../router/src/feishu/ScheduleCards';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/promises';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { DshExecutor } from '../src/executor/DshExecutor';
-import { Host } from './scheduling/SyntheticDshScheduleHost';
 import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import type { Thread } from '../src/thread/types';
-import type { NativeScheduleEvent, NativeScheduleInput } from '../src/scheduling/types';
-import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError } from '../src/scheduling/types';
-import { parseScheduleCommand } from '../src/scheduling/ScheduleCommand';
-import { randomUUID } from 'crypto';
 import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
 
 const backends = ['claude', 'dsh', 'agy', 'codex', 'kimi', 'opencode', 'pi', 'zcode'] as const;
 const binding = { deviceId: 'fixture-device', openId: 'owner', epoch: 'original-binding' };
-
-const native = vi.hoisted(() => ({ create: vi.fn(), createDsh: vi.fn() }));
-vi.mock('../src/scheduling/ClaudeNativeScheduleProvider', () => ({
-  ClaudeNativeScheduleProvider: class { create = native.create; },
-}));
-vi.mock('../src/scheduling/DshNativeScheduleProvider', () => ({
-  DshNativeScheduleProvider: class { create = native.createDsh; },
-}));
 
 async function fixture() {
   const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), 'schedule-handler-')));
@@ -40,12 +25,11 @@ async function fixture() {
   let connected = true;
   let executorBusy = false;
   const busyThreads = new Set<string>();
-  const executor = { getSessionId: vi.fn((): string | null => 'bound'), checkHostScheduleSession: vi.fn((_id: string) => {}), createNativeSchedule: vi.fn((input: any, emit: any, _owner?: () => boolean, _admit?: () => boolean) => (input.backend === 'dsh' ? native.createDsh : native.create)(input, emit)),
+  const executor = { getSessionId: vi.fn((): string | null => 'bound'), checkHostScheduleSession: vi.fn((_id: string) => {}),
     withNativeScheduleOperation: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>, _inTurn?: boolean) => {
       if (!current()) throw new Error('Stale scheduling operation');
       return run();
     }), configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async (_prompt: string, _options: import('../src/executor/IExecutor').ExecuteOptions) => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
-    reconcileNativeSchedule: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>) => { if (!current()) throw new Error('Cleanup owner retired'); return run(); }),
     abort: vi.fn(async () => true), destroy: vi.fn(), isBusy: () => executorBusy, resetContext: vi.fn(),
     getSandboxStatus: () => 'Unrestricted', configureSandbox: vi.fn(async () => ({ success: true })) };
   const pool = {
@@ -84,16 +68,6 @@ async function fixture() {
     dsh: { command: 'dsh-fixture', model: 'profile-default' } }
     : key === 'serverUrl' ? 'ws://localhost:9999' : key === 'deviceId' ? 'fixture-device' : undefined,
   getConfigDir: () => path.join(cwd, 'config'), getAll: () => ({ executor: { type: backend } }) };
-  const makeHandle = (nativeId: string) => ({ nativeId, list: vi.fn(async () => true),
-    cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) });
-  const jobs: Array<{ input: NativeScheduleInput; emit: (event: NativeScheduleEvent) => void;
-    handle: ReturnType<typeof makeHandle> }> = [];
-  const create = async (input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void) => {
-    const handle = makeHandle(`native-${jobs.length}`);
-    jobs.push({ input, emit, handle }); return handle;
-  };
-  native.create.mockImplementation(create);
-  native.createDsh.mockImplementation(create);
   const makeHandler = () => new MessageHandler(ws as any, pool as any, manager as any, new DirectoryGuard([cwd]), config as any);
   let handler = makeHandler();
   let sequence = 0;
@@ -105,7 +79,7 @@ async function fixture() {
     scheduleBinding, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true, taskRecovery: true,
       ...(cards ? { scheduleCardsV1: true } : {}), ...(tools ? { scheduleToolCardsV1: true } : {}) } } } as any);
   const responses = () => ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'response');
-  return { cwd, threads, get handler() { return handler; }, pool, manager, ws, jobs, send, bind, responses, executor, config,
+  return { cwd, threads, get handler() { return handler; }, pool, manager, ws, send, bind, responses, executor, config,
     acknowledgements, closeHandlers,
     restart: async () => { await handler.destroy(); handler = makeHandler(); scheduledMessages.clear(); ws.send.mockClear(); },
     setBackend: (value: string) => { backend = value; }, setSandbox: (value: { mode: string }) => { sandbox = value; },
@@ -116,11 +90,9 @@ async function fixture() {
   };
 }
 
-describe('MessageHandler native schedule closed loop', () => {
+describe('MessageHandler schedule management and delivery', () => {
   let f: Awaited<ReturnType<typeof fixture>>;
   beforeEach(async () => {
-    native.create.mockReset();
-    native.createDsh.mockReset();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -167,14 +139,13 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.manager.contextResets.isPending('thread-a')).toBe(false);
   });
 
-  it('leaves host definitions intact when live native schedules block clear', async () => {
+  it('leaves host definitions intact when retained native cleanup blocks clear', async () => {
+    await history(); installRetainedCleanup();
     await f.bind(); await f.send('/schedule after 5m -- Retain with native sibling');
-    await seedLegacy('/schedule after 4m -- Legacy sibling');
     await f.send('/clear');
     expect(f.responses().at(-1).error).toMatch(/native schedules/);
     expect(await records()).toHaveLength(2);
     expect(f.pool.clearThreadContext).not.toHaveBeenCalled();
-    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
   });
 
   it('lets an authenticated clear stop an admitted host turn and discards its late result', async () => {
@@ -199,18 +170,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.scheduledResults()).toEqual([]);
   });
 
-  // Seed a legacy native runtime only for tests of its remaining management and cleanup paths.
-  async function seedLegacy(command: string) {
-    const parsed = parseScheduleCommand(command);
-    if (parsed?.kind !== 'create') throw new Error('Expected a legacy schedule fixture.');
-    const service: ScheduleService = await (f.handler as any).initializeSchedules();
-    const backend = f.pool.getBackendKey() as 'claude' | 'agy' | 'dsh';
-    const id = randomUUID();
-    const record = await f.executor.withNativeScheduleOperation(id, () => true, () =>
-      service.create(owner(), { id, threadId: 'thread-a', backend, cwd: f.cwd, rule: parsed.rule, prompt: parsed.prompt }));
-    return (f.handler as any).scheduleCards.open(owner(), [record]);
-  }
-
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
 
@@ -223,9 +182,8 @@ describe('MessageHandler native schedule closed loop', () => {
     return { record, dispatch, deliver: () => service.options.deliver({ schedule: record, id: 'host-task:run', occurrenceId: 'run', success: true, output: 'Synthetic result' }) };
   }
 
-  it('allows cancellation while host admission is pending, even alongside a live native sibling', async () => {
-    await f.bind();
-    await seedLegacy('/schedule after 4m -- Legacy sibling');
+  it('allows cancellation while host admission is pending, alongside retained native history', async () => {
+    await history(); installRetainedCleanup();
     const { record, dispatch } = await dispatchFixture();
     const service = (f.handler as any).schedules;
     const siblings = await records();
@@ -240,7 +198,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(result).toMatchObject({ success: false, error: expect.stringContaining('cancelled') });
     expect(f.executor.execute).not.toHaveBeenCalled();
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
   });
 
   it('routes approvals to the occurrence owner and expires outstanding requests at completion', async () => {
@@ -414,161 +371,37 @@ describe('MessageHandler native schedule closed loop', () => {
   });
 
   it.each(['claude', 'agy', 'dsh'])('reads the stored %s catalog through text and model tools', async backend => {
-    f.setBackend(backend); await f.bind();
-    const service = await (f.handler as any).initializeSchedules() as ScheduleService;
-    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-    let admit: (() => boolean) | undefined;
-    const create = f.executor.createNativeSchedule.getMockImplementation()!;
-    f.executor.createNativeSchedule.mockImplementationOnce((input, emit, current, canAdmit) => {
-      admit = canAdmit; return create(input, emit, current, canAdmit);
-    });
-    await service.create(owner, { id: 'read-only-task', backend: backend as 'claude' | 'agy' | 'dsh', cwd: f.cwd,
-      prompt: 'Synthetic waiting task', rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
-    const job = f.jobs[0];
-    job.handle.list.mockRejectedValue(new Error('Synthetic native inventory timeout'));
-    expect(admit?.()).toBe(true);
+    f.setBackend(backend); await history(1, false); await f.bind();
     await f.send('/schedule list');
-    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('read-only-task') });
-    expect((await service.list(owner))[0]).toMatchObject({ state: 'active' });
-    expect(admit?.()).toBe(true);
-    let listed: any;
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('historical-0') });
     f.executor.execute.mockImplementationOnce(async () => {
-      listed = await invoke('remote_cli_schedule_list', { requestId: 'read-only-list' });
+      const listed = await invoke('remote_cli_schedule_list', { requestId: 'read-only-list' });
+      expect(listed).toMatchObject({ status: 'succeeded', records: [{ id: 'historical-0', state: 'interrupted' }] });
       return { success: true };
     });
-    await f.send('List the synthetic waiting task', 'thread-a', { isSlashCommand: false });
-    expect(listed).toMatchObject({ status: 'succeeded', records: [{ id: 'read-only-task', state: 'active' }] });
-    expect((await service.list(owner))[0]).toMatchObject({ state: 'active' });
-    expect(listed.nativeAction).toBeUndefined();
-    expect(admit?.()).toBe(true);
-    expect(job.handle.cancel).not.toHaveBeenCalled(); expect(job.handle.stop).not.toHaveBeenCalled();
-    expect(job.handle.list).not.toHaveBeenCalled();
-
-    await service.recordReviewedCleanup(owner, ['read-only-task'], false);
-    job.handle.list.mockClear();
-    await f.send('/schedule list');
-    expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
-    expect(job.handle.list).not.toHaveBeenCalled();
-    expect(job.handle.cancel).not.toHaveBeenCalled(); expect(job.handle.stop).not.toHaveBeenCalled();
+    await f.send('List the historical schedule', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('awaits AGY native occurrence persistence through the production dispatcher (failure=%s)', async fail => {
-    f.setBackend('agy');
-    const service = await (f.handler as any).initializeSchedules() as ScheduleService;
+  function installRetainedCleanup() {
+    const cancelRetained = vi.fn(async () => {});
+    Object.assign(f.executor, { nativeScheduleCleanup: { provider: 'claude-session-skip-unadmitted-v1',
+      strategy: 'reconstruct', cancelRetained } });
+    return cancelRetained;
+  }
+
+  async function history(count = 1, attributed = true, output?: string) {
     const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-    await service.create(owner, { id: 'agy-occurrence', backend: 'agy', cwd: f.cwd, prompt: 'Synthetic task',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
-    const job = f.jobs[0];
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let entered!: () => void;
-    const persisting = new Promise<void>(resolve => { entered = resolve; });
-    const persist = (service as any).persist.bind(service);
-    const failure = new Error('Synthetic catalog persistence failure');
-    const persistence = vi.spyOn(service as any, 'persist').mockImplementationOnce(async () => {
-      entered(); await gate;
-      if (fail) throw failure;
-      return persist();
-    });
-    try {
-      const pending = (job.emit as (event: NativeScheduleEvent) => Promise<void>)({
-        type: 'started', occurrenceId: 'synthetic-occurrence',
-      });
-      expect(pending).toBeInstanceOf(Promise);
-      let finished = false;
-      const observed = pending.then(() => { finished = true; }, error => { finished = true; return error; });
-      await persisting;
-      expect(finished).toBe(false);
-      const catalogFile = path.join((service as any).options.directory, SCHEDULE_CATALOG_FILE);
-      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].state).toBe('active');
-      release();
-      expect(await observed).toBe(fail ? failure : undefined);
-      expect(JSON.parse(await readFile(catalogFile, 'utf8')).records[0].state).toBe(fail ? 'active' : 'running');
-    } finally {
-      release(); persistence.mockRestore();
-      if (fail) {
-        await expect(service.destroy()).resolves.toBeUndefined();
-        // A fault deliberately retains the production catalog gate. Release only
-        // this synthetic fixture's gate after verifying failed shutdown.
-        (service as any).catalogGate?.close();
-        vi.spyOn(service, 'destroy').mockResolvedValue();
-      }
-    }
-  });
-
-  it.each(['backend', 'unsupported-executor'])(
-    'compacts a %s refusal before executor creation and fences it after reload', async reason => {
-      const service = await (f.handler as any).initializeSchedules() as ScheduleService;
-      const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-      const create = f.executor.createNativeSchedule;
-      if (reason === 'backend') f.setBackend('dsh');
-      else Object.assign(f.executor, { createNativeSchedule: undefined });
-      await expect(service.create(owner, { id: 'preflight-refused', backend: 'claude', cwd: f.cwd, prompt: 'Synthetic task',
-        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
-      expect(create).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
-      expect(await service.list(owner)).toEqual([]);
-      f.setBackend('claude'); Object.assign(f.executor, { createNativeSchedule: create });
-      await f.restart();
-      const restored = await (f.handler as any).initializeSchedules() as ScheduleService;
-      expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
-        removedIds: [], alreadyRemovedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
-      });
-      expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
-        alreadyRemovedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
-      });
-      expect(await restored.listCleanup(owner)).toEqual([]); expect(create).not.toHaveBeenCalled();
-    });
-
-  it.each(['thread', 'backend', 'executor-lookup'])(
-    'propagates a provider %s guard failure without invoking native creation or admission', async reason => {
-      const service = await (f.handler as any).initializeSchedules();
-      const value = { id: 'guarded', backend: 'claude', threadId: 'thread-a', cwd: f.cwd, prompt: 'Synthetic task',
-        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
-      if (reason === 'thread') value.threadId = '';
-      if (reason === 'backend') value.backend = 'unsupported-fixture';
-      if (reason === 'executor-lookup') vi.spyOn(f.pool, 'getExecutor').mockImplementation(() => { throw new Error('Synthetic lookup refusal'); });
-      const admit = vi.fn(() => true); const events = vi.fn();
-      expect(() => service.options.provider.create(value, events, admit)).toThrow(NativeScheduleNotAdmittedError);
-      expect(f.executor.createNativeSchedule).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
-      expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled();
-    });
-
-  it('keeps an ordinary error after executor dispatch uncertain despite missing native metadata', async () => {
-    const service = await (f.handler as any).initializeSchedules() as ScheduleService;
-    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-    const failure = new Error('Synthetic error after native dispatch without a receipt');
-    f.executor.createNativeSchedule.mockRejectedValueOnce(failure);
-    await expect(service.create(owner, { id: 'uncertain', cwd: f.cwd, prompt: 'Synthetic task',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBe(failure);
-    expect(f.executor.createNativeSchedule).toHaveBeenCalledOnce();
-    expect((await service.list(owner))[0].creationRefused).toBeUndefined();
-    expect(await service.purge(owner, { ids: ['uncertain'] })).toMatchObject({
-      removedIds: ['uncertain'], nativeCleanupUnresolved: [{ id: 'uncertain', reason: 'unattributed' }],
-    });
-    expect(await service.listCleanup(owner)).toHaveLength(1);
-  });
-
-  it('forwards the exact cleanup handle when executor creation may have mutated native state', async () => {
-    const service = await (f.handler as any).initializeSchedules();
-    const handle = { nativeId: 'unconfirmed-synthetic', list: vi.fn(), cancel: vi.fn(), stop: vi.fn() };
-    const failure = new NativeScheduleCleanupError('Synthetic native mutation without a receipt', handle);
-    f.executor.createNativeSchedule.mockRejectedValueOnce(failure);
-    await expect(service.options.provider.create({ id: 'uncertain', threadId: 'thread-a', backend: 'claude', cwd: f.cwd,
-      prompt: 'Synthetic task', rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn())).rejects.toBe(failure);
-    expect(failure.handle).toBe(handle); expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
-    expect(f.executor.createNativeSchedule).toHaveBeenCalledOnce();
-  });
-
-  async function history(count = 1, attributed = true) {
-    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
-    const records = Array.from({ length: count }, (_, index) => ({ ...owner, id: `historical-${index}`, backend: 'claude',
-      cwd: f.cwd, state: 'interrupted', nativeId: `native-${index}`, prompt: 'Synthetic historical task', createdAt: Date.now(),
+    const records = Array.from({ length: count }, (_, index) => ({ ...owner, id: `historical-${index}`, backend: f.pool.getBackendKey(),
+      cwd: f.cwd, state: output ? 'completed' : 'interrupted', nativeId: `native-${index}`, prompt: 'Synthetic historical task', createdAt: Date.now(),
       rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
       ...(attributed ? { recovery: { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', status: 'blocked',
         identity: JSON.stringify({ marker: '11111111-1111-4111-8111-111111111111', sessionId: 'bound', threadId: owner.threadId, cwd: f.cwd }) } } : {}) }));
     const directory = (f.handler as any).scheduleDirectory();
     await mkdir(directory, { recursive: true });
-    await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records, pending: [], purged: [] }));
+    await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records, purged: [], pending: output
+      ? [{ id: 'historical-0:done', scheduleId: 'historical-0', occurrenceId: 'done', success: true, output }] : [] }));
     return { owner, records, directory };
   }
 
@@ -587,7 +420,7 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(catalog.cleanup.map((entry: any) => entry.id)).toEqual(['historical-1']);
     expect(catalog.purged.map((entry: any) => entry.id)).toEqual(['historical-0', 'historical-1']);
     expect(review).not.toHaveBeenCalled(); expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-    expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
+
     await f.restart(); await f.bind(); await f.send('/schedule list');
     expect(f.responses().at(-1).output).toContain('historical-1');
     expect(f.responses().at(-1).output).not.toContain('historical-0');
@@ -664,7 +497,7 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/schedule purge all');
     expect(f.responses().at(-1).output).toContain('Already removed: historical-0');
     expect(JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8')).records).toEqual([]);
-    expect(cleanup).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
+    expect(cleanup).not.toHaveBeenCalled();
   });
 
   it.each(['predecessor', 'session', 'stale', 'present', 'timeout'])('keeps cleanup tracking for %s uncertainty in the production purge command', async reason => {
@@ -684,7 +517,7 @@ describe('MessageHandler native schedule closed loop', () => {
     } else {
       expect(catalog.records).toEqual([]); expect(catalog.cleanup).toHaveLength(1); expect(catalog.purged).toHaveLength(1);
     }
-    expect(native.create).not.toHaveBeenCalled();
+
     if (reason !== 'stale') expect(f.responses().at(-1).success).toBe(false);
   });
 
@@ -704,16 +537,15 @@ describe('MessageHandler native schedule closed loop', () => {
     const { directory } = await history(1, false);
     await f.bind();
     await f.send('/schedule purge all', 'thread-a', { messageId: 'fixed-purge-request' });
-    await seedLegacy('/schedule after 5m -- Synthetic later sibling');
-    const sibling = f.jobs[0];
+    await f.send('/schedule after 5m -- Synthetic later sibling');
+    const [sibling] = await records();
     await f.restart(); await f.bind();
     await f.send('/schedule purge all', 'thread-a', { messageId: 'fixed-purge-request' });
     const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
-    expect(catalog.records.map((record: any) => record.id)).toEqual([sibling.input.id]);
-    expect(catalog.records[0].cancelRequested).not.toBe(true);
-    expect(catalog.purgeRequests).toHaveLength(1); expect(sibling.handle.cancel).not.toHaveBeenCalled();
+    expect(await records()).toMatchObject([{ id: sibling.id, state: 'active' }]);
+    expect(catalog.purgeRequests).toHaveLength(1);
     expect(f.responses().at(-1).output).toContain('Already removed: historical-0');
-    await f.send(`/schedule purge ${sibling.input.id}`, 'thread-a', { messageId: 'fixed-purge-request' });
+    await f.send(`/schedule purge ${sibling.id}`, 'thread-a', { messageId: 'fixed-purge-request' });
     expect(f.responses().at(-1).error).toContain('different selection');
   });
 
@@ -737,7 +569,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(catalog.cleanup.every((item: any) => item.generation === originalGeneration)).toBe(true);
     await f.send('/schedule purge historical-0', 'thread-a', { openId: 'another-owner' });
     expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('device binding') });
-    expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
   });
 
   it('allows reset without losing attributed DSH cleanup when no supported session cleanup route exists', async () => {
@@ -800,7 +631,6 @@ describe('MessageHandler native schedule closed loop', () => {
     stored = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
     expect(stored.cleanup ?? []).toEqual([]); expect(stored.purged).toHaveLength(1);
     await f.send('/schedule purge historical-0'); expect(remove).toHaveBeenCalledOnce();
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('keeps a model purge correlated to its pending native action and stable retry receipt', async () => {
@@ -864,27 +694,11 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/schedule purge legacy-attributed');
     expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Removed history: legacy-attributed.') });
     expect(rows.map(row => row.id)).toEqual(['native-sibling']);
-    expect(native.create).not.toHaveBeenCalled();
+
     await f.restart(); await f.bind(); await f.send('/schedule list');
     expect(f.responses().at(-1).output).toContain('No schedules');
     await f.send('/schedule purge legacy-attributed');
     expect(f.responses().at(-1).output).toContain('Already removed: legacy-attributed.');
-  });
-
-  it.each(['claude', 'dsh'])('purges selected %s history through the text command and preserves siblings', async backend => {
-    f.setBackend(backend); await f.bind(true, true);
-    await seedLegacy('/schedule after 5m -- Synthetic selected task');
-    await seedLegacy('/schedule after 6m -- Synthetic sibling task');
-    const selected = f.jobs[0].input.id, sibling = f.jobs[1].input.id;
-    await f.send(`/schedule purge ${selected}`);
-    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining(`Removed history: ${selected}`) });
-    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
-    expect(f.jobs[1].handle.cancel).not.toHaveBeenCalled();
-    const stored = JSON.parse(await readFile(path.join((f.handler as any).scheduleDirectory(), SCHEDULE_CATALOG_FILE), 'utf8'));
-    expect(stored.records.map((record: any) => record.id)).toEqual([sibling]);
-    await f.send(`/schedule purge ${selected}`);
-    expect(f.responses().at(-1).output).toContain(`Already removed: ${selected}`);
-    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
   });
 
   it('allows model-reviewed native deletion without a manually typed confirmation and preserves unselected tasks', async () => {
@@ -907,113 +721,6 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('Delete the selected synthetic native task', 'thread-a', { isSlashCommand: false });
     expect(f.responses().at(-1).success).toBe(true);
     expect(rows.map(row => row.id)).toEqual(['sibling-native']);
-  });
-
-  it('rejects purge if model settings change before native cleanup admission', async () => {
-    await f.bind(); await seedLegacy('/schedule after 5m -- Synthetic purge task');
-    f.executor.withNativeScheduleOperation.mockImplementationOnce(async (_id, current, run) => {
-      f.threads[0].models = { claude: 'changed-model' };
-      expect(current()).toBe(false);
-      return run();
-    });
-    await f.send(`/schedule purge ${f.jobs[0].input.id}`);
-    expect(f.responses().at(-1).success).toBe(false);
-    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
-  });
-
-  it('routes model purge through native admission and removes history without user confirmation', async () => {
-    await f.bind(true, true);
-    await seedLegacy('/schedule after 5m -- Synthetic purge task');
-    const selected = f.jobs[0].input.id;
-    f.executor.execute.mockImplementation(async () => {
-      const result: any = await invoke('remote_cli_schedule_purge', { requestId: 'purge-direct', scheduleIds: [selected] });
-      expect(result).toMatchObject({ status: 'succeeded', purge: { removedIds: [selected], pending: [], errors: [] } });
-      expect(await invoke('remote_cli_schedule_purge', { requestId: 'purge-direct', scheduleIds: [selected] })).toEqual(result);
-      return { success: true };
-    });
-    await f.send('Purge the selected synthetic schedule', 'thread-a', { isSlashCommand: false });
-    expect(f.responses().at(-1).success).toBe(true);
-    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
-  });
-
-  it('purges AGY through real in-turn native receipts, retains retirement evidence and isolates siblings', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:05Z'));
-    f.setBackend('agy'); await f.bind();
-    const h = agyScheduleHarness(f.cwd);
-    await h.bridge.qualify();
-    f.executor.createNativeSchedule.mockImplementation((input, emit, _current, admit) => h.bridge.create(input, emit, admit));
-    f.executor.withNativeScheduleOperation.mockImplementation((id, current, run, inTurn) => h.bridge.withOperation(id, current, run, !!inTurn));
-    Object.assign(f.executor, { nativeScheduleAction: (id: string) => h.bridge.action(id),
-      hasPendingScheduleMutation: () => h.bridge.cleanupMutationPending });
-    const raw = f.handler as any;
-    const service = await raw.initializeSchedules() as ScheduleService;
-    const owner = { threadId: 'thread-a', openId: 'owner', generation: raw.scheduleGeneration('thread-a') };
-    await seedLegacy('/schedule cron "* * * * *" --tz UTC -- Synthetic reminder');
-    await seedLegacy('/schedule cron "* * * * *" --tz UTC -- Synthetic sibling');
-    const [selected, sibling] = await service.list(owner);
-    expect(h.tasks.size).toBe(2);
-    const scope = raw.scheduleToolOperations.scope.bind(raw.scheduleToolOperations);
-    vi.spyOn(raw.scheduleToolOperations, 'scope').mockImplementation((options: any) => scope({ ...options, waitMs: 10 }));
-    const actions: any[] = [];
-    try {
-      f.executor.execute.mockImplementationOnce(async () => {
-        h.bridge.beginForeground(); h.begin(); f.setExecutorBusy(true);
-        try {
-          expect(h.tool({ tool: 'remote_cli_schedule_purge', input: { requestId: 'agy-purge', scheduleIds: [selected.id] } }).decision).toEqual({ decision: 'allow' });
-          let result: any = await invoke('remote_cli_schedule_purge', { requestId: 'agy-purge', scheduleIds: [selected.id] });
-          for (let attempts = 0; result.status === 'pending' && attempts < 100; attempts++) {
-            if (result.nativeAction) { actions.push(result.nativeAction); h.respond(result.nativeAction); }
-            result = await invoke('remote_cli_schedule_operation', { requestId: 'agy-purge' });
-          }
-          // Native deletion is confirmed, but the running foreground is not an exit proof.
-          expect(result).toMatchObject({ status: 'succeeded', purge: { removedIds: [], errors: [],
-            pending: [{ id: selected.id, reason: 'operation_pending' }] } });
-          expect(h.tasks.has(selected.nativeId!)).toBe(false); expect(h.tasks.has(sibling.nativeId!)).toBe(true);
-          expect(await invoke('remote_cli_schedule_purge', { requestId: 'agy-purge', scheduleIds: [selected.id] })).toEqual(result);
-          expect(h.bridge.cleanupMutationPending).toBe(false);
-        } finally { h.stop(); h.bridge.endForeground(); f.setExecutorBusy(false); }
-        return { success: true };
-      });
-      await f.send('Purge the selected synthetic AGY schedule', 'thread-a', { isSlashCommand: false });
-      expect(f.responses().at(-1)).toMatchObject({ success: true });
-      expect(actions.map(action => action.input.Action)).toEqual(['list', 'kill', 'list']);
-      expect(actions.find(action => action.input.Action === 'kill').input.TaskId).toBe(selected.nativeId);
-      expect(service.needsNativePurge(owner, selected.id)).toBe(true);
-      expect(service.canCancel(owner, selected.id)).toBe(false);
-      // The same selected job still needs admission although its cancel card is hidden.
-      f.executor.withNativeScheduleOperation.mockClear();
-      await f.send('/schedule purge ' + selected.id);
-      expect((await service.list(owner)).map(record => record.id)).toEqual([sibling.id]);
-      expect(f.executor.withNativeScheduleOperation).toHaveBeenCalledOnce();
-      expect(h.tasks.has(sibling.nativeId!)).toBe(true);
-      f.executor.withNativeScheduleOperation.mockClear();
-      await f.send('/schedule purge ' + selected.id);
-      expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-      await f.send('/schedule purge ' + selected.id + ' --forget-unresolved');
-      expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-    } finally { h.bridge.endForeground(); h.bridge.processClosed(true); }
-  });
-
-  it.each(['stale-context', 'unknown-host'] as const)('refuses AGY purge admission for %s without cancellation intent', async fault => {
-    f.setBackend('agy'); await f.bind();
-    const h = agyScheduleHarness(f.cwd); await h.bridge.qualify();
-    f.executor.createNativeSchedule.mockImplementation((input, emit, _current, admit) => h.bridge.create(input, emit, admit));
-    f.executor.withNativeScheduleOperation.mockImplementation((id, current, run, inTurn) => h.bridge.withOperation(id, current, run, !!inTurn));
-    await seedLegacy('/schedule cron "* * * * *" --tz UTC -- Synthetic reminder');
-    const raw = f.handler as any, service = raw.schedules as ScheduleService;
-    const owner = { threadId: 'thread-a', openId: 'owner', generation: raw.scheduleGeneration('thread-a') };
-    const [selected] = await service.list(owner);
-    try {
-      f.executor.withNativeScheduleOperation.mockImplementationOnce((id, current, run) => {
-        if (fault === 'stale-context') f.threads[0].models = { agy: 'changed-model' };
-        else h.current.mockReturnValue(false);
-        return h.bridge.withOperation(id, current, run, false);
-      });
-      await f.send('/schedule purge ' + selected.id);
-      expect(f.responses().at(-1)).toMatchObject({ success: false });
-      expect(h.tasks.size).toBe(1);
-      expect((await service.list(owner))[0].cancelRequested).not.toBe(true);
-    } finally { h.current.mockReturnValue(true); h.bridge.processClosed(true); }
   });
 
   it('routes read-only cleanup review through the authenticated tool scope without deleting tasks', async () => {
@@ -1115,16 +822,6 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/schedule cleanup review'); expect(f.responses().at(-1).error).toContain('bound to Claude');
     expect((f.executor as any).withReviewedNativeCleanup).not.toHaveBeenCalled();
   });
-  it('passes a live admission fence to the foreground executor before cancellation cleanup', async () => {
-    await f.bind(); await seedLegacy('/schedule after 5m -- Synthetic future work');
-    const [, , ownerCurrent, admit] = f.executor.createNativeSchedule.mock.calls[0];
-    expect(ownerCurrent!()).toBe(true); expect(admit!()).toBe(true);
-    f.jobs[0].handle.cancel.mockRejectedValue(new Error('Synthetic deletion failure'));
-    await f.send(`/schedule cancel ${f.jobs[0].input.id}`);
-    expect(ownerCurrent!()).toBe(true);
-    expect(admit!()).toBe(false);
-  });
-
   it('captures the actual native conversation for a persistent host task without starting a turn', async () => {
     await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
     expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('across restarts') });
@@ -1132,7 +829,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.executor.execute).not.toHaveBeenCalled();
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect(f.executor.configureManagedTools).not.toHaveBeenCalled();
-    expect(f.jobs).toHaveLength(0);
   });
 
   it('reloads the host catalog offline at startup and keeps the original session binding', async () => {
@@ -1143,7 +839,7 @@ describe('MessageHandler native schedule closed loop', () => {
     f.disconnect(); await f.restart();
     await f.handler.prepareScheduleStartup();
     expect(await records()).toMatchObject([{ id: original.id, engine: 'host', sessionId: 'bound', state: 'active' }]);
-    expect(f.executor.createNativeSchedule).not.toHaveBeenCalled();
+
     await f.reconnect();
     await f.send('/schedule cancel ' + original.id);
     expect(await records()).toMatchObject([{ state: 'cancelled' }]);
@@ -1153,13 +849,12 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.bind(); await f.send('/schedule list');
     await f.send('/schedule cancel unknown-synthetic-job');
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-    expect(f.executor.configureManagedTools).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
+    expect(f.executor.configureManagedTools).not.toHaveBeenCalled();
   });
 
   it('scopes interrupted legacy cancellation and reports missing native ownership without claiming success', async () => {
-    await f.bind(); await seedLegacy('/schedule after 5m -- Synthetic future work');
-    const id = f.jobs[0].input.id;
-    await f.restart();
+    await history(1, false);
+    const id = 'historical-0';
     Object.assign(f.executor, { nativeScheduleCleanup: { provider: 'fixture-recovery', strategy: 'reconstruct',
       describe: () => 'fixture-identity', cancelRetained: vi.fn() } });
     await f.bind(); f.executor.withNativeScheduleOperation.mockClear();
@@ -1167,21 +862,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect(f.responses().at(-1)).toMatchObject({ success: false });
     expect(f.responses().at(-1).error).toContain('ownership metadata');
-    expect(native.create).toHaveBeenCalledOnce();
-  });
-
-  it('drains a confirmed foreground queue when an autonomous native occurrence completes', async () => {
-    await f.bind(); await seedLegacy('/schedule after 2m -- Synthetic queued occurrence');
-    f.setExecutorBusy(true);
-    f.jobs[0].emit({ type: 'started', occurrenceId: 'occurrence-1' });
-    await f.send('Foreground message waiting behind the native occurrence', 'thread-a', { isSlashCommand: false });
-    const confirmation = f.responses().at(-1).queueConfirmation;
-    expect(confirmation).toBeDefined();
-    await f.send(`/queue confirm ${confirmation.id}`, 'thread-a');
-    expect(f.executor.execute).not.toHaveBeenCalled();
-    f.setExecutorBusy(false);
-    f.jobs[0].emit({ type: 'completed', occurrenceId: 'occurrence-1', success: true, output: 'Synthetic result' });
-    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledWith(expect.stringContaining('Foreground message waiting behind the native occurrence'), expect.anything()));
   });
 
   it.each(backends)('makes stored schedule management available to a %s foreground turn by default', async backend => {
@@ -1219,21 +899,10 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.threads[0].delegation).toBe(false);
     await action(card.menu, 'cancel');
     expect(await records()).toMatchObject([{ state: 'cancelled' }]);
-    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled(); expect(f.jobs).toHaveLength(0);
+    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect((f.handler as any).delegationBridges.get('thread-a').handler).toBeUndefined();
   });
 
-  it('joins AGY executor retirement before catalog stop and never initializes inactive AGY executors at shutdown', async () => {
-    await f.bind(); f.setBackend('agy');
-    await seedLegacy('/schedule after 2m -- Synthetic owned AGY task');
-    const handle = f.jobs[0].handle;
-    let retired = false;
-    f.executor.destroy.mockImplementation(async () => { retired = true; f.jobs[0].emit({ type: 'stopped', reason: 'Synthetic exact group exit', exitConfirmed: true }); });
-    handle.stop.mockImplementation(async () => { expect(retired).toBe(true); });
-    await f.handler.destroy();
-    expect(f.pool.destroyAll).toHaveBeenCalledWith({ deleteData: false, shutdown: true });
-    expect(handle.stop).not.toHaveBeenCalled();
-  });
   it('keeps the old Router usable for chat and explains the required upgrade on host creation', async () => {
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { scheduleResultsV1: true } } } as any);
     let receipt: unknown;
@@ -1244,12 +913,13 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('Run this later', 'thread-a', { isSlashCommand: false });
     expect(receipt).toMatchObject({ status: 'failed', error: expect.stringContaining('Upgrade or reconnect the Router') });
     expect(f.responses().at(-1).success).toBe(true);
-    expect(f.jobs).toHaveLength(0); expect((f.handler as any).schedules).toBeUndefined();
+     expect((f.handler as any).schedules).toBeUndefined();
   });
 
   it.each([false, true])('preserves scheduling after authorized Codex model recovery without accepting other settings changes (%s)', async changeEffort => {
     await f.bind(true, true);
-    await seedLegacy('/schedule after 5m -- Synthetic existing task');
+    await f.send('/schedule after 5m -- Synthetic existing task');
+    const [job] = await records();
     f.setBackend('codex');
     f.threads[0].models = { codex: 'unavailable-model' };
     f.manager.updateThread.mockImplementation(async (id: string, patch: any) => {
@@ -1262,13 +932,13 @@ describe('MessageHandler native schedule closed loop', () => {
         await expect(invoke('remote_cli_schedule_list', { requestId: 'list-recovered' })).rejects.toThrow('no longer active');
       } else {
         expect(await invoke('remote_cli_schedule_list', { requestId: 'list-recovered' })).toMatchObject({ status: 'succeeded' });
-        expect(await invoke('remote_cli_schedule_cancel', { requestId: 'cancel-recovered', scheduleId: f.jobs[0].input.id })).toMatchObject({ status: 'succeeded' });
+        expect(await invoke('remote_cli_schedule_cancel', { requestId: 'cancel-recovered', scheduleId: job.id })).toMatchObject({ status: 'succeeded' });
       }
       return { success: true };
     });
     await f.send('Inspect and cancel the existing synthetic task', 'thread-a', { isSlashCommand: false });
     expect(f.executor.execute).toHaveBeenCalledTimes(2);
-    expect(f.jobs[0].handle.cancel).toHaveBeenCalledTimes(changeEffort ? 0 : 1);
+    expect((await records())[0].state).toBe(changeEffort ? 'active' : 'cancelled');
     expect(f.responses().at(-1).success, f.responses().at(-1).error).toBe(true);
   });
 
@@ -1334,10 +1004,10 @@ describe('MessageHandler native schedule closed loop', () => {
       return { success: true };
     });
     await f.send('Synthetic stale request', 'thread-a', { isSlashCommand: false });
-    expect(f.jobs).toHaveLength(0); expect((f.handler as any).schedules).toBeUndefined();
+     expect((f.handler as any).schedules).toBeUndefined();
   });
 
-  it('keeps successful native creation after a missing card receipt and does not duplicate on tool retry', async () => {
+  it('keeps a host schedule after a missing card receipt and does not duplicate on tool retry', async () => {
     await f.bind(true, true);
     const send = f.ws.send.getMockImplementation()!;
     f.ws.send.mockImplementation(message => message.type === 'schedule_tool_card' ? true : send(message));
@@ -1353,24 +1023,6 @@ describe('MessageHandler native schedule closed loop', () => {
     });
     await f.send('Synthetic receipt loss request', 'thread-a', { isSlashCommand: false });
     expect(await records()).toHaveLength(1);
-  });
-
-  it('keeps unconfirmed native cleanup owned and requires an explicit new cancel attempt after failure', async () => {
-    await f.bind(true, true);
-    await seedLegacy('/schedule after 5m -- Synthetic legacy task');
-    f.executor.execute.mockImplementation(async () => {
-      f.jobs[0].handle.stop.mockRejectedValueOnce(new Error('Exit unconfirmed'));
-      const args = { requestId: 'cancel', scheduleId: f.jobs[0].input.id };
-      expect(await invoke('remote_cli_schedule_cancel', args)).toMatchObject({ status: 'failed', error: 'Exit unconfirmed' });
-      expect((f.handler as any).schedules.hasActiveSchedules()).toBe(true);
-      expect(await invoke('remote_cli_schedule_cancel', args)).toMatchObject({ status: 'failed' });
-      expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
-      expect(await invoke('remote_cli_schedule_cancel', { ...args, requestId: 'retry-cleanup' })).toMatchObject({ status: 'succeeded', records: [{ state: 'cancelled' }] });
-      expect((f.handler as any).schedules.hasActiveSchedules()).toBe(false);
-      return { success: true };
-    });
-    await f.send('Synthetic cleanup request', 'thread-a', { isSlashCommand: false });
-    expect(f.jobs[0].handle.stop).toHaveBeenCalledTimes(2);
   });
 
   it.each(['abort', 'generation', 'disconnect'])('cancels host creation when %s retires the creating turn', async boundary => {
@@ -1406,7 +1058,6 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('Synthetic older Router request', 'thread-a', { isSlashCommand: false });
     expect(await records()).toMatchObject([{ engine: 'host' }]);
     expect(f.executor.configureSandbox).not.toHaveBeenCalled();
-    expect(f.jobs).toHaveLength(0);
   });
 
   it('reports a late creation failure even when the model finishes after receiving pending', async () => {
@@ -1423,7 +1074,7 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(frames).toContain('Scheduled operation failed after its pending receipt');
     expect(frames).toContain('Synthetic delayed creation failure');
     expect(f.executor.execute).toHaveBeenCalledOnce();
-    expect(create).toHaveBeenCalledOnce(); expect(f.jobs).toHaveLength(0);
+    expect(create).toHaveBeenCalledOnce();
   });
 
   it('does not replay a model turn after scheduling side effects or expose ended-turn calls', async () => {
@@ -1455,36 +1106,7 @@ describe('MessageHandler native schedule closed loop', () => {
   } as any);
   const receipts = () => f.ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'schedule_action_result');
 
-  it.each(['claude', 'agy', 'dsh'])('refreshes the stored %s status without native inventory', async backend => {
-    f.setBackend(backend); await f.bind(true);
-    const menu = await seedLegacy('/schedule after 2m -- Synthetic waiting task');
-    f.jobs[0].handle.list.mockRejectedValue(new Error('Synthetic inventory receipt failure'));
-    await action(menu);
-    expect(receipts().at(-1)).toMatchObject({ success: true,
-      menu: { entries: [expect.objectContaining({ state: 'active', canCancel: true })] } });
-    expect(f.jobs[0].handle.list).not.toHaveBeenCalled();
-    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled(); expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
-    expect(f.executor.execute).not.toHaveBeenCalled();
-  });
-
-  it.each(['claude', 'dsh'])('refreshes and cancels %s through direct controls without a foreground turn', async backend => {
-    f.setBackend(backend); await f.bind(true);
-    const menu = await seedLegacy('/schedule after 2m -- Synthetic task');
-    expect(menu.entries[0]).toMatchObject({ backend, state: 'active', canCancel: true });
-    await action(menu);
-    expect(receipts().at(-1).success).toBe(true);
-    expect(f.jobs[0].handle.list).not.toHaveBeenCalled();
-    await action(menu, 'cancel', { messageId: 'cancel-request' });
-    expect(receipts().at(-1)).toMatchObject({ success: true, menu: { entries: [{ state: 'cancelled', canCancel: false }] } });
-    await action(menu, 'cancel', { messageId: 'cancel-request' });
-    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
-    expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
-    expect(f.executor.execute).not.toHaveBeenCalled();
-    expect(f.ws.trackTask).not.toHaveBeenCalled();
-    expect(f.scheduledResults()).toHaveLength(0);
-  });
-
-  it.each(['claude', 'dsh', 'agy'].flatMap(backend => ['slash', 'tool'].map(entry => ({ backend, entry }))))('round trips $backend $entry card confirmation through the real CLI service and native handle', async ({ backend, entry }) => {
+  it.each(['claude', 'dsh', 'agy'].flatMap(backend => ['slash', 'tool'].map(entry => ({ backend, entry }))))('round trips $backend $entry card confirmation through the host schedule service', async ({ backend, entry }) => {
     f.setBackend(backend); await f.bind(true, true);
     f.executor.execute.mockImplementation(async () => {
       expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'succeeded' });
@@ -1524,8 +1146,7 @@ describe('MessageHandler native schedule closed loop', () => {
       expect(await records()).toMatchObject([{ state: 'active' }]);
       await click('confirm');
       expect(JSON.stringify(elements)).toContain('Cancellation confirmed');
-      expect(f.jobs).toHaveLength(0); expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-      expect(f.jobs).toHaveLength(0); expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+      expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
       expect(f.executor.execute).toHaveBeenCalledTimes(entry === 'slash' ? 0 : 1);
       expect(f.scheduledResults()).toHaveLength(0);
     } finally { controller.destroy(); }
@@ -1552,28 +1173,28 @@ describe('MessageHandler native schedule closed loop', () => {
     f.threads[0].delegationWorkspaceGeneration = 42;
     await action(menu, 'cancel', { messageId: 'stale' });
     expect(receipts().at(-1).success).toBe(false);
-    expect(f.jobs).toHaveLength(0);
   });
 
-  it('preserves cleanup retry after native shutdown failure without claiming cancellation success', async () => {
-    await f.bind(true); const menu = await seedLegacy('/schedule after 2m -- Synthetic task');
-    f.jobs[0].handle.stop.mockRejectedValue(new Error('synthetic shutdown failure'));
-    await action(menu, 'cancel');
+  it('keeps a failed retained deletion retryable from its card', async () => {
+    await history();
+    const cancel = installRetainedCleanup().mockRejectedValueOnce(new Error('Synthetic lost deletion receipt'));
+    await f.bind(true); await f.send('/schedule list');
+    await action(f.responses().at(-1).scheduleMenu, 'cancel');
     const failed = receipts().at(-1);
-    expect(failed).toMatchObject({ success: false, menu: { entries: [{ state: 'cancelled', canCancel: true }] } });
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
-    f.jobs[0].handle.stop.mockResolvedValue();
+    expect(failed).toMatchObject({ success: false, menu: { entries: [{ state: 'interrupted', canCancel: true }] } });
     await action(failed.menu, 'cancel', { messageId: 'retry-cleanup' });
-    expect(receipts().at(-1)).toMatchObject({ success: true, menu: { entries: [{ canCancel: false }] } });
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); f.handler.endAutomaticUpdate();
+    expect(receipts().at(-1)).toMatchObject({ success: true, menu: { entries: [{ state: 'cancelled', canCancel: false }] } });
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
   it('invalidates disconnected card snapshots and reserves cancellation against automatic update', async () => {
-    await f.bind(true); const menu = await seedLegacy('/schedule after 2m -- Synthetic task');
+    await history(); const cancelRetained = installRetainedCleanup(); await f.bind(true);
+    await f.send('/schedule list'); const menu = f.responses().at(-1).scheduleMenu;
     let release!: () => void;
-    f.jobs[0].handle.cancel.mockImplementation(async () => { await new Promise<void>(resolve => { release = resolve; }); });
+    cancelRetained.mockImplementation(async () => { await new Promise<void>(resolve => { release = resolve; }); });
     const pending = action(menu, 'cancel');
-    await vi.waitFor(() => expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(cancelRetained).toHaveBeenCalledOnce());
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
     f.disconnect(); release(); await pending;
     expect(receipts()).toHaveLength(0);
@@ -1610,8 +1231,7 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.closeHandlers.size).toBe(closeListeners);
     expect(f.scheduledResults()).toHaveLength(0);
     expect(f.ws.send.mock.calls.some(([message]) => message.queueStarted?.source === 'schedule')).toBe(false);
-    expect(native.create).not.toHaveBeenCalled();
-    expect(native.createDsh).not.toHaveBeenCalled();
+
     expect(console.warn).not.toHaveBeenCalled();
     await f.handler.destroy();
     await expect(stat(path.join(f.cwd, 'config', 'schedules'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -1633,9 +1253,7 @@ describe('MessageHandler native schedule closed loop', () => {
   });
 
   it.each(['agy', 'dsh'])('keeps interrupted %s list and purge catalog-only and lets an explicit clear reach the executor guard', async backend => {
-    f.setBackend(backend); await f.bind();
-    await seedLegacy('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
-    const job = f.jobs[0];
+    f.setBackend(backend); await history(1, false);
     await f.restart(); await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
     f.executor.withNativeScheduleOperation.mockClear().mockRejectedValue(new Error('No live native host'));
     await f.send('/schedule list');
@@ -1648,32 +1266,29 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/clear');
     expect(f.pool.clearThreadContext).toHaveBeenCalled();
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
-    expect(job.handle.list).not.toHaveBeenCalled(); expect(job.handle.cancel).not.toHaveBeenCalled();
   });
 
   it('loads interrupted schedule status at binding without restoring or touching native inventory', async () => {
-    await f.bind(); await seedLegacy('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    await history(1, false); await f.bind();
     await f.restart(); await f.handler.prepareScheduleStartup();
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); await f.handler.endAutomaticUpdate();
     await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
     await f.send('/schedule list');
     expect(f.responses().at(-1).output).toContain('interrupted');
-    expect(native.create).toHaveBeenCalledOnce();
-    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled(); expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
-    expect(f.jobs[0].handle.list).not.toHaveBeenCalled();
+
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); f.handler.endAutomaticUpdate();
   });
 
   it.each([false, true])('updates with idle schedules without handoff or recovery (installer failure=%s)', async fail => {
     Object.assign(f.executor, { nativeScheduleCleanup: { provider: 'fixture-persistent-v1', strategy: 'reattach',
       describe: () => 'original-fixture-session' } });
-    await f.bind(); await seedLegacy('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    await history(1, false); await f.bind();
     const install = vi.fn(async () => { if (fail) throw new Error('Synthetic installer failure'); });
     const updater = new AutomaticUpdater('1.6.256', f.handler, { installVersion: install, restartAfterUpdate: false });
     try {
       await updater.handleRouterVersion('1.6.257');
-      expect(install).toHaveBeenCalledOnce(); expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
-      expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+      expect(install).toHaveBeenCalledOnce();
+
       await f.send('Foreground after install', 'thread-a', { isSlashCommand: false });
       expect(f.responses().at(-1).success).toBe(true);
     } finally { clearTimeout((updater as any).retryTimer); }
@@ -1685,7 +1300,7 @@ describe('MessageHandler native schedule closed loop', () => {
   });
 
   it('loads local interruption state with an older Router without waiting for unsupported result transport', async () => {
-    await f.bind(); await seedLegacy('/schedule after 5m -- Synthetic reminder'); await f.restart();
+    await history(1, false);
     await f.handler.prepareScheduleStartup();
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {} } } as any);
     await (f.handler as any).loadScheduleCatalog();
@@ -1694,14 +1309,10 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/clear', 'thread-b');
     expect(f.pool.clearThreadContext).toHaveBeenCalled();
     expect(f.scheduledResults()).toEqual([]);
-    expect(native.create).toHaveBeenCalledOnce();
   });
 
   it('keeps a completed outbox with an older Router and delivers only after capability negotiation', async () => {
-    await f.bind(); await seedLegacy('/schedule after 5m -- Synthetic reminder');
-    f.disconnect(); f.jobs[0].emit({ type: 'completed', occurrenceId: 'done', success: true, output: 'Synthetic saved result' });
-    await vi.waitFor(() => expect(f.jobs[0].handle.stop).toHaveBeenCalled());
-    await f.restart(); await f.handler.prepareScheduleStartup();
+    await history(1, false, 'Synthetic saved result'); await f.handler.prepareScheduleStartup();
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {} } } as any);
     await (f.handler as any).loadScheduleCatalog();
     expect((f.handler as any).scheduleCatalogPending).toBe(false);
@@ -1711,24 +1322,18 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
     expect(f.scheduledResults()).toHaveLength(1);
     expect((f.handler as any).schedules.hasPendingResults()).toBe(false);
-    expect(native.create).toHaveBeenCalledOnce();
   });
 
   it('startup inventory check leaves users without catalogs dormant and update-eligible', async () => {
     await f.handler.prepareScheduleStartup();
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(true);
     f.handler.endAutomaticUpdate();
-    expect(native.create).not.toHaveBeenCalled();
+
     expect(f.acknowledgements.size).toBe(0);
   });
 
-  it('recovers a persisted outbox after handler restart without recreating native jobs', async () => {
-    await f.bind();
-    await seedLegacy('/schedule after 2m -- Return a synthetic summary');
-    f.disconnect();
-    f.jobs[0].emit({ type: 'completed', occurrenceId: 'restart-run', success: true, output: 'Persisted result' });
-    await vi.waitFor(() => expect(f.jobs[0].handle.stop).toHaveBeenCalled());
-    await f.restart();
+  it.each(['claude', 'agy', 'dsh'])('recovers a persisted %s outbox after handler restart', async backend => {
+    f.setBackend(backend); await history(1, false, 'Persisted result');
     expect(f.acknowledgements.size).toBe(0);
     await f.reconnect();
     await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
@@ -1737,39 +1342,16 @@ describe('MessageHandler native schedule closed loop', () => {
     await (f.handler as any).loadScheduleCatalog();
     expect(f.scheduledResults()).toHaveLength(1);
     expect(f.acknowledgements.size).toBe(1);
-    expect(native.create).toHaveBeenCalledOnce();
-    expect(native.createDsh).not.toHaveBeenCalled();
   });
 
-  it.each(['claude', 'dsh'])('retains offline %s recurring results across provider stop and handler restart', async backend => {
-    await f.bind();
-    f.setBackend(backend);
-    await seedLegacy('/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Return a synthetic summary');
-    const job = f.jobs[0];
-    f.disconnect();
-    await job.emit({ type: 'completed', occurrenceId: 'shutdown-run', success: true, output: 'Retained across shutdown' });
-    const catalog = path.join((f.handler as any).scheduleDirectory(), SCHEDULE_CATALOG_FILE);
-    expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1);
-    job.handle.stop.mockImplementation(async () => {
-      job.emit({ type: 'stopped', exitConfirmed: true, reason: 'Shutdown completed' });
-    });
-    await f.restart();
-    expect(job.handle.stop).not.toHaveBeenCalled();
-    expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1);
-    expect(f.scheduledResults()).toHaveLength(0);
-    const recover = vi.spyOn(f.handler as any, 'loadScheduleCatalog');
-    await f.reconnect();
-    expect(recover).toHaveBeenCalledOnce();
-    // A wire response precedes durable ACK settlement. Join recovery before
-    // opening the catalog so Windows readers cannot race its atomic replacement.
-    await recover.mock.results[0].value;
-    expect(f.scheduledResults()).toHaveLength(1);
-    expect(f.scheduledResults()[0]).toMatchObject({ output: 'Retained across shutdown', threadId: 'thread-a' });
-    expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toEqual([]);
-    await f.reconnect();
-    await (f.handler as any).loadScheduleCatalog();
-    expect(f.scheduledResults()).toHaveLength(1);
-    expect(f.jobs).toHaveLength(1);
+  it('drops a saved native result when the thread generation has changed', async () => {
+    const { directory } = await history(1, false, 'Stale generation result');
+    f.threads[0].delegationWorkspaceGeneration = 1;
+    await f.reconnect(); await (f.handler as any).loadScheduleCatalog();
+    expect(f.scheduledResults()).toEqual([]);
+    const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(catalog.pending).toEqual([]);
+    expect(catalog.records).toHaveLength(1);
   });
 
   it('isolates a malformed existing catalog from ordinary chat, controls and shutdown', async () => {
@@ -1793,7 +1375,6 @@ describe('MessageHandler native schedule closed loop', () => {
     f.handler.endAutomaticUpdate();
     await f.handler.destroy();
     expect(await readFile(catalog, 'utf8')).toBe('invalid catalog');
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('does not block chat or activate recovery after shutdown during a slow catalog check', async () => {
@@ -1841,7 +1422,7 @@ describe('MessageHandler native schedule closed loop', () => {
     await Promise.all(recover.mock.results.map(result => result.value));
     expect(f.responses().at(-1).success).toBe(true);
     expect(initialize).toHaveBeenCalledOnce();
-    expect(f.jobs).toHaveLength(0);
+
     expect(f.acknowledgements.size).toBe(1);
     await f.send(`/schedule cancel ${(await records())[0].id}`);
     expect(await records()).toMatchObject([{ state: 'cancelled' }]);
@@ -1869,7 +1450,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(destroy).toHaveBeenCalledOnce();
     expect(f.acknowledgements.size).toBe(0);
     expect(f.scheduledResults()).toHaveLength(0);
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('shows all eight backend capabilities without executing a model and requires a confirmed Router binding for creation', async () => {
@@ -1878,11 +1458,10 @@ describe('MessageHandler native schedule closed loop', () => {
     for (const label of ['Claude', 'DSH', 'AGY', 'Codex', 'Kimi', 'OpenCode', 'Pi', 'ZCode']) {
       expect(capabilities).toContain(label + ': supported');
     }
-    expect(native.create).not.toHaveBeenCalled();
+
     await f.send('/schedule after 2m -- Return a summary');
     expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Router') });
     expect(f.executor.execute).not.toHaveBeenCalled();
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown backend without starting a fallback', async () => {
@@ -1900,23 +1479,20 @@ describe('MessageHandler native schedule closed loop', () => {
     }
     await f.send('/schedule list');
     expect(f.responses().at(-1).output).toContain('No schedules');
-    expect(native.create).not.toHaveBeenCalled();
-    expect(native.createDsh).not.toHaveBeenCalled();
+
     expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
   it('allows listing and cancelling a captured schedule after switching backends', async () => {
     await f.bind();
-    await seedLegacy('/schedule after 2m -- Return a summary');
-    const job = f.jobs[0];
+    await f.send('/schedule after 2m -- Return a summary');
+    const [job] = await records();
     f.setBackend('codex');
     await f.send('/schedule list');
-    expect(f.responses().at(-1).output).toContain(job.input.id);
-    await f.send(`/schedule cancel ${job.input.id}`);
+    expect(f.responses().at(-1).output).toContain(job.id);
+    await f.send(`/schedule cancel ${job.id}`);
     expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('cancelled') });
-    expect(job.handle.cancel).toHaveBeenCalledOnce();
-    expect(job.handle.stop).toHaveBeenCalled();
-    expect(native.create).toHaveBeenCalledOnce();
+
     expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
@@ -1928,7 +1504,6 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.executor.configureSandbox).not.toHaveBeenCalled();
     await f.send('/schedule after 2m -- Read this', 'thread-a', { fileIds: ['file-fixture'] });
     expect(f.responses().at(-1).success).toBe(false);
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('honors a persisted per-thread sandbox even when global defaults are unrestricted', async () => {
@@ -1939,7 +1514,6 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/schedule after 2m -- Return a summary');
     expect(f.responses().at(-1)).toMatchObject({ success: true });
     expect(f.executor.configureSandbox).not.toHaveBeenCalled();
-    expect(native.create).not.toHaveBeenCalled();
   });
 
   it('uses the DSH model and command without falling back to Claude settings or its provider', async () => {
@@ -1951,8 +1525,7 @@ describe('MessageHandler native schedule closed loop', () => {
     f.threads[0].efforts = { dsh: 'high', claude: 'low' };
     await f.send('/schedule after 2m -- Return a summary');
     expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('DSH') });
-    expect(native.create).not.toHaveBeenCalled();
-    expect(native.createDsh).not.toHaveBeenCalled();
+
     const [task] = await records();
     expect(task).toMatchObject({ backend: 'dsh', engine: 'host', execution: { command: 'dsh-fixture', model: 'chosen-dsh-model', effort: 'high' } });
     f.setBackend('codex');
@@ -1960,7 +1533,7 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.responses().at(-1).success).toBe(true);
   });
 
-  it('reserves update admission before asynchronous initialization and rechecks before native creation', async () => {
+  it('reserves update admission before asynchronous initialization and rechecks before host creation', async () => {
     await f.bind();
     const service = await (f.handler as any).initializeSchedules();
     let release!: () => void;
@@ -1975,74 +1548,8 @@ describe('MessageHandler native schedule closed loop', () => {
     (f.handler as any).automaticUpdateInProgress = true;
     release(); await creating;
     expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('updating') });
-    expect(native.create).not.toHaveBeenCalled();
+
     f.handler.endAutomaticUpdate();
   });
 
-  it.each(['claude', 'dsh'])('creates a %s one-shot, delivers its idle result to the original thread, and cleans up', async backend => {
-    await f.bind();
-    f.setBackend(backend);
-    await seedLegacy('/schedule after 2m -- Return a synthetic summary');
-    const job = f.jobs[0];
-    expect(job.input).toMatchObject({ backend, cwd: f.cwd, prompt: 'Return a synthetic summary', rule: { kind: 'once' } });
-    await f.send('/schedule list', 'thread-b');
-    job.emit({ type: 'started', occurrenceId: 'occurrence-one' });
-    job.emit({ type: 'completed', occurrenceId: 'occurrence-one', success: true, output: 'Synthetic result' });
-    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
-    expect(f.scheduledResults()[0]).toMatchObject({ openId: 'owner', threadId: 'thread-a', success: true,
-      output: expect.stringContaining('Synthetic result'), queueStarted: { backend } });
-    await vi.waitFor(() => expect(job.handle.stop).toHaveBeenCalled());
-    await vi.waitFor(() => expect(f.handler.tryBeginAutomaticUpdate()).toBe(true));
-    f.handler.endAutomaticUpdate();
-    await f.send('/schedule list');
-    expect(f.responses().at(-1).output).toContain('completed');
-    expect(f.executor.execute).not.toHaveBeenCalled();
-  });
-
-  it.each(['claude', 'dsh'])('delivers multiple %s recurring occurrences, fences resets, and permits cancellation', async backend => {
-    await f.bind();
-    f.setBackend(backend);
-    await seedLegacy('/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Return a daily summary');
-    const job = f.jobs[0];
-    expect(job.input.rule).toEqual({ kind: 'cron', expression: '15 9 * * 1-5', timezone: 'Asia/Shanghai' });
-    await f.send('/clear');
-    expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('schedule cancel') });
-    expect(f.executor.abort).not.toHaveBeenCalled();
-    await f.send('/cd ' + f.cwd);
-    expect(f.pool.setWorkingDirectory).not.toHaveBeenCalled();
-    for (const occurrenceId of ['first-run', 'second-run']) {
-      job.emit({ type: 'started', occurrenceId });
-      job.emit({ type: 'completed', occurrenceId, success: true, output: occurrenceId });
-    }
-    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(2));
-    await f.send(`/schedule cancel ${job.input.id}`);
-    expect(f.responses().at(-1).success).toBe(true);
-    expect(job.handle.cancel).toHaveBeenCalled();
-    expect(job.handle.stop).toHaveBeenCalled();
-    await f.send('/cd ' + f.cwd);
-    expect(f.pool.setWorkingDirectory).toHaveBeenCalled();
-  });
-
-  it('retains offline results and retries them after capability negotiation', async () => {
-    await f.bind();
-    await seedLegacy('/schedule after 2m -- Return a synthetic summary');
-    f.disconnect();
-    f.jobs[0].emit({ type: 'started', occurrenceId: 'offline-run' });
-    f.jobs[0].emit({ type: 'completed', occurrenceId: 'offline-run', success: true, output: 'Offline result' });
-    await vi.waitFor(() => expect(f.jobs[0].handle.stop).toHaveBeenCalled());
-    expect(f.scheduledResults()).toHaveLength(0);
-    await f.reconnect();
-    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
-    expect(f.scheduledResults()[0].output).toContain('Offline result');
-  });
-
-  it('does not route a result into a replaced conversation generation', async () => {
-    await f.bind();
-    await seedLegacy('/schedule after 2m -- Return a synthetic summary');
-    f.threads[0].delegationWorkspaceGeneration = 1;
-    f.jobs[0].emit({ type: 'started', occurrenceId: 'stale-run' });
-    f.jobs[0].emit({ type: 'completed', occurrenceId: 'stale-run', success: true, output: 'Stale result' });
-    await f.send('/schedule list', 'thread-b');
-    expect(f.scheduledResults()).toHaveLength(0);
-  });
 });

@@ -12,7 +12,8 @@ import { MessageHandler } from '../src/client/MessageHandler';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
-import { ScheduleService } from '../src/scheduling/ScheduleService';
+import { randomUUID, createHash } from 'node:crypto';
+import { SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
 import * as scheduleProcesses from '../src/scheduling/claude/ClaudeScheduleProcesses';
 import * as ownershipRuntime from '../src/delegation/OwnershipRuntime';
 import { SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
@@ -23,15 +24,13 @@ const nativeFsync = syncFs.fsyncSync;
 let persistencePlatforms: NodeJS.Platform[];
 let root: string, executor: ClaudePersistentExecutor, raw: any, service: ScheduleService;
 let child: any, hosts: any[], inventory: Map<string, string>, deliver: any, serial: number;
-let onManagement: undefined | (() => Promise<void>);
-let onCreate: undefined | (() => Promise<void>);
 let holdForeground: ((uuid: string) => void) | undefined;
 let modelReply: any;
 let nativeVersion: string;
 let boot: string;
 let nativeCapabilities: string[];
 let modelReplyType: 'success' | 'error' | 'missing';
-let background: string[], closeCode: number, withholdClose: boolean, errorAfterCreate: boolean, failCleanup: boolean;
+let background: string[], closeCode: number, withholdClose: boolean, failCleanup: boolean;
 const frame = (value: object, host = child) => host.stdout.emit('data', Buffer.from(JSON.stringify(value) + '\n'));
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 const terminal = (id: string, host = child) => {
@@ -69,7 +68,6 @@ function spawnFixture() {
           if (holdForeground) { holdForeground(packet.uuid); return; }
           const action = raw.sessionSchedules?.pending?.action;
           if (action) {
-            await onManagement?.();
             if (host.closed) return;
             const id = `tool-${++serial}`;
             frame({ type: 'control_request', request_id: id, request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
@@ -78,17 +76,14 @@ function spawnFixture() {
             if (reply.response.response.hookSpecificOutput?.permissionDecision === 'deny') { terminal(packet.uuid, host); return; }
             expect(reply.response.response).toEqual({});
             let content: string;
-            if (action.tool === 'CronCreate') {
-              inventory.set(id, action.input.prompt);
-              await onCreate?.();
-              content = `Scheduled ${action.input.recurring ? 'recurring job' : 'one-shot task'} ${id} (fixture). Next run: later. Session-only (not written to disk, dies when Claude exits).`;
-            } else if (action.tool === 'CronDelete') { if (!failCleanup) inventory.delete(action.input.id); content = `Cancelled job ${action.input.id}.`; }
-            else content = inventory.size ? [...inventory].map(([key, prompt]) => `${key} — * * * * * (recurring) [session-only]: ${prompt.split('\n')[0]}`).join('\n') : 'No scheduled jobs.';
+            if (action.tool === 'CronDelete') { if (!failCleanup) inventory.delete(action.input.id); content = `Cancelled job ${action.input.id}.`; }
+            else if (action.tool === 'CronList') content = inventory.size ? [...inventory].map(([key, prompt]) => `${key} — * * * * * (recurring) [session-only]: ${prompt.split('\n')[0]}`).join('\n') : 'No scheduled jobs.';
+            else throw new Error(`Unexpected native schedule tool ${action.tool}`);
             const receipt = action.tool === 'CronList'
               ? { jobs: [...inventory].map(([key, prompt]) => ({ id: key, prompt, cron: '* * * * *', recurring: true, durable: false })) }
               : action.tool === 'CronDelete' && !failCleanup ? { id: action.input.id } : undefined;
             frame({ type: 'user', tool_use_result: receipt, message: { content: [{ type: 'tool_result', tool_use_id: id, content,
-              is_error: action.tool === 'CronCreate' && errorAfterCreate || action.tool === 'CronDelete' && failCleanup }] } }, host);
+              is_error: action.tool === 'CronDelete' && failCleanup }] } }, host);
           }
           terminal(packet.uuid, host);
         }
@@ -111,11 +106,11 @@ beforeEach(async () => {
   boot = 'fixture-boot';
   vi.spyOn(ownershipRuntime, 'bootIdentity').mockImplementation(() => ({ host: 'fixture-host', boot, namespace: 'fixture-pid-namespace' }));
   vi.spyOn(ownershipRuntime, 'kernelGate').mockReturnValue({ verify: () => {}, close: () => {} });
-  onCreate = undefined; onManagement = undefined; holdForeground = undefined;
+  holdForeground = undefined;
   nativeVersion = '2.1.311';
   nativeCapabilities = ['interrupt_receipt_v1', 'msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'];
   modelReply = { model: 'synthetic-model' }; modelReplyType = 'success';
-  hosts = []; inventory = new Map(); background = []; serial = 0; closeCode = 0; withholdClose = false; errorAfterCreate = false; failCleanup = false;
+  hosts = []; inventory = new Map(); background = []; serial = 0; closeCode = 0; withholdClose = false; failCleanup = false;
   vi.mocked(spawn).mockImplementation(spawnFixture as any);
   vi.spyOn(scheduleProcesses, 'scheduleProcesses').mockImplementation(() => hosts.filter(host => !host.closed).map(host => ({
     pid: host.pid, birth: String(host.pid), command: 'synthetic-native --resume synthetic-original-session' })));
@@ -123,7 +118,7 @@ beforeEach(async () => {
   raw = executor; deliver = vi.fn();
   raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
   service = new ScheduleService({ directory: path.join(root, 'catalog'), now: () => Date.now(), isOwnerCurrent: () => true,
-    provider: { cleanupFor: () => executor.nativeScheduleCleanup, create: (input, emit, admit) => executor.createNativeSchedule(input, emit, undefined, admit) }, deliver });
+    cleanupFor: () => executor.nativeScheduleCleanup, deliver });
   await service.initialize(); await executor.listModels();
 });
 afterEach(async () => {
@@ -135,17 +130,29 @@ afterEach(async () => {
   expect(teardownPlatform).toBe(filesystemPlatform);
   expect(persistencePlatforms.filter(platform => platform !== filesystemPlatform)).toEqual([]);
 });
-async function create(id = 'first', once = false) {
-  return executor.withNativeScheduleOperation(id, () => true, () => service.create(owner, { id, backend: 'claude', threadId: owner.threadId,
-    cwd: root, prompt: 'Synthetic future work', rule: once ? { kind: 'once', at: new Date(Math.ceil((Date.now() + 120000) / 60000) * 60000).toISOString() }
-      : { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }), false);
+async function seedLegacy(id = 'first', once = false, cancelled = false) {
+  await service.destroy();
+  const sessionId = executor.getSessionId()!;
+  const ownerToken = '11111111-1111-4111-8111-111111111111';
+  const marker = randomUUID(), nativeId = `native-${id}`, prompt = 'Synthetic future work';
+  const receipt = { version: 3, session: sessionId, identity: ownershipRuntime.bootIdentity(),
+    token: ownerToken, ownerToken, nativeHost: { pid: child.pid, birth: String(child.pid) } };
+  const ownershipFile = `${raw.sessionFilePath}.schedule-${createHash('sha256').update(sessionId).digest('hex')}.json`;
+  await fs.writeFile(ownershipFile, JSON.stringify({ ...receipt, checksum: createHash('sha256').update(JSON.stringify(receipt)).digest('hex') }));
+  const directory = path.join(root, 'catalog');
+  const filename = path.join(directory, SCHEDULE_CATALOG_FILE);
+  const catalog = JSON.parse(await fs.readFile(filename, 'utf8'));
+  catalog.records.push({ ...owner, id, backend: 'claude', cwd: root, prompt, nativeId, createdAt: Date.now(),
+    state: cancelled ? 'cancelled' : 'active', ...(cancelled && { cancelRequested: true, cleanupConfirmed: true }),
+    rule: once ? { kind: 'once', at: new Date(Math.ceil((Date.now() + 120_000) / 60_000) * 60_000).toISOString() } : { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    recovery: { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', status: 'blocked',
+      identity: JSON.stringify({ sessionId, threadId: owner.threadId, cwd: root, model: 'synthetic-model', effectiveModel: 'synthetic-model', ownerToken, marker }) } });
+  if (!cancelled) inventory.set(nativeId, `[remote-cli:${marker}]\n${prompt}`);
+  await fs.writeFile(filename, JSON.stringify(catalog));
+  service = new ScheduleService({ directory, isOwnerCurrent: () => true, cleanupFor: () => executor.nativeScheduleCleanup, deliver });
+  await service.initialize();
 }
 async function drain() { for (let i = 0; i < 10; i++) await tick(); }
-function wake(id: string, prompt: string) {
-  frame({ type: 'command_lifecycle', command_uuid: id, wakeup_source: 'schedule_wakeup', state: 'started' });
-  frame({ type: 'control_request', request_id: id, request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
-    input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt } } });
-}
 describe('Claude abrupt lifecycle and exact cleanup', () => {
   async function abruptRestart(nextBoot: boolean, crashedCatalog?: string) {
     child.emit('close', null, 'SIGKILL'); await drain();
@@ -157,7 +164,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     raw = executor;
     raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
     service = new ScheduleService({ directory: path.join(root, 'catalog'), isOwnerCurrent: () => true,
-      provider: { cleanupFor: () => executor.nativeScheduleCleanup, create: (input, emit, admit) => executor.createNativeSchedule(input, emit, undefined, admit) }, deliver });
+      cleanupFor: () => executor.nativeScheduleCleanup, deliver });
     await service.initialize();
   }
   function handlerFixture() {
@@ -181,7 +188,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     return { handler, thread, ws };
   }
   it.each([false, true])('uses production handler, native hooks and ownership proof for reviewed deletion then purge (retired=%s)', async retired => {
-    await create(); await create('second');
+    await seedLegacy(); await seedLegacy('second');
     const target = [...inventory.keys()][0], sibling = [...inventory.keys()][1];
     const original = (await service.list(owner))[0];
     await abruptRestart(retired);
@@ -224,7 +231,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     { disabled: false, legacyOwner: false }, { disabled: true, legacyOwner: false },
   ])('reviews legacy timers and requests a host timer in the resumed Agent turn (Cron disabled=$disabled, owned predecessor=$legacyOwner)', async ({ disabled, legacyOwner }) => {
     if (legacyOwner) {
-      await create(); await create('second');
+      await seedLegacy(); await seedLegacy('second');
     } else {
       inventory.set('native-selected', 'Selected native reminder');
       inventory.set('native-sibling', 'Unrelated native reminder');
@@ -331,54 +338,15 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     }
   });
 
-  it.each([false])('preserves wakes after read errors and fences only explicit cleanup, preserving siblings (recovered=%s)', async recovered => {
-    await create(); await create('second');
-    if (recovered) { await abruptRestart(true); }
-    const [target, sibling] = [...inventory.values()];
-    const handle = (service as any).runtimes.get('first').handle;
-    const list = vi.spyOn(handle, 'list').mockRejectedValue(new Error('Synthetic inventory failure'));
-    const stop = vi.spyOn(handle, 'stop').mockRejectedValue(new Error('Synthetic cleanup failure'));
-    await expect(service.refresh(owner)).rejects.toThrow('Synthetic inventory failure');
-    expect((await service.list(owner)).find(row => row.id === 'first')!.state).toBe('active');
-    expect(stop).not.toHaveBeenCalled();
-    wake('admitted-after-read-error', target);
-    expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response).toEqual({});
-    terminal('admitted-after-read-error');
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
-    await service.recordReviewedCleanup(owner, ['first'], false);
-    expect((await service.list(owner)).find(row => row.id === 'first')!.state).toBe('interrupted');
-    expect(stop).not.toHaveBeenCalled();
-    wake('blocked-after-interruption', target);
-    expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response.decision).toBe('block');
-    terminal('blocked-after-interruption'); await drain();
-    expect(deliver).toHaveBeenCalledTimes(1);
-    wake('sibling-still-admitted', sibling);
-    expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response).toEqual({});
-    terminal('sibling-still-admitted');
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
-    expect(inventory.size).toBe(2);
-    list.mockRestore(); stop.mockRestore();
-  });
-  it('records creation refusal for a live native owner and admits a later explicit request after its exit', async () => {
-    const inventoryProbe = vi.mocked(scheduleProcesses.scheduleProcesses);
-    const normal = inventoryProbe.getMockImplementation()!;
-    inventoryProbe.mockImplementation(() => [...normal(), { pid: 9001, birth: 'other', command: 'synthetic-native --resume synthetic-original-session' }]);
-    await expect(create('refused')).rejects.toThrow('Another native host');
-    expect(await service.list(owner)).toEqual([]);
-    expect(inventory.size).toBe(0);
-    inventoryProbe.mockImplementation(normal);
-    expect((await create('explicit-after-exit')).state).toBe('active');
-    expect(executor.getSessionId()).toBe('synthetic-original-session');
-  });
 
   it('does not infer predecessor death from a same-boot abrupt close', async () => {
-    await create(); await abruptRestart(false);
+    await seedLegacy(); await abruptRestart(false);
     expect(hosts).toHaveLength(1);
     expect((await service.list(owner))[0].recovery?.status).toBe('blocked');
     expect(inventory.size).toBe(1);
   });
   it('admits a host timer in the original conversation after verified reboot and confirmed cleanup of its last native job', async () => {
-    await create();
+    await seedLegacy();
     const sessionId = executor.getSessionId();
     await abruptRestart(true);
     const retired = await executor.withNativeScheduleOperation('retire-last', () => true, () => service.cancel(owner, 'first'), false);
@@ -404,9 +372,8 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     } finally { await handler.destroy(); }
   });
   it.each([false, true])('cancels a retained native definition without recreation (verified reboot=%s)', async nextBoot => {
-    await create(); await create('second'); const [target, sibling] = [...inventory.keys()];
+    await seedLegacy(); await seedLegacy('second'); const [target, sibling] = [...inventory.keys()];
     await abruptRestart(false);
-    expect((service as any).runtimes.size).toBe(0);
     if (nextBoot) boot = 'fixture-next-boot';
     const cancel = () => executor.withNativeScheduleOperation('cancel-operation', () => true,
       () => service.cancel(owner, 'first'), false);
@@ -426,7 +393,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     expect((await service.list(owner)).find(r => r.id === 'first')!.cancelRequested).toBe(true);
   });
   it.each(['session', 'model', 'host', 'capabilities'])('refuses retained cancellation after %s identity changes', async variant => {
-    await create(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
+    await seedLegacy(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
     if (variant === 'session') raw.sessionId = 'synthetic-other-session';
     if (variant === 'model') raw.model = 'synthetic-other-model';
     if (variant === 'host') vi.mocked(ownershipRuntime.bootIdentity).mockReturnValue({ host: 'foreign-host', boot, namespace: 'fixture-namespace' });
@@ -437,7 +404,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
   });
   it('rechecks model ownership after asynchronous timezone inspection before authorizing deletion', async () => {
-    await create(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
+    await seedLegacy(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
     vi.spyOn(raw, 'readNativeScheduleTimezone').mockImplementation(async () => {
       raw.model = 'synthetic-changed-model'; return 'UTC';
     });
@@ -447,7 +414,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
   });
   it('preserves cancellation tombstones and uncertain one-shots across a reboot', async () => {
-    await create(); await create('once', true); await service.cancel(owner, 'first');
+    await seedLegacy('first', false, true); await seedLegacy('once', true);
     await abruptRestart(true);
     const records = await service.list(owner);
     expect(records.find(r => r.id === 'first')!.state).toBe('cancelled');
@@ -461,7 +428,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
   });
 
   it.each([false, true])('treats every exit as abrupt and never adopts or recreates Claude definitions (next boot=%s)', async nextBoot => {
-    await create(); await create('second'); const ids = [...inventory.keys()];
+    await seedLegacy(); await seedLegacy('second'); const ids = [...inventory.keys()];
     const messages = child.stdin.write.mock.calls.length;
     await service.destroy();
     expect(child.stdin.write.mock.calls.length).toBe(messages);

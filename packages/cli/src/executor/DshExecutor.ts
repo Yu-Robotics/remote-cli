@@ -11,7 +11,7 @@ import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff'
 import { DshAcpClient } from './dsh/DshAcpClient';
 import { queryDshAccountUsage } from './dsh/DshAccountUsage';
 import { DshManagedHistory } from '../delegation/DshManagedHistory';
-import { NativeScheduleNotAdmittedError, type NativeScheduleCleanup } from '../scheduling/types';
+import type { NativeScheduleCleanup } from '../scheduling/types';
 import { ScheduledSessionGuard } from '../scheduling/dsh/ScheduledSessionGuard';
 
 export interface DshExecutorOptions {
@@ -48,7 +48,6 @@ export class DshExecutor extends AcpExecutor {
   private readonly handoffFile: string;
   private readonly dshCommand: string;
   private readonly accountUsageQuery: NonNullable<DshExecutorOptions['accountUsageQuery']>;
-  private readonly scheduleThreadId: string;
   private readonly scheduledSessionGuard: ScheduledSessionGuard;
 
   constructor(guard: DirectoryGuard, options: DshExecutorOptions = {}) {
@@ -90,7 +89,6 @@ export class DshExecutor extends AcpExecutor {
           ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker, history?.patch || options.managedHistoryPatch);
         let replacingMissingSession = false;
         return {
-          ...(transport.createNativeSchedule ? { createNativeSchedule: transport.createNativeSchedule.bind(transport) } : {}),
           initialize: async () => {
             const result = await transport.initialize() as { agentCapabilities?: { promptCapabilities?: { image?: boolean } } };
             state.images = result?.agentCapabilities?.promptCapabilities?.image === true;
@@ -149,7 +147,6 @@ export class DshExecutor extends AcpExecutor {
         };
       },
     });
-    this.scheduleThreadId = options.threadId ?? 'default';
     this.scheduledSessionGuard = new ScheduledSessionGuard(directory, options.threadId ?? 'default', options.scheduleCatalog);
     assertResume = () => { const session = this.getSessionId(); if (session && !options.delegationWorker) this.scheduledSessionGuard.assertResume(session); };
     this.state = state;
@@ -195,34 +192,6 @@ export class DshExecutor extends AcpExecutor {
     // Legacy discriminators identify deletion provenance, never restoration.
     describe: (input, owner) => JSON.stringify({ sessionId: this.getSessionId(), cwd: input.cwd, threadId: owner.threadId }),
   };
-
-  async createNativeSchedule(input: import('../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void | Promise<void>, isOwnerCurrent: () => boolean = () => true) {
-    const { client, sessionId } = await (async () => {
-      try {
-        if (!isOwnerCurrent() || input.cwd !== this.getCurrentWorkingDirectory()) throw new Error('Native scheduling context changed.');
-        const previous = this.getSessionId();
-        const session = await this.schedulingSession();
-        if (!isOwnerCurrent() || input.cwd !== this.getCurrentWorkingDirectory()) throw new Error('Native scheduling context changed.');
-        if (previous && session.sessionId !== previous) throw new Error('The original DSH conversation could not be resumed. No schedule was created.');
-        if (!session.client.createNativeSchedule) throw new Error('This DSH transport does not support foreground-session scheduling.');
-        return session;
-      } catch (error) {
-        // Session acquisition cannot create a schedule. Compact only this fresh
-        // refusal; existing markers and ambiguous native CREATE evidence remain.
-        throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : String(error));
-      }
-    })();
-    // Write refusal evidence before the first possible native mutation, including ambiguous CREATE failure.
-    this.scheduledSessionGuard.mark(sessionId);
-    const cleanupIdentity = JSON.stringify({ sessionId, cwd: input.cwd, threadId: input.threadId ?? this.scheduleThreadId });
-    await onEvent({ type: 'attributed', cleanupIdentity });
-    if (!isOwnerCurrent() || input.cwd !== this.getCurrentWorkingDirectory() || sessionId !== this.getSessionId()) {
-      throw new Error('Native scheduling context changed.');
-    }
-    const handle = await client.createNativeSchedule!(sessionId, input, onEvent, isOwnerCurrent);
-    return Object.assign(handle, { cleanupIdentity });
-  }
 
   isBusy(): boolean { return this.state?.compacting === true || super.isBusy(); }
   getContextUsage(): ExecutorContextUsage | null { return this.state.usage; }

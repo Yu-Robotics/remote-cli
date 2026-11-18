@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { assertHostScheduleBackend, assertNativeScheduleBackend, isNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../src/scheduling/ScheduleCapabilities';
+import { assertHostScheduleBackend, assertNativeScheduleBackend, isNativeScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../src/scheduling/ScheduleCapabilities';
 
 describe('managed scheduling eligibility', () => {
   it('advertises host timing for each registered backend', () => {
-    expect(Object.keys(NATIVE_SCHEDULE_CAPABILITIES).sort()).toEqual([
+    expect(Object.keys(HOST_SCHEDULE_CAPABILITIES).sort()).toEqual([
       'agy', 'claude', 'codex', 'dsh', 'kimi', 'opencode', 'pi', 'zcode',
     ]);
-    expect(Object.values(NATIVE_SCHEDULE_CAPABILITIES).every(value => value.supported)).toBe(true);
+    expect(Object.values(HOST_SCHEDULE_CAPABILITIES).every(value => value.supported)).toBe(true);
     for (const backend of ['claude', 'agy', 'dsh'] as const) {
       expect(() => assertNativeScheduleBackend(backend)).not.toThrow();
       expect(isNativeScheduleBackend(backend)).toBe(true);
-      expect(NATIVE_SCHEDULE_CAPABILITIES[backend].detail).toContain('one-shot or recurring cron');
+      expect(HOST_SCHEDULE_CAPABILITIES[backend].detail).toContain('one-shot or recurring cron');
     }
     expect(isNativeScheduleBackend(null)).toBe(false);
   });
@@ -26,7 +26,7 @@ describe('managed scheduling eligibility', () => {
 
   it.each(['codex', 'kimi', 'opencode', 'pi', 'zcode'] as const)(
     'admits %s host timing independently of native provider availability', backend => {
-      const capability = NATIVE_SCHEDULE_CAPABILITIES[backend];
+      const capability = HOST_SCHEDULE_CAPABILITIES[backend];
       expect(isNativeScheduleBackend(backend)).toBe(false);
       expect(() => assertNativeScheduleBackend(backend)).toThrow(/Native scheduling is unsupported/);
       expect(() => assertHostScheduleBackend(backend)).not.toThrow();
