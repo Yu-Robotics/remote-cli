@@ -8,7 +8,7 @@ const cwd = process.cwd();
 const session = 'synthetic-session';
 const input = (id = 'job-a', prompt = 'Equal work'): NativeScheduleInput => ({ id, backend: 'agy', threadId: 'synthetic-thread', cwd, prompt,
   rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
-function harness() {
+function harness(timeoutMs = 20) {
   let cursor = 0;
   let invocationStart = 0;
   const records: TranscriptRecord[] = [];
@@ -16,7 +16,7 @@ function harness() {
   const current = vi.fn(() => true);
   const events: NativeScheduleEvent[] = [];
   let override: ((action: NativeScheduleToolAction) => Promise<{ stopReason: string }>) | undefined;
-  const bridge = new AgySessionSchedules({ sessionId: session, threadId: 'synthetic-thread', hostId: 'synthetic-host', cwd, timezone: 'UTC', timeoutMs: 20,
+  const bridge = new AgySessionSchedules({ sessionId: session, threadId: 'synthetic-thread', hostId: 'synthetic-host', cwd, timezone: 'UTC', timeoutMs,
     isCurrent: current, manage: async action => override ? override(action) : manage(action) });
   const hook = (event: string, extra: Record<string, unknown> = {}) => bridge.accept(event,
     { conversationId: session, cwd, hookEventName: event,
@@ -61,6 +61,160 @@ function harness() {
     override: (fn: typeof override) => { override = fn; },
     create: (id = 'job-a', prompt = 'Equal work', admit?: () => boolean) => bridge.create(input(id, prompt), event => events.push(event), admit) };
 }
+
+describe('AGY in-turn schedule dispatch deadlines', () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+  const flush = () => vi.advanceTimersByTimeAsync(0);
+  const prepare = async () => {
+    vi.useFakeTimers();
+    const h = harness(30_000);
+    h.hook('SessionStart'); h.bridge.beginForeground(); h.begin();
+    return h;
+  };
+  const inventory = (h: ReturnType<typeof harness>, action: NativeScheduleToolAction) => {
+    const { step, decision } = h.tool(action);
+    expect(decision).toEqual({ decision: 'allow' });
+    h.record('GENERIC', 'No background tasks are currently running.', 'MODEL', 'DONE', step);
+    h.hook('PostToolUse');
+  };
+
+  it('keeps exact list then create authorization across slow same-turn discovery and MCP polls', async () => {
+    const h = await prepare(); let handle: Awaited<ReturnType<typeof h.create>> | undefined;
+    const operation = h.bridge.withOperation('create-request', () => true, async () => {
+      await h.bridge.qualify(); handle = await h.create();
+    }, true);
+    // Attach immediately so the baseline timeout is an assertion failure, not an unhandled rejection.
+    const outcome = operation.then(() => 'created', () => 'rejected');
+    await flush();
+    const list = structuredClone(h.bridge.action('create-request')!);
+    expect(list).toEqual({ tool: 'manage_task', input: { Action: 'list' } });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(h.bridge.action('create-request')).toEqual(list);
+    inventory(h, list); await flush();
+    const create = structuredClone(h.bridge.action('create-request')!);
+    expect(create.tool).toBe('schedule');
+    for (let poll = 0; poll < 4; poll++) {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.tool({ tool: 'remote_cli_schedule_operation', input: { requestId: 'create-request' } }).decision.decision).toBe('allow');
+      expect(h.bridge.action('create-request')).toEqual(create);
+    }
+    const { step, decision } = h.tool(create);
+    expect(decision).toEqual({ decision: 'allow' });
+    expect(h.bridge.action('create-request')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(29_999);
+    h.record('GENERIC', `Tool is running as a background task with task id: ${session}/task-${step}\nTask Description: Timer: synthetic, Prompt: Equal work\nTask logs are available at: file://synthetic/log`, 'MODEL', 'RUNNING', step);
+    h.hook('PostToolUse'); await flush();
+    expect(await outcome).toBe('created'); expect(handle!.nativeId).toBe(`${session}/task-${step}`);
+    h.stop(); h.bridge.endForeground();
+    expect(h.bridge.status.blocked).toBeUndefined(); expect(h.bridge.pendingMutation).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts a full receipt deadline at exact dispatch and never extends it for duplicates or polls', async () => {
+    const h = await prepare();
+    const outcome = h.bridge.withOperation('create-request', () => true, async () => {
+      await h.bridge.qualify(); return h.create();
+    }, true).then(() => 'created', () => 'rejected');
+    await flush(); inventory(h, h.bridge.action('create-request')!); await flush();
+    const action = structuredClone(h.bridge.action('create-request')!);
+    await vi.advanceTimersByTimeAsync(32_000);
+    expect(h.tool(action).decision.decision).toBe('allow');
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(h.bridge.status.blocked).toBeUndefined();
+    expect(h.tool(action).decision.decision).toBe('deny');
+    expect(h.tool({ tool: 'remote_cli_schedule_operation', input: {} }).decision.decision).toBe('allow');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toBe('rejected');
+    expect(h.bridge.cleanupMutationPending).toBe(true);
+    expect(h.bridge.status.blocked).toContain('uncertain');
+    expect(h.tool(action).decision.decision).toBe('deny');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['scope', 'scope-throws', 'owner', 'end', 'Stop', 'cancel', 'close', 'fence'].flatMap(trigger =>
+    [false, true].map(dispatched => ({ trigger, dispatched }))))(
+    'settles on $trigger (dispatched=$dispatched) and rejects late exact calls', async ({ trigger, dispatched }) => {
+      const h = await prepare(); let current = true;
+      const outcome = h.bridge.withOperation('create-request', () => {
+        if (!current && trigger === 'scope-throws') throw new Error('Synthetic invalid scope');
+        return current;
+      }, async () => { await h.bridge.qualify(); return h.create(); }, true).then(() => 'created', () => 'rejected');
+      await flush();
+      if (dispatched) { inventory(h, h.bridge.action('create-request')!); await flush(); }
+      const action = structuredClone(h.bridge.action('create-request')!);
+      await vi.advanceTimersByTimeAsync(35_000);
+      if (dispatched) expect(h.tool(action).decision.decision).toBe('allow');
+      if (trigger.startsWith('scope')) current = false;
+      else if (trigger === 'owner') h.current.mockReturnValue(false);
+      else if (trigger === 'end') h.bridge.endForeground();
+      else if (trigger === 'Stop') h.stop();
+      else if (trigger === 'cancel') h.bridge.foregroundCancelled();
+      else if (trigger === 'close') h.bridge.processClosed(false);
+      else h.bridge.fence('Synthetic shutdown');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await outcome).toBe('rejected');
+      expect(h.bridge.pendingMutation).toBe(false);
+      expect(h.bridge.cleanupMutationPending).toBe(true);
+      expect(h.bridge.action('create-request')).toBeUndefined();
+      expect(h.tool(action).decision.decision).toBe('deny');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+  it('does not start a successor create when qualification arrives in the terminal Stop', async () => {
+    const h = await prepare();
+    const outcome = h.bridge.withOperation('create-request', () => true, async () => {
+      await h.bridge.qualify(); return h.create();
+    }, true).then(() => 'created', () => 'rejected');
+    await flush();
+    const { step } = h.tool(h.bridge.action('create-request')!);
+    h.record('GENERIC', 'No background tasks are currently running.', 'MODEL', 'DONE', step);
+    h.stop(); await flush();
+    expect(await outcome).toBe('rejected');
+    expect(h.bridge.hasJobs).toBe(false); expect(h.bridge.pendingMutation).toBe(false);
+    expect(h.tool({ tool: 'schedule', input: {} }).decision.decision).toBe('deny');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('accepts the final exact creation receipt in Stop without allowing a successor action', async () => {
+    const h = await prepare();
+    const outcome = h.bridge.withOperation('create-request', () => true, async () => {
+      await h.bridge.qualify(); return h.create();
+    }, true);
+    await flush(); inventory(h, h.bridge.action('create-request')!); await flush();
+    const { step } = h.tool(h.bridge.action('create-request')!);
+    h.record('GENERIC', `Tool is running as a background task with task id: ${session}/task-${step}\nTask Description: Timer: synthetic, Prompt: Equal work\nTask logs are available at: file://synthetic/log`, 'MODEL', 'RUNNING', step);
+    h.stop(); await flush();
+    expect((await outcome).nativeId).toBe(`${session}/task-${step}`);
+    expect(h.bridge.endForeground()?.success).toBe(true);
+    expect(h.bridge.status.blocked).toBeUndefined(); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cannot accept a fail-open creation receipt without exact hook authorization', async () => {
+    const h = await prepare();
+    const outcome = h.bridge.withOperation('create-request', () => true, async () => {
+      await h.bridge.qualify(); return h.create();
+    }, true).then(() => 'created', () => 'rejected');
+    await flush(); inventory(h, h.bridge.action('create-request')!); await flush();
+    const action = structuredClone(h.bridge.action('create-request')!);
+    const { step, decision } = h.tool({ ...action, input: { ...action.input, Prompt: 'Different work' } });
+    expect(decision.decision).toBe('deny');
+    h.record('GENERIC', `Tool is running as a background task with task id: ${session}/task-${step}\nTask Description: Timer: synthetic, Prompt: Equal work\nTask logs are available at: file://synthetic/log`, 'MODEL', 'RUNNING', step);
+    h.hook('PostToolUse'); await vi.advanceTimersByTimeAsync(35_000);
+    expect(h.bridge.action('create-request')).toEqual(action);
+    h.stop(); await flush();
+    expect(await outcome).toBe('rejected');
+    expect(h.bridge.cleanupMutationPending).toBe(true); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains the bounded whole-turn deadline for separate management prompts', async () => {
+    vi.useFakeTimers(); const h = harness(30_000);
+    h.override(() => new Promise(() => {}));
+    const outcome = h.bridge.qualify().then(() => 'qualified', () => 'rejected');
+    await flush(); await vi.advanceTimersByTimeAsync(30_000);
+    expect(await outcome).toBe('rejected'); expect(h.bridge.cleanupMutationPending).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe('AGY original-session native provider', () => {
   it('distinguishes an admitted scope from an unsettled or failed native receipt', async () => {

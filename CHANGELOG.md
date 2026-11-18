@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.263] - 2026-11-18
+
+### Fixed
+- Restore agent-requested cleanup and new schedule creation in the original managed Claude session after a restart. Install SDK admission hooks at initialization and reject unclassified resumed input without a current foreground command. Explicit Cron disables remain effective.
+
+## [1.6.262] - 2026-11-18
+
+### Fixed
+- Refuse Claude schedule creation when native initialization reports missing Cron tools or lifecycle support, before reserving schedule ownership or returning a native creation action.
+- Report when Claude started with Cron disabled. Reviewed cleanup requires a native inventory and an exact deletion receipt for each selected task.
+- Start the AGY same-turn native receipt deadline at the exact authorized tool dispatch, so model reasoning, tool discovery and operation polling do not expire an uninvoked action. Keep bounded post-dispatch waits and existing uncertainty protections.
+- Retire pending AGY actions on foreground completion, cancellation or ownership loss; a final inventory receipt cannot authorize a successor action after its turn ends.
+
 ## [1.6.261] - 2026-11-18
 
 ### Fixed

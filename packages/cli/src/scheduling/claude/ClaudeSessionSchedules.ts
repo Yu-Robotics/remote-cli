@@ -19,7 +19,8 @@ interface Job {
   expectedNativeId?: string;
   onceDefinitionAlreadyAbsent?: true;
   cleanupOnly?: true;
-  admissionBlocked?: true;
+  reviewedDeletion?: 'requested' | 'acknowledged';
+  reviewedOwner?: Job;
   canAdmitOccurrence?(): boolean;
 }
 interface Pending {
@@ -46,7 +47,15 @@ export class ClaudeSessionSchedules {
   private scope?: Scope;
   private batch?: NativeBatch;
   private submitted?: Job;
-  private capable = false;
+  private capable?: boolean;
+  private startupCronDisabled = false;
+  private resumedPrompts = false;
+  guardResumedPrompts(): void { this.resumedPrompts = true; }
+  cronDisabledAtStartup(): void {
+    // A later tool catalog cannot restore the transcript scan skipped at startup.
+    this.startupCronDisabled = true;
+    this.capable = false;
+  }
   private managementTurn = false;
   private management = new Set<Promise<void>>();
   private cleanupTerminals = new Map<string, { done: Promise<void>; resolve(): void }>();
@@ -58,12 +67,12 @@ export class ClaudeSessionSchedules {
   private seen = new Set<string>();
   private resultIds = new Set<string>();
   private foregroundId?: string;
-  private foregroundTurn?: Invocation;
+  private foregroundTurn?: Invocation & { expectedPrompt?: string; promptSubmitted?: boolean };
   private foregroundStarted = false;
-  foregroundDispatched(id: string, management = false): void {
+  foregroundDispatched(id: string, management = false, prompt?: string): void {
     this.endInvocation(this.foregroundTurn);
     if (this.batch) this.endInvocation(this.batch);
-    this.foregroundTurn = {};
+    this.foregroundTurn = { expectedPrompt: this.resumedPrompts ? prompt : undefined };
     this.foregroundId = id; this.foregroundStarted = false; this.managementTurn = management;
     if (management && this.pending && !this.pending.scope?.inTurn) {
       this.pending.managementId = id;
@@ -95,6 +104,15 @@ export class ClaudeSessionSchedules {
       || [...this.authorized.values()].some(receipt => receipt.action.tool !== 'CronList');
   }
   get hasJobs(): boolean { return [...this.jobs.values()].some(job => !job.retired); }
+  assertCreationCapability(): void {
+    if (this.startupCronDisabled) {
+      throw new NativeScheduleNotAdmittedError('Claude started with Cron disabled. This process cannot create a native schedule. Listing the stored catalog cannot enable Cron.');
+    }
+    // A cold slash command can receive its first init frame in the management turn.
+    if (this.capable === false || this.scope?.inTurn && this.capable !== true) {
+      throw new NativeScheduleNotAdmittedError('This Claude session does not advertise the Cron tools and lifecycle support required to create a schedule.');
+    }
+  }
   get hasPendingMutation(): boolean { return !!this.scope?.mutations.size || [...this.jobs.values()].some(job => !job.retired && job.uncertain); }
 
   get admittedWork(): boolean { return !!this.submitted || !!this.batch?.occurrences.some(item => item.job); }
@@ -164,7 +182,7 @@ export class ClaudeSessionSchedules {
     await this.request(job, { tool: 'CronList', input: {} });
     if (!current() || !job.reviewedInventory) throw new Error('Fresh native cleanup inventory is unavailable.');
     for (const owned of this.jobs.values()) {
-      if (owned.admissionBlocked && owned.nativeId && !job.reviewedInventory.some(entry => entry.id === owned.nativeId)) {
+      if (owned.reviewedDeletion === 'acknowledged' && owned.nativeId && !job.reviewedInventory.some(entry => entry.id === owned.nativeId)) {
         owned.cancelled = true;
       }
     }
@@ -173,17 +191,29 @@ export class ClaudeSessionSchedules {
   async reviewedDelete(target: NativeCleanupDefinition, current: () => boolean): Promise<void> {
     if (target.durable !== false) throw new Error('Native definition lacks session-only provenance.');
     const job = this.reviewJob(current);
+    if ([...this.authorized.values()].some(auth => auth.action.tool === 'CronDelete' && auth.action.input.id === target.id)) {
+      throw new Error('A native deletion receipt for this ID remains unresolved.');
+    }
     job.nativeId = target.id;
     // Revoke only future admission for this exact definition. Keep already-started
     // occurrence callbacks and all sibling jobs; absence is not process quiescence.
     for (const owned of this.jobs.values()) {
       if (owned.nativeId === target.id && owned.prompt === target.prompt && owned.cron === target.cron
-        && owned.recurring === (target.recurring ?? false)) owned.admissionBlocked = true;
+        && owned.recurring === (target.recurring ?? false)) {
+        owned.reviewedDeletion = 'requested';
+        job.reviewedOwner = owned;
+      }
     }
     await this.request(job, { tool: 'CronDelete', input: { id: target.id } }, true);
   }
   private reviewJob(current: () => boolean): Job {
     if (this.closed || !this.scope || !current()) throw new Error('Reviewed cleanup lease is unavailable.');
+    if (this.startupCronDisabled) {
+      throw new NativeScheduleNotAdmittedError('Claude started with Cron disabled. Authoritative cleanup is unavailable because native inventory can omit historical session-only tasks. /schedule list shows stored records and cannot unlock native cleanup.');
+    }
+    if (this.capable === false || this.scope.inTurn && this.capable !== true) {
+      throw new NativeScheduleNotAdmittedError('This host cannot provide authoritative cleanup of historical Claude schedules. CronList may omit session-only jobs. The original session and cleanup obligations are retained.');
+    }
     // Never insert this query placeholder into the admitted job map.
     return { id: `review-${randomUUID()}`, marker: '', prompt: '', recurring: false,
       current, uncertain: false, retired: false, cancelled: false, emit: () => {}, adopt: true, reviewOnly: true };
@@ -240,6 +270,7 @@ export class ClaudeSessionSchedules {
     if (this.jobs.has(input.id)) {
       throw new Error('Native session schedule identity or capacity is unavailable.');
     }
+    this.assertCreationCapability();
     let rule: ReturnType<typeof nativeRule>;
     let cron: string;
     let marker: string;
@@ -437,7 +468,7 @@ export class ClaudeSessionSchedules {
   /** Consume only schedule-owned frames. Ordinary user output continues through the existing executor. */
   accept(frame: Frame): boolean {
     if (frame.type === 'system' && frame.subtype === 'init') {
-      this.capable = ['CronCreate', 'CronList', 'CronDelete'].every(name => frame.tools?.includes(name))
+      this.capable = !this.startupCronDisabled && ['CronCreate', 'CronList', 'CronDelete'].every(name => frame.tools?.includes(name))
         && ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'].every(name => frame.capabilities?.includes(name));
       return false;
     }
@@ -532,10 +563,22 @@ export class ClaudeSessionSchedules {
       }
       try {
         if (block.is_error || typeof block.content !== 'string') throw new Error('Native schedule tool failed or returned an invalid receipt.');
+        if (auth.job.reviewOnly && frame.message.content.filter((item: Frame) => item.type === 'tool_result').length !== 1) {
+          throw new Error('Ambiguous structured cleanup receipt.');
+        }
+        if (auth.job.reviewOnly && auth.action.tool === 'CronDelete' && frame.tool_use_result?.id !== auth.job.nativeId) {
+          throw new Error('Unverified native cancellation receipt.');
+        }
         if (auth.action.tool === 'CronList' && auth.job.adopt) this.structuredInventory(auth.job, frame.tool_use_result);
         this.receipt(auth.job, auth.action, block.content, auth.preserveOccurrences);
         if (pending) { this.pending = undefined; clearTimeout(pending.timer); pending.resolve(block.content); }
-      } catch (error) { if (pending) this.failPending(error instanceof Error ? error.message : 'Invalid native receipt.'); }
+      } catch (error) {
+        // A malformed success cannot settle an authorized reviewed deletion.
+        if (auth.job.reviewOnly && auth.action.tool === 'CronDelete' && block.is_error !== true) {
+          this.authorized.set(block.tool_use_id, auth);
+        }
+        if (pending) this.failPending(error instanceof Error ? error.message : 'Invalid native receipt.');
+      }
     }
   }
   private receipt(job: Job, action: NativeScheduleAction, text: string, preserveOccurrences?: true): void {
@@ -545,6 +588,7 @@ export class ClaudeSessionSchedules {
       job.nativeId = match[2]; job.uncertain = false;
     } else if (action.tool === 'CronDelete') {
       if (text !== `Cancelled job ${job.nativeId}.`) throw new Error('Unverified native cancellation receipt.');
+      if (job.reviewedOwner) job.reviewedOwner.reviewedDeletion = 'acknowledged';
       if (!preserveOccurrences) job.cancelled = true;
     } else if (!job.reviewOnly) this.inventory(job, text);
   }
@@ -586,6 +630,14 @@ export class ClaudeSessionSchedules {
         || !owned || owned.length !== expected) response = { decision: 'block', reason: 'Unknown or retired managed schedule occurrence.' };
       else if (this.batch) this.bind(owned);
       else this.submitted = owned[0];
+    } else if (input?.hook_event_name === 'UserPromptSubmit' && this.resumedPrompts) {
+      // Native can omit the source. A dispatched foreground command owns at
+      // most one submit, even while its model response is still streaming.
+      const turn = this.foregroundTurn;
+      if (!this.foregroundStarted || !turn || turn.ended || turn.promptSubmitted
+        || (turn.expectedPrompt !== undefined && input.prompt !== turn.expectedPrompt)) {
+        response = { decision: 'block', reason: 'No active foreground command owns this resumed input.' };
+      } else turn.promptSubmitted = true;
     }
     this.options.send({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response } });
   }
@@ -594,7 +646,7 @@ export class ClaudeSessionSchedules {
     const jobs: Job[] = [];
     let remaining = prompt;
     while (remaining && jobs.length < 100) {
-      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.admissionBlocked && !item.cleanupOnly && this.canAdmitOccurrence(item) && !!item.nativeId
+      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.reviewedDeletion && !item.cleanupOnly && this.canAdmitOccurrence(item) && !!item.nativeId
         && (remaining === item.prompt || remaining.startsWith(item.prompt + '\n')));
       if (!job) return;
       jobs.push(job); remaining = remaining.slice(job.prompt.length);

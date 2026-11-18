@@ -66,10 +66,15 @@ describe('owner-reviewed native cleanup', () => {
     await expect(f.manager.confirm('owner', 'confirm', review.token, ['legacy-one'], f.host)).rejects.toThrow('inventory changed');
     expect(f.host.remove).not.toHaveBeenCalled();
   });
-  it('reconciles error-after-commit absence and rejects changed retry selections/request IDs', async () => {
+  it('retains uncertainty when a selected job disappears without a deletion receipt', async () => {
     const f = fixture(); const review = await f.manager.prepare('owner', 'review', f.host);
     vi.mocked(f.host.remove).mockImplementation(async target => { f.change(f.entries().filter(entry => entry.id !== target.id)); throw new Error('lost receipt'); });
-    await expect(f.manager.confirm('owner', 'confirm', review.token, ['legacy-one'], f.host)).resolves.toHaveProperty('absentIds', ['legacy-one']);
+    const observe = vi.fn(async () => {});
+    await expect(f.manager.confirm('owner', 'confirm', review.token, ['legacy-one'], f.host, observe)).rejects.toThrow('lost receipt');
+    await expect(f.manager.confirm('owner', 'confirm', review.token, ['legacy-one'], f.host, observe)).rejects.toThrow('inventory changed');
+    expect(f.host.remove).toHaveBeenCalledTimes(1);
+    expect(observe.mock.calls).toHaveLength(1);
+    expect(observe).toHaveBeenCalledWith(expect.any(Array), false);
     await expect(f.manager.confirm('owner', 'different', review.token, ['legacy-one'], f.host)).rejects.toThrow('already started');
     await expect(f.manager.confirm('owner', 'confirm', review.token, ['sibling'], f.host)).rejects.toThrow('already started');
   });

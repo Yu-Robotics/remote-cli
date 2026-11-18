@@ -705,10 +705,24 @@ invocation, including autonomous scheduled turns; later turns cannot reuse it.
 Already-invoked mutations retain their late-receipt ownership. Slash commands and
 card controls use serialized management turns
 in the same conversation. AGY uses the equivalent exact `schedule`/`manage_task`
-action and native transcript receipt path. DSH uses native host CRUD without an extra model turn.
+action and native transcript receipt path. From CLI 1.6.262, AGY also starts its
+same-turn receipt deadline at the exact authorized tool dispatch. Model reasoning,
+tool discovery and receipt polling before dispatch do not consume that deadline.
+Turn completion, cancellation and ownership loss revoke pending actions; missing
+post-dispatch receipts retain the existing uncertainty protections. Existing
+interrupted records are not automatically repaired or retried.
+DSH uses native host CRUD without an extra model turn.
 Native timing runs without polling prompts. Simultaneously due tasks can share a
 native turn and a labeled combined result; they are not separate model answers.
 
+If a Claude session reports missing Cron tools or lifecycle support, the CLI
+refuses creation before authorizing a native action. Ordinary chat remains available.
+From CLI 1.6.263, a managed Claude session keeps its Cron tools when it resumes
+with historical schedule ownership. Ask the agent in that conversation to review
+its native tasks, remove the selected session-only definitions, and create a new
+schedule. Reviewed deletion checks the exact native receipt and fresh inventory.
+On a process started with Cron explicitly disabled, native inventory can omit session-only tasks.
+The stored catalog shown by `/schedule list` cannot unlock native cleanup or creation.
 Claude recurring schedules must use the native session's timezone; a mismatch is
 rejected without changing the conversation timezone. One-shot timestamps are
 converted to that timezone, and ambiguous clock-rollback times are rejected.

@@ -703,6 +703,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       if (this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
         || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
       if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
+      this.schedules().assertCreationCapability();
       timezone = await this.readNativeScheduleTimezone();
       if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
       if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude schedule ownership protocol is unsupported.');
@@ -847,10 +848,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       const managedScheduling = !this.delegationWorker && !restricted
         && this.delegation?.groups?.includes('scheduling') === true;
       this.scheduleGuardRequired = !this.delegationWorker && (!!this.sessionId || managedScheduling);
-      // Non-owning hosts must not start the native scheduler or expose Cron tools.
-      // The settings flag does not suppress transcript-restored definitions.
-      const disableNativeSchedules = !managedScheduling
-        || !!this.sessionId && this.scheduleHostOwnership().exists() && !this.scheduleHostOwnership().ownerToken;
+      // Managed resumes install admission hooks in the initial handshake. Keep
+      // Cron available for reviewed deletion without adopting predecessor jobs.
+      const disableNativeSchedules = !managedScheduling;
+      const resumedScheduleOwner = managedScheduling && !!this.sessionId
+        && this.scheduleHostOwnership().exists() && !this.scheduleHostOwnership().ownerToken;
       const mcpServers: Record<string, unknown> = {};
       const args: string[] = [
         '--input-format=stream-json',
@@ -983,7 +985,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       this.nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       // Observe restored lifecycle frames even before managed tools/catalogs exist.
       // Installing the adapter does not adopt or authorize any native definition.
-      if (!this.delegationWorker) this.schedules();
+      if (!this.delegationWorker) {
+        const adapter = this.schedules();
+        if (disableNativeSchedules || process.env.CLAUDE_CODE_DISABLE_CRON === '1') adapter.cronDisabledAtStartup();
+        else if (resumedScheduleOwner) adapter.guardResumedPrompts();
+      }
       if (this.delegationWorker) this.workerGroups.track(child);
 
       // Buffer for collecting stderr on startup (for error reporting)
@@ -2137,7 +2143,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
     inputMessage.uuid = randomUUID();
     this.turnLedger.dispatched(inputMessage.uuid, true);
-    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid);
+    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, false, input);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending user input: ${input}`);
 
@@ -2435,7 +2441,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
     inputMessage.uuid = randomUUID();
     this.turnLedger.dispatched(inputMessage.uuid);
-    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, command.options.nativeScheduleManagement);
+    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, command.options.nativeScheduleManagement,
+      typeof content === 'string' && !command.isSlashCommand ? content : undefined);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
 

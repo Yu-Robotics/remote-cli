@@ -575,6 +575,7 @@ describe('Claude abort cleanup ownership', () => {
   it.each(['closed', 'successor'] as const)('review: late CREATE persistence after %s preserves confirmed close without a cleanup prompt', async state => {
     vi.useFakeTimers();
     const main = executor(), raw = main as any;
+    raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
     const first = nativePipe(); const startup = raw.startProcess();
     await vi.advanceTimersByTimeAsync(1000); await startup;
     const adapter: ClaudeSessionSchedules = raw.schedules(); raw.scheduleHooksReady = true;

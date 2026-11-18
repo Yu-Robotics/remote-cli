@@ -68,6 +68,7 @@ beforeEach(async () => {
   vi.mocked(spawn).mockReset().mockReturnValue(child);
   executor = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, 'synthetic-thread', 'sonnet', undefined, 'forbidden-native');
   raw = executor as any;
+  raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
 });
 afterEach(async () => {
   for (const handler of handlers) await handler.destroy();

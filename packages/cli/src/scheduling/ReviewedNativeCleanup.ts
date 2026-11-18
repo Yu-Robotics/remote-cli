@@ -60,7 +60,7 @@ export function cleanupInventory(value: unknown): NativeCleanupDefinition[] {
 interface Review {
   scope: string; binding: string; sessionId: string; expires: number;
   inventory: NativeCleanupDefinition[]; candidates: NativeCleanupDefinition[];
-  attempted: Set<string>; absent: Set<string>; selection?: string; requestId?: string;
+  acknowledged: Set<string>; absent: Set<string>; selection?: string; requestId?: string;
 }
 /** Ephemeral owner authorization, deliberately not an execution or recovery receipt. */
 export class ReviewedNativeCleanup {
@@ -99,7 +99,7 @@ export class ReviewedNativeCleanup {
     }
     const token = randomUUID();
     const review: Review = { scope, binding: host.binding, sessionId: host.sessionId, expires: this.now() + this.ttl,
-      inventory, candidates, attempted: new Set(), absent: new Set() };
+      inventory, candidates, acknowledged: new Set(), absent: new Set() };
     this.reviews.set(token, review); this.requests.set(key, { digest, token });
     return this.public(token, review);
   }
@@ -129,7 +129,7 @@ export class ReviewedNativeCleanup {
     const inspect = async () => {
       this.check(host, review, scope);
       const entries = await host.inventory(); this.check(host, review, scope);
-      const expected = review.inventory.filter(entry => !review.absent.has(entry.id) && (!review.attempted.has(entry.id) || entries.some(current => current.id === entry.id)));
+      const expected = review.inventory.filter(entry => !review.absent.has(entry.id) && (!review.acknowledged.has(entry.id) || entries.some(current => current.id === entry.id)));
       if (inventoryIdentity(entries) !== inventoryIdentity(expected)) {
         throw new Error('Native inventory changed since review. No further deletion is authorized; request a new review.');
       }
@@ -140,11 +140,10 @@ export class ReviewedNativeCleanup {
     for (const target of targets) {
       const entries = await inspect();
       if (!entries.some(entry => entry.id === target.id)) { review.absent.add(target.id); continue; }
-      review.attempted.add(target.id);
-      try { await host.remove(target); }
-      catch (error) {
-        // Only authoritative fresh absence can reconcile an error-after-commit.
-        if ((await inspect()).some(entry => entry.id === target.id)) throw error;
+      if (!review.acknowledged.has(target.id)) {
+        await host.remove(target);
+        this.check(host, review, scope);
+        review.acknowledged.add(target.id);
       }
       if ((await inspect()).some(entry => entry.id === target.id)) throw new Error('Native deletion is not confirmed. Retry this exact confirmation.');
       review.absent.add(target.id);

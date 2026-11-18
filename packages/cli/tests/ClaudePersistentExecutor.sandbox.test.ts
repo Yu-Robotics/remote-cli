@@ -163,6 +163,44 @@ describe('Claude sandbox launch policy', () => {
     expect(vi.mocked(spawn).mock.calls[0][2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
   });
 
+  it('keeps ordinary chat on the original session after refusing cleanup on an explicitly Cron-disabled resume', async () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '1');
+    const active = create();
+    const session = 'synthetic-history';
+    (active as any).sessionId = session;
+    const ownership = (active as any).scheduleHostOwnership();
+    ownership.dependencies.identity = () => ({ host: 'fixture', boot: 'same-boot', namespace: 'fixture' });
+    ownership.dependencies.processes = () => [{ pid: 2020, birth: 'original', command: 'fixture-claude' }];
+    ownership.dependencies.gate = () => ({ verify() {}, close() {} });
+    ownership.reserveForNewJob(2020, 'fixture-claude');
+    ownership.close();
+    const original = fs.readFileSync(ownership.filename);
+    await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] });
+    const first = active.execute('Synthetic foreground request');
+    await vi.advanceTimersByTimeAsync(1000);
+    const launch = vi.mocked(spawn).mock.calls[0];
+    expect(launch[2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+    expect(launch[1]?.[launch[1].indexOf('--resume') + 1]).toBe(session);
+    const emit = (frame: object) => child.stdout.emit('data', Buffer.from(JSON.stringify(frame) + '\n'));
+    emit({ type: 'system', subtype: 'init', session_id: session, tools: ['CronCreate', 'CronDelete', 'CronList'],
+      capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
+    emit({ type: 'result', subtype: 'success' });
+    await expect(first).resolves.toMatchObject({ success: true });
+    await expect(active.withReviewedNativeCleanup('review', () => true, host => host.inventory())).rejects.toThrow('cannot unlock native cleanup');
+    const creation = active.createNativeSchedule({ id: 'new', threadId: 'test', cwd: home, backend: 'claude',
+      prompt: 'Synthetic reminder', rule: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' } }, () => {});
+    await expect(creation).rejects.toThrow('This process cannot create a native schedule');
+    expect(active.nativeScheduleAction('new')).toBeUndefined();
+    const chat = active.execute('Synthetic follow-up');
+    await vi.advanceTimersByTimeAsync(1000);
+    emit({ type: 'result', subtype: 'success' });
+    await expect(chat).resolves.toMatchObject({ success: true });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(ownership.filename)).toEqual(original);
+    const turns = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line)).filter((frame: any) => frame.type === 'user');
+    expect(turns.map((frame: any) => frame.message.content)).toEqual(['Synthetic foreground request', 'Synthetic follow-up']);
+  });
+
   it.each([false, true])('disables Cron for delegated workers (resumed: %s)', async resumed => {
     vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '');
     executor = createExecutor(new DirectoryGuard([home]), { type: 'claude-persistent' }, home,

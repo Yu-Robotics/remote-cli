@@ -333,8 +333,10 @@ describe('Claude shared foreground scheduling integration', () => {
       } finally { raw.claudeProcess = child; child.stdin.writable = true; vi.useRealTimers(); }
     });
 
-  it('automatically compacts an actual timezone refusal without native cleanup', async () => {
-    nativeSettings = {};
+  it.each(['timezone', 'missing-tools'])('automatically compacts a %s refusal without native cleanup', async reason => {
+    if (reason === 'timezone') nativeSettings = {};
+    else frame({ type: 'system', subtype: 'init', session_id: 'original-native-session',
+      tools: ['ToolSearch'], capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
     const directory = path.join(root, 'synthetic-schedule-catalog');
     const options = { directory, provider: { create: (input: NativeScheduleInput, emit: any, admit?: () => boolean) =>
       executor.createNativeSchedule(input, emit, undefined, admit) }, deliver: vi.fn(async () => {}), isOwnerCurrent: () => true };
@@ -342,10 +344,12 @@ describe('Claude shared foreground scheduling integration', () => {
     const service = new ScheduleService(options);
     let restored: ScheduleService | undefined;
     const create = vi.spyOn(raw.sessionSchedules, 'create');
+    const timezone = vi.spyOn(raw, 'readNativeScheduleTimezone');
     try {
       await service.initialize();
       await expect(service.create(owner, { id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
         rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      if (reason === 'missing-tools') expect(timezone).not.toHaveBeenCalled();
       expect(await service.list(owner)).toEqual([]);
       await service.destroy();
       restored = new ScheduleService(options); await restored.initialize();

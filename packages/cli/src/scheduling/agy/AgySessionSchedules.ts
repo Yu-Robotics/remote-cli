@@ -15,6 +15,7 @@ interface Job {
 interface Operation {
   action: NativeScheduleToolAction; callId?: string; step?: number;
   receipt?: string | boolean | ReturnType<typeof inventoryReceipt>; job?: Job; received?: () => void;
+  dispatched?: () => void; reject?: (error: Error) => void;
 }
 export interface AgySessionScheduleOptions {
   sessionId: string;
@@ -31,7 +32,7 @@ export interface AgySessionScheduleOptions {
   now?: () => number;
 }
 
-/** Session-scoped native provider. No timers except bounded receipt waits, no
+/** Session-scoped native provider. Timers only monitor admission/receipt waits, no
  * implicit restart/replay. Hook callbacks must originate from the private relay.
  * Recovery is deliberately absent: native inventory cannot prove queue absence. */
 export class AgySessionSchedules implements NativeScheduleProvider {
@@ -40,7 +41,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   private operation?: Operation;
   private tail: Promise<unknown> = Promise.resolve();
   private ready = false;
-  private scope?: { id: string; current(): boolean; inTurn: boolean };
+  private scope?: { id: string; current(): boolean; inTurn: boolean; ended?: boolean };
   get busy(): boolean { return this.boundary !== undefined || !!this.operation; }
   get hasJobs(): boolean { return this.jobs.size > 0; }
   get pendingMutation(): boolean { return !!this.operation || !!this.scope; }
@@ -53,7 +54,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     try { return await run(); } finally { this.scope = undefined; }
   }
   action(id: string): NativeScheduleToolAction | undefined {
-    return this.scope?.id === id && this.scope.inTurn && this.scope.current() && !this.operation?.callId
+    return !this.failure && this.scope?.id === id && this.scope.inTurn && !this.scope.ended && this.foreground && this.scope.current() && !this.operation?.callId
       ? this.operation?.action : undefined;
   }
 
@@ -212,7 +213,14 @@ export class AgySessionSchedules implements NativeScheduleProvider {
 
   /** Called before a genuine foreground prompt; ACP text is not schedule output. */
   beginForeground(): void { this.check(); if (this.operation || this.foreground || this.boundary !== undefined) throw new Error('AGY host is busy.'); this.foregroundResult = undefined; this.foreground = true; this.executionForeground = true; }
-  endForeground(): { success: boolean; output: string } | undefined { this.foreground = false; return this.foregroundResult; }
+  endForeground(): { success: boolean; output: string } | undefined { this.foreground = false; this.endOperationTurn(); return this.foregroundResult; }
+  private endOperationTurn(): void {
+    if (!this.scope?.inTurn) return;
+    this.scope.ended = true;
+    // A receipt in this same Stop may finish its operation, but cannot authorize
+    // the next action in a multi-step list/create or list/kill/list sequence.
+    if (this.operation?.receipt === undefined) this.operation?.reject?.(new Error('AGY foreground ended before its management receipt.'));
+  }
   foregroundCancelled(): void {
     this.cancellationInProgress = this.cancellationCaptured;
     this.foreground = false;
@@ -235,6 +243,8 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     this.stopForTransition(reason, exitConfirmed);
   }
   private stopForTransition(reason: string, exitConfirmed = false): void {
+    this.endOperationTurn();
+    this.operation?.reject?.(new Error(reason));
     if (this.failure && !exitConfirmed) return;
     this.failure ??= reason;
     for (const job of this.jobs.values()) job.emit({ type: 'stopped', reason, exitConfirmed });
@@ -299,7 +309,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     if (!['schedule', 'manage_task'].includes(call.name) && !/remote_cli_schedule_(create|list|cancel|purge|operation|capabilities)$/.test(call.name)) this.backgroundUnknown = true;
     if (!op) return ['schedule', 'manage_task'].includes(call.name) ? deny : { decision: 'allow' };
     if (this.scope?.inTurn && !['schedule', 'manage_task'].includes(call.name)) return { decision: 'allow' };
-    if (this.scope && !this.scope.current()) return deny;
+    if (this.scope && (this.scope.ended || !this.scope.current() || this.scope.inTurn && !this.foreground)) return deny;
     if (op.callId || call.name !== op.action.tool || !isDeepStrictEqual(call.args, op.action.input)) return deny;
     if (op.job) {
       const now = Date.now();
@@ -307,6 +317,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
         ? now + Number(op.action.input.DurationSeconds) * 1000 : Math.floor(now / 60000) * 60000 + 60000;
     }
     op.callId = call.id; op.step = payload.stepIdx as number;
+    op.dispatched?.();
     return { decision: 'allow' };
   }
 
@@ -368,6 +379,7 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     if (this.terminals.size + wakes.length + outputs.length > 8192) throw new Error('AGY occurrence evidence capacity reached.');
     this.lastTerminal = Math.max(this.lastTerminal, ...rows.map(row => row.step_index));
     this.seenHookTerminal = true;
+    this.endOperationTurn();
     this.boundary = undefined;
     this.invocation = undefined;
     this.executionForeground = false; this.executionManagement = false;
@@ -384,8 +396,8 @@ export class AgySessionSchedules implements NativeScheduleProvider {
   }
 
   private signature(row: TranscriptRecord): string { return createHash('sha256').update(JSON.stringify(row)).digest('hex'); }
-  private check(): void {
-    if (this.failure || this.exited || !this.options.isCurrent() || this.scope && !this.scope.current()) throw new NativeScheduleNotAdmittedError(this.failure ?? 'AGY host ownership is no longer current.');
+  private check(allowEndedScope = false): void {
+    if (this.failure || this.exited || !this.options.isCurrent() || this.scope && (!this.scope.current() || !allowEndedScope && this.scope.ended)) throw new NativeScheduleNotAdmittedError(this.failure ?? 'AGY host ownership or operation scope is no longer current.');
   }
   private serial<T>(run: () => Promise<T>): Promise<T> {
     const work = this.tail.then(run); this.tail = work.catch(() => {}); return work;
@@ -397,17 +409,37 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     const inTurn = this.scope?.inTurn === true;
     if (!inTurn) this.executionManagement = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let watcher: ReturnType<typeof setInterval> | undefined;
     try {
       const receipt = new Promise<{ stopReason: string }>(resolve => { op.received = () => resolve({ stopReason: 'end_turn' }); });
-      const result = await Promise.race([inTurn ? receipt : this.options.manage(action), new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('AGY management receipt timed out.')), this.options.timeoutMs ?? 30_000);
-      })]);
-      this.check();
+      const interrupted = new Promise<never>((_, reject) => {
+        op.reject = reject;
+        const deadline = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => reject(new Error('AGY management receipt timed out.')), this.options.timeoutMs ?? 30_000);
+        };
+        // Same-turn MCP discovery/polling precedes native dispatch. Only the
+        // exact authorized PreToolUse starts its receipt deadline. Separate
+        // management prompts retain the original whole-turn deadline.
+        if (inTurn) op.dispatched = deadline;
+        else deadline();
+        watcher = setInterval(() => {
+          if (this.operation !== op) return;
+          try { this.check(); } catch (error) { reject(error); }
+        }, 100);
+      });
+      const result = await Promise.race([inTurn ? receipt : this.options.manage(action), interrupted]);
+      this.check(true);
       if (result.stopReason !== 'end_turn' || op.receipt === undefined || this.failure || !inTurn && this.boundary !== undefined) throw new Error('AGY management terminal/receipt is unconfirmed.');
       return op.receipt;
     } catch (error) {
       this.mutationUncertain = true;
       this.fence('AGY management outcome is uncertain; no automatic retry or host replacement is allowed.'); throw error;
-    } finally { if (timer) clearTimeout(timer); this.operation = undefined; }
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (watcher) clearInterval(watcher);
+      op.dispatched = undefined; op.reject = undefined;
+      if (this.operation === op) this.operation = undefined;
+    }
   }
 }
