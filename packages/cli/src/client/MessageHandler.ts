@@ -67,7 +67,7 @@ import { isSessionControl } from '../session/SessionResumeService';
 import { readSessionCatalog } from '../session/adapters';
 import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/PiSessionCatalog';
 import { SessionControl, type PiBindingState } from '../session/SessionControl';
-import { ScheduleService, HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, type SchedulePurgeSelection, type SchedulePurgeResult } from '../scheduling/ScheduleService';
+import { ScheduleService, HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, type HostResult, type SchedulePurgeSelection, type SchedulePurgeResult } from '../scheduling/ScheduleService';
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertHostScheduleBackend, assertNativeScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
@@ -147,6 +147,13 @@ interface QueuedCommand {
 interface PendingQueueConfirmation {
   info: QueueConfirmationInfo;
   command: QueuedCommand;
+}
+
+interface HostOccurrence {
+  record: Readonly<ScheduleRecord>;
+  cancelled: boolean;
+  executor?: IExecutor;
+  abort?: Promise<boolean>;
 }
 
 interface ActiveThreadOperation {
@@ -285,7 +292,7 @@ export class MessageHandler {
   private readonly schedulePurgeHosts = new Map<string, NativeCleanupSession>();
   private readonly scheduleOwners = new Map<string, ScheduleOwner>();
   private readonly scheduleManagement = new Set<string>();
-  private readonly hostOccurrences = new Map<string, { record: Readonly<ScheduleRecord>; cancelled: boolean }>();
+  private readonly hostOccurrences = new Map<string, HostOccurrence>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -1081,6 +1088,38 @@ export class MessageHandler {
     threadId: string,
     executor: IExecutor | undefined
   ): Promise<void> {
+    const occurrence = this.hostOccurrences.get(threadId);
+    if (occurrence) {
+      const operation = this.activeThreadOperations.get(threadId);
+      if (!operation || this.isDestroyed || occurrence.record.openId !== this.messageOpenIds.get(messageId)
+        || !this.hostBindingCurrent(occurrence.record)) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Scheduled occurrence ownership changed.' });
+        return;
+      }
+      if (!occurrence.executor) {
+        this.sendResponse(messageId, threadId, { success: true, output: 'The scheduled occurrence has not started executing.' });
+        return;
+      }
+      if (executor !== occurrence.executor) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Scheduled executor changed.' });
+        return;
+      }
+      try {
+        occurrence.abort ??= executor.abort().then(accepted => {
+          if (executor.hasPendingCancellation?.() || executor.hasUncertainShutdown?.()) {
+            throw new Error('Scheduled occurrence interruption is unconfirmed. Retry /abort.');
+          }
+          return accepted;
+        });
+        if (!await occurrence.abort) throw new Error('The executor did not confirm interruption of this occurrence.');
+        await operation.done;
+        this.sendResponse(messageId, threadId, { success: true, output: 'The scheduled occurrence was interrupted by /abort.' });
+      } catch (error) {
+        occurrence.abort = undefined;
+        this.sendResponse(messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Failed to interrupt the scheduled occurrence.' });
+      }
+      return;
+    }
     if (executor?.hasPendingSettingsChange?.()) {
       this.sendResponse(messageId, threadId, { success: false,
         error: 'Native settings change is pending or unconfirmed. Wait for its reply or retry the setting after a terminal error. /clear is destructive recovery and loses session-only schedules.' });
@@ -1233,10 +1272,32 @@ export class MessageHandler {
 
   private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
     if (this.abortOperations.has(threadId)) throw new Error('Direct backend abort is still pending; retry /clear after it settles.');
+    if (this.scheduleManagement.has(threadId)) throw new Error('Schedule management is in progress. Retry the conversation reset after it settles.');
+    this.scheduleManagement.add(threadId);
+    try { await this.resetThreadConversation(messageId, threadId); }
+    finally { this.scheduleManagement.delete(threadId); }
+  }
+
+  private async resetThreadConversation(messageId: string, threadId: string): Promise<void> {
     const existing = this.threadPool.getExistingExecutor(threadId);
     const destructiveRecovery = existing?.hasPendingCancellation?.() === true || existing?.hasPendingSettingsChange?.() === true;
+    const openId = this.messageOpenIds.get(messageId);
+    const binding = this.scheduleBinding;
+    const connectionEpoch = this.imageConnectionEpoch;
     await this.assertScheduleCleanupContext(threadId);
-    if (!destructiveRecovery) await this.assertSchedulesIdle(threadId);
+    const removed = await this.schedules?.clearHostContext(threadId, () => {
+      // A previous clear committed schedule erasure before writing its pending reset marker.
+      if (this.threadManager.contextResets.isPending(threadId)) return undefined;
+      if (!openId || !binding || connectionEpoch !== this.imageConnectionEpoch) throw new Error('Conversation reset requires the original schedule binding.');
+      const owner = this.scheduleOwner(threadId, openId);
+      this.requireHostBinding(owner, binding.epoch);
+      return owner;
+    }, destructiveRecovery);
+    const scheduleNotice = removed ? `Removed ${removed} host ${removed === 1 ? 'schedule' : 'schedules'} and associated history. ` : '';
+    if (removed) {
+      this.scheduleOwners.delete(threadId);
+      if (connectionEpoch !== this.imageConnectionEpoch) throw new Error(`${scheduleNotice}Device binding changed during conversation reset. Retry in the original thread.`);
+    }
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsService.invalidate(threadId);
     this.directoryBrowser.invalidate(threadId);
@@ -1274,10 +1335,10 @@ export class MessageHandler {
       this.threadPool.setThreadBusy(threadId, false);
       await workers;
       this.sendResponse(messageId, threadId, { success: true,
-        output: `${destructiveRecovery ? 'Explicit reset stopped the Claude host; its session-only schedules were lost. ' : ''}Started a fresh conversation for direct backends and managed workers. Permanent deletion of old managed child native sessions is queued. Verified Codex, Kimi, Pi, and Claude child sessions are supported on Linux; unsupported versions, layouts, backends, platforms, and unconfirmed targets remain pending. Task artifacts and recovery evidence are retained. Pending native writers still block conflicting execution.` }, true);
+        output: `${scheduleNotice}${destructiveRecovery ? 'Explicit reset stopped the Claude host; its session-only schedules were lost. ' : ''}Started a fresh conversation for direct backends and managed workers. Permanent deletion of old managed child native sessions is queued. Verified Codex, Kimi, Pi, and Claude child sessions are supported on Linux; unsupported versions, layouts, backends, platforms, and unconfirmed targets remain pending. Task artifacts and recovery evidence are retained. Pending native writers still block conflicting execution.` }, true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Local context storage is unavailable';
-      throw new Error(`Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);
+      throw new Error(`${scheduleNotice}Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);
     } finally {
       if (active) this.finishThreadOperation(threadId, active.token);
     }
@@ -3627,7 +3688,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async dispatchHostOccurrence(record: Readonly<ScheduleRecord>, occurrenceId: string,
-    admit: () => Promise<boolean>): Promise<ExecuteResult | undefined> {
+    admit: () => Promise<boolean>): Promise<HostResult | undefined> {
     const { threadId, openId, sessionId, cwd } = record;
     if (!this.scheduleBinding || !this.wsClient.isConnected()) return undefined;
     if (this.settingsBusy(threadId) || this.settingsAdmission.isBlocked(threadId)
@@ -3636,7 +3697,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     const messageId = `${record.id}:${occurrenceId}`;
     return this.settingsAdmission.command(threadId, messageId, async () => {
       const token = this.beginThreadOperation(threadId);
-      const occurrence = { record, cancelled: false };
+      const occurrence: HostOccurrence = { record, cancelled: false };
       this.hostOccurrences.set(threadId, occurrence);
       this.messageOpenIds.set(messageId, openId);
       try {
@@ -3673,6 +3734,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         };
         beforePrompt();
         let display = '';
+        occurrence.executor = executor;
         const result = await executor.execute(record.prompt, {
           hostScheduleSessionId: sessionId,
           // Claude checks queued authorization before process startup and again before stdin.
@@ -3695,8 +3757,12 @@ You can also use natural language commands to control Claude Code CLI.`,
             try { check(); } catch { return; }
             this.sendStreamChunk(messageId, threadId, chunk);
           },
-        });
+        }).catch((error: unknown) => ({ success: false, output: undefined,
+          error: error instanceof Error ? error.message : 'Scheduled execution failed.' }));
+        const aborted = occurrence.abort && await occurrence.abort;
         check(true);
+        if (aborted) return { success: false, abortedByUser: true, output: display || result.output,
+          error: 'Scheduled occurrence interrupted by /abort.' };
         // Prefer the public display stream, but preserve the executor's final
         // output when a backend only returns its answer at turn completion.
         return { success: result.success, output: display || result.output, error: result.error };
@@ -3707,11 +3773,11 @@ You can also use natural language commands to control Claude Code CLI.`,
           if (pending.request.taskMessageId === messageId) this.resolveApprovalCard(id, 'expired');
         }
         this.messageOpenIds.delete(messageId);
-        this.hostOccurrences.delete(threadId);
+        if (this.hostOccurrences.get(threadId) === occurrence) this.hostOccurrences.delete(threadId);
         this.cancelledOperations.delete(token);
         if (this.finishThreadOperation(threadId, token) && !this.isDestroyed) void this.startNextQueuedCommand(threadId);
       }
-    });
+    }, true);
   }
 
   private async activeSchedules(threadId: string): Promise<ScheduleRecord[]> {

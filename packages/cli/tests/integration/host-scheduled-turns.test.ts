@@ -141,7 +141,8 @@ async function fixture(root: string, backend: Backend) {
           return run();
         },
         createNativeSchedule: nativeCreate,
-        resetContext: vi.fn(), isBusy: () => false, setWorkingDirectory: vi.fn(), abort: async () => true,
+        resetContext: vi.fn(), isBusy: () => false, setWorkingDirectory: vi.fn(),
+        abort: async () => { replyGate?.release(); return true; },
         destroy: vi.fn(),
       };
     };
@@ -319,6 +320,27 @@ describe('Host-timed scheduled turns over the local Router', () => {
     expect(remaining).toBeGreaterThan(0);
     await vi.advanceTimersByTimeAsync(remaining);
   }
+
+  it('delivers an interrupted occurrence and runs both its sibling and its next cron slot', async () => {
+    const h = f = await fixture(root, 'claude');
+    const recurring = await h.create('cron "1,3 8 * * *" --tz UTC');
+    const sibling = await h.create('at 2030-01-07T08:02:00Z');
+    h.holdReply();
+    await advanceTo(hour + minute);
+    await vi.waitFor(() => expect(h.turns).toHaveLength(1), wait);
+    expect((await h.request('/abort', otherOwner)).success).toBe(false);
+    expect((await h.command('/abort')).output).toContain('scheduled occurrence');
+    const interrupted = `${recurring}:host-${hour + minute}`;
+    await vi.waitFor(() => expect(h.acks).toContain(interrupted), wait);
+    const final = h.feishu.finalizeStreamingMessage.mock.calls.find(([card]) => card === `card-${interrupted}`)!;
+    expect([final[3], final[7], final[10]]).toEqual([openId, h.thread.id, false]);
+    expect(JSON.stringify(final[1])).toContain('interrupted by /abort');
+    await advanceTo(hour + 2 * minute);
+    await h.receipt(1, sibling, 'Provider reply 2');
+    await advanceTo(hour + 3 * minute);
+    await h.receipt(2, recurring, 'Provider reply 3');
+    expect(h.turns).toHaveLength(3);
+  });
 
   it('withholds the wire ACK until Feishu accepts the final result card', async () => {
     const h = f = await fixture(root, 'claude');

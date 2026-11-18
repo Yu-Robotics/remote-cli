@@ -568,6 +568,18 @@ requires the original thread and a backend that can safely use its conversation.
 If the CLI cannot tell whether a prompt reached the backend, it does not send
 that occurrence again.
 
+Each thread runs one scheduled or foreground request at a time. While the CLI
+stays online, a due one-shot waits for the thread to become available. A cron
+occurrence that is still waiting one minute after its scheduled time is skipped.
+When an occurrence finishes, its owner receives a scheduled result card in the
+original Feishu thread with a task preview and the final output or error.
+
+From CLI 1.6.266, `/abort` interrupts the current scheduled run. A recurring
+task keeps its next scheduled time. To stop future runs, use `/schedule cancel <id>`.
+Clearing the conversation with `/clear` or `/new` also removes its locally
+managed schedules and their stored history. Legacy native cleanup may still
+require the original session.
+
 Use the managed ID from `/schedule list` to cancel future runs. Work already
 dispatched may still finish. Results awaiting Feishu delivery can be retried
 when a compatible Router reconnects. After an upgrade, existing native tasks

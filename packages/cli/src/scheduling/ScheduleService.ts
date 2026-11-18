@@ -52,7 +52,7 @@ export interface SchedulePurgeResult {
 type PurgeOutcome = { status: 'removed' | 'alreadyRemoved'; forgottenCleanup?: true }
   | { status: 'pending'; reason: SchedulePurgeReason; detail: string };
 
-type HostResult = { success: boolean; output?: string; error?: string };
+export type HostResult = { success: boolean; output?: string; error?: string; abortedByUser?: true };
 
 export interface ScheduleServiceOptions {
   directory: string;
@@ -472,6 +472,7 @@ export class ScheduleService {
   private finishHost(record: ScheduleRecord, due: number, result: HostResult): string {
     const occurrenceId = `host-${due}`;
     const id = deliveryId(record.id, occurrenceId);
+    const interruptedCron = result.abortedByUser && record.inFlightDueAt === due && record.rule.kind === 'cron';
     delete record.inFlightDueAt;
     delete record.nextDueAt;
     // Host slots advance monotonically. The persisted next/in-flight slot
@@ -482,7 +483,7 @@ export class ScheduleService {
       ...(result.output !== undefined && { output: bounded(result.output, OUTPUT_BYTES) }),
       ...(result.error !== undefined && { error: bounded(result.error, ERROR_BYTES) }) });
     if (record.cancelRequested) record.state = 'cancelled';
-    else if (!result.success) {
+    else if (!result.success && !interruptedCron) {
       record.state = 'failed';
       record.error = bounded(result.error ?? 'Host schedule execution failed.', ERROR_BYTES);
     } else if (record.rule.kind === 'once') record.state = 'completed';
@@ -681,6 +682,45 @@ export class ScheduleService {
   async list(owner: ScheduleOwner): Promise<ScheduleRecord[]> {
     this.checkReady(); validateOwner(owner);
     return this.serial(async () => [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => structuredClone(record)));
+  }
+
+  /** Commit context erasure before reset advances its generation. Late host results
+   * require their original record object and cannot recreate a removed definition. */
+  clearHostContext(threadId: string, authorize: () => ScheduleOwner | undefined, allowNativeRecovery: boolean): Promise<number> {
+    return this.operation(this.serial(async () => {
+      this.checkReady();
+      const thread = [...this.records.values()].filter(row => row.threadId === threadId);
+      if (!allowNativeRecovery && thread.some(row => row.engine !== 'host' && this.isActiveSchedule(row))) {
+        throw new Error('Cancel this thread\'s native schedules with /schedule cancel <id> before resetting its conversation.');
+      }
+      const hosts = thread.filter(row => row.engine === 'host');
+      if (!hosts.length) return 0;
+      const owner = authorize();
+      if (owner && (!owner.bindingEpoch || owner.threadId !== threadId || !this.current(owner))) {
+        throw new Error('The schedule binding changed before conversation reset.');
+      }
+      const selected = hosts.filter(row => owner && sameOwner(row, owner));
+      const pendingSchedules = new Set([...this.pending.values()].map(delivery => delivery.scheduleId));
+      if (hosts.some(row => (!owner || !sameOwner(row, owner)) && (this.isActiveSchedule(row)
+        || pendingSchedules.has(row.id) || this.delivering.has(row.id) || this.hostAttempts.has(row.id)))) {
+        throw new Error('A host schedule still owns a different binding or conversation context.');
+      }
+      if (!selected.length) return 0;
+      if (selected.some(row => this.delivering.has(row.id) || this.purges.has(row.id) || this.recordOperations.has(row.id))) {
+        throw new Error('Schedule delivery or management is in progress. Retry the conversation reset after it settles.');
+      }
+      if ([...this.purged.keys()].filter(id => this.hostCatalogIds.has(id)).length + selected.length > MAX_PURGED_IDS) {
+        throw new Error('Host schedule replay fence capacity reached. Conversation reset was refused.');
+      }
+      for (const row of selected) {
+        this.purged.set(row.id, ownerOf(row));
+        this.records.delete(row.id);
+        this.dropPending(row.id);
+        this.hostRetryAt.delete(row.id);
+      }
+      await this.persist();
+      return selected.length;
+    }));
   }
 
   /** Operational deletion ledger, separate from user history and never recoverable. */
@@ -962,8 +1002,12 @@ export class ScheduleService {
 
   /** Includes terminal jobs whose native process exit is still unconfirmed. */
   hasActiveSchedules(threadId?: string): boolean {
-    return [...this.records.values()].some(record => (!threadId || record.threadId === threadId)
-      && (LIVE.has(record.state) || record.inFlightDueAt !== undefined || this.hasRetainedCleanupRoute(record) || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)));
+    return [...this.records.values()].some(record => (!threadId || record.threadId === threadId) && this.isActiveSchedule(record));
+  }
+
+  private isActiveSchedule(record: ScheduleRecord): boolean {
+    return LIVE.has(record.state) || record.inFlightDueAt !== undefined || this.hasRetainedCleanupRoute(record)
+      || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped);
   }
 
   /** Read-only admission for purge of an owned runtime, including cancelled jobs. */

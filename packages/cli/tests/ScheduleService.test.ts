@@ -112,6 +112,72 @@ describe('ScheduleService', () => {
     });
     afterEach(() => vi.useRealTimers());
 
+    it.each([false, true])('clears the outbox and fences a due occurrence across restart (admitted=%s)', async admitted => {
+      const captured = deferred<() => Promise<boolean>>();
+      const release = deferred<void>();
+      const dispatch: Dispatch = async (row, _id, admit) => {
+        if (row.id === 'queued') return await admit() ? { success: true, output: 'Queued output' } : undefined;
+        if (admitted) expect(await admit()).toBe(true);
+        captured.resolve(admit);
+        await release.promise;
+        return admitted ? { success: true, output: 'Late output' } : undefined;
+      };
+      const service = await run(dispatch);
+      deliver.mockRejectedValue(new Error('Offline'));
+      await service.create(owner, hostInput('queued'));
+      await service.create(owner, { ...hostInput('racing'), rule: { kind: 'once', at: new Date(clock + 2 * interval).toISOString() } });
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(service.hasPendingResults()).toBe(true);
+      await tick(interval);
+      const admit = await captured.promise;
+      for (const changed of [{ openId: 'other' }, { generation: 'other' }, { bindingEpoch: 'other' }]) {
+        await expect(service.clearHostContext(owner.threadId, () => ({ ...owner, ...changed }), false)).rejects.toThrow(/different binding/);
+      }
+      expect(await service.clearHostContext(owner.threadId, () => owner, false)).toBe(2);
+      expect(await admit()).toBe(false);
+      release.resolve();
+      await vi.waitFor(() => expect(service.canRestartWithoutActiveWork()).toBe(true));
+      expect(await read()).toMatchObject({ records: [], pending: [], purged: [{ ...owner, id: 'queued' }, { ...owner, id: 'racing' }] });
+      await service.destroy();
+      const next = await run(vi.fn());
+      await next.retryDeliveries();
+      expect(deliver).toHaveBeenCalledOnce();
+      await expect(next.create(owner, { ...hostInput('queued', true) })).rejects.toThrow(/purged/);
+    });
+
+    it('refuses clear while an external delivery is pending and erases its output on retry', async () => {
+      const release = deferred<void>();
+      deliver.mockImplementation(async () => { await release.promise; throw new Error('No receipt'); });
+      const service = await run(async (_row, _id, admit) => await admit() ? { success: true } : undefined);
+      await service.create(owner, hostInput());
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await expect(service.clearHostContext(owner.threadId, () => owner, false)).rejects.toThrow(/delivery/);
+      expect((await read()).purged).toEqual([]);
+      release.resolve();
+      await vi.waitFor(async () => expect(await service.clearHostContext(owner.threadId, () => owner, false)).toBe(1));
+      expect((await read()).pending).toEqual([]);
+    });
+
+    it('retains a completed result for a different owner and can retry a failed clear write after restart', async () => {
+      const dispatch: Dispatch = async (_row, _id, admit) => await admit() ? { success: true, output: 'Original output' } : undefined;
+      let service = await run(dispatch);
+      deliver.mockRejectedValue(new Error('Offline'));
+      await service.create(owner, hostInput());
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      const before = await read();
+      await expect(service.clearHostContext(owner.threadId, () => ({ ...owner, bindingEpoch: 'other' }), false)).rejects.toThrow(/different binding/);
+      vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Catalog replacement failed'));
+      await expect(service.clearHostContext(owner.threadId, () => owner, false)).rejects.toThrow(/replacement failed/);
+      expect(await read()).toEqual(before);
+      await service.destroy();
+      service = await run(dispatch);
+      expect(await service.clearHostContext(owner.threadId, () => owner, false)).toBe(1);
+      expect(await read()).toMatchObject({ records: [], pending: [] });
+    });
+
     it('requires the captured Router epoch before accepting a host definition', async () => {
       const service = await run(vi.fn());
       for (const bindingEpoch of [undefined, '', 'different']) {
@@ -316,6 +382,43 @@ describe('ScheduleService', () => {
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(dispatch.mock.calls[0][0].id).toBe('first');
+    });
+
+    it('delivers the interrupted cron fire, skips elapsed slots and executes the next future slot after restart', async () => {
+      const started = deferred<void>(), interrupted = deferred<void>();
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>()
+        .mockImplementationOnce(async (_record, _id, admit) => {
+          if (!await admit()) return;
+          started.resolve(); await interrupted.promise;
+          return { success: false, abortedByUser: true, error: 'Scheduled occurrence interrupted by /abort.' };
+        })
+        .mockImplementation(async (_record, _id, admit) => await admit() ? { success: true } : undefined);
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('recurring', true));
+      await tick(interval); await started.promise;
+      clock += interval + 1000;
+      interrupted.resolve();
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, occurrenceId: `host-${now + interval}`,
+        error: expect.stringContaining('/abort'), schedule: { state: 'active', nextDueAt: now + 3 * interval } });
+      await service.destroy(); service = await run(dispatch);
+      await tick(interval - 1000);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(deliver.mock.calls[1][0]).toMatchObject({ success: true, occurrenceId: `host-${now + 3 * interval}`,
+        schedule: { state: 'active', nextDueAt: now + 4 * interval } });
+    });
+
+    it.each(['once', 'cancel', 'failure'])('preserves terminal %s semantics on a failed host fire', async reason => {
+      const service = await run(async (_record, _id, admit) => {
+        if (!await admit()) return;
+        if (reason === 'cancel') await service.cancel(owner, 'job');
+        return { success: false, ...(reason !== 'failure' && { abortedByUser: true as const }), error: 'Occurrence failed' };
+      });
+      await service.create(owner, hostInput('job', reason !== 'once'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, schedule: { state: reason === 'cancel' ? 'cancelled' : 'failed' } });
+      expect((await service.list(owner))[0].nextDueAt).toBeUndefined();
     });
 
     it('defers busy threads under the same occurrence ID and expires the prior admission callback', async () => {

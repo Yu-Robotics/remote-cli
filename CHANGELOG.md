@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.266] - 2026-11-18
+
+### Changed
+- Preserve future cron runs when the owner aborts the current scheduled occurrence.
+- Clear the original conversation's framework-managed schedules and stored schedule history on conversation reset.
+
 ## [1.6.265] - 2026-11-18
 
 ### Changed

@@ -130,6 +130,75 @@ describe('MessageHandler native schedule closed loop', () => {
   const owner = () => ({ threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') });
   const records = () => ((f.handler as any).schedules as ScheduleService).list({ ...owner(), bindingEpoch: binding.epoch });
 
+  it.each(['/clear', '/new'])('%s erases only the original thread host records and durably fences their IDs', async command => {
+    await f.bind();
+    await f.send('/schedule after 5m -- Original task');
+    const [original] = await records();
+    await f.send('/schedule after 10m -- Sibling task', 'thread-b');
+    const siblingOwner = (f.handler as any).scheduleOwner('thread-b', 'owner');
+    const service: ScheduleService = (f.handler as any).schedules;
+    await f.send(command, 'thread-a', { openId: 'other' });
+    expect(f.responses().at(-1).success).toBe(false);
+    expect(await records()).toHaveLength(1);
+    await f.send(command);
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Removed 1 host schedule') });
+    expect(f.pool.clearThreadContext).toHaveBeenCalledOnce();
+    await f.restart(); await f.bind(); await (f.handler as any).loadScheduleCatalog();
+    const restored: ScheduleService = (f.handler as any).schedules;
+    expect(restored).not.toBe(service);
+    expect(await restored.list(original)).toEqual([]);
+    expect(await restored.list(siblingOwner)).toHaveLength(1);
+    await expect(restored.create((f.handler as any).scheduleOwner('thread-a', 'owner'), { ...original, engine: 'host' })).rejects.toThrow(/purged/);
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps cleared timers retired through a failed backend reset, restart and retry', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Retire on clear');
+    const [original] = await records();
+    f.pool.clearThreadContext.mockRejectedValueOnce(new Error('Synthetic backend reset failed'));
+    await f.send('/clear');
+    expect(f.responses().at(-1).error).toContain('Synthetic backend reset failed');
+    expect(f.responses().at(-1).error).toContain('Removed 1 host schedule');
+    expect(f.manager.contextResets.isPending('thread-a')).toBe(true);
+    await f.restart(); await f.bind(); await (f.handler as any).loadScheduleCatalog();
+    expect(await (f.handler as any).schedules.list(original)).toEqual([]);
+    await f.send('/new');
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(f.manager.contextResets.isPending('thread-a')).toBe(false);
+  });
+
+  it('leaves host definitions intact when live native schedules block clear', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Retain with native sibling');
+    await seedLegacy('/schedule after 4m -- Legacy sibling');
+    await f.send('/clear');
+    expect(f.responses().at(-1).error).toMatch(/native schedules/);
+    expect(await records()).toHaveLength(2);
+    expect(f.pool.clearThreadContext).not.toHaveBeenCalled();
+    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
+  });
+
+  it('lets an authenticated clear stop an admitted host turn and discards its late result', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Running task');
+    const [original] = await records();
+    const service = (f.handler as any).schedules;
+    let finish!: () => void;
+    f.executor.execute.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { success: true, output: 'Late scheduled result' };
+    });
+    vi.spyOn(service, 'now').mockReturnValue(original.nextDueAt);
+    await service.wakeHosts();
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
+    try {
+      await f.send('/clear');
+      expect(f.responses().at(-1).success).toBe(true);
+      expect(f.executor.abort).toHaveBeenCalledOnce();
+      expect(await service.list(original)).toEqual([]);
+    } finally { finish(); }
+    await vi.waitFor(() => expect(service.canRestartWithoutActiveWork()).toBe(true));
+    expect(f.scheduledResults()).toEqual([]);
+  });
+
   // Seed a legacy native runtime only for tests of its remaining management and cleanup paths.
   async function seedLegacy(command: string) {
     const parsed = parseScheduleCommand(command);
@@ -299,18 +368,49 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(await dispatch()).toMatchObject({ success: false, error: expect.stringContaining('original native session') });
   });
 
-  it('holds thread ownership until abort settles and returns a failed host result', async () => {
+  it('holds thread ownership until a user abort settles and reports only this fire interrupted', async () => {
     const { dispatch } = await dispatchFixture();
     let release!: () => void;
-    f.executor.execute.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({ success: true }); }));
+    f.executor.execute.mockImplementationOnce((_prompt, options) => new Promise((_resolve, reject) => {
+      options.onDisplayText?.('Partial answer');
+      release = () => reject(new Error('Executor interrupted'));
+    }));
     f.executor.abort.mockImplementationOnce(async () => { release(); return true; });
     const running = dispatch();
     await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
     expect(await dispatch()).toBeUndefined();
     await f.send('/abort');
-    expect(await running).toMatchObject({ success: false });
+    expect(await running).toMatchObject({ success: false, abortedByUser: true, output: 'Partial answer', error: expect.stringContaining('/abort') });
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('occurrence') });
     expect(f.executor.abort).toHaveBeenCalledOnce();
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(true);
+  });
+
+  it('does not abort an executor while the scheduled occurrence is awaiting admission', async () => {
+    const { dispatch } = await dispatchFixture();
+    const result = await dispatch(async () => {
+      await f.send('/abort');
+      expect(f.responses().at(-1).output).toContain('has not started');
+      return false;
+    });
+    expect(result).toBeUndefined();
+    expect(f.executor.abort).not.toHaveBeenCalled();
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the executor failure when interruption was not confirmed', async () => {
+    const { dispatch } = await dispatchFixture();
+    let release!: () => void;
+    f.executor.execute.mockImplementationOnce(() => new Promise(resolve => {
+      release = () => resolve({ success: false, error: 'Provider failure' });
+    }));
+    f.executor.abort.mockResolvedValueOnce(false);
+    const running = dispatch();
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
+    await f.send('/abort');
+    expect(f.responses().at(-1).success).toBe(false);
+    release();
+    expect(await running).toEqual({ success: false, error: 'Provider failure', output: undefined });
   });
 
   it.each(['claude', 'agy', 'dsh'])('reads the stored %s catalog through text and model tools', async backend => {
