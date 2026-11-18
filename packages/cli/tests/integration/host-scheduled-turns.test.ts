@@ -168,6 +168,7 @@ async function fixture(root: string, backend: Backend) {
       const current = new MessageHandler(ws, pool, manager, guard, config);
       handler = current;
       await current.prepareScheduleStartup();
+      const recovery = vi.spyOn(current as unknown as { loadScheduleCatalog(): Promise<void> }, 'loadScheduleCatalog');
       const send = ws.send.bind(ws);
       vi.spyOn(ws, 'send').mockImplementation(frame => {
         const sent = send(frame);
@@ -184,9 +185,10 @@ async function fixture(root: string, backend: Backend) {
       await ws.connect();
       await vi.waitFor(() => expect(registered).toBe(true), wait);
       if (reloadCatalog) {
-        // Binding can finish before the async startup catalog read arms the timer.
-        await vi.waitFor(() => expect(initialization).toHaveBeenCalled(), wait);
-        await initialization.mock.results[0].value;
+        // Registration starts reconciliation without delaying ordinary messages.
+        // Join that pass so the timer is armed before advancing the test clock.
+        expect(recovery).toHaveBeenCalled();
+        await recovery.mock.results.at(-1)!.value;
       }
     }
     await startCli();
@@ -208,8 +210,12 @@ async function fixture(root: string, backend: Backend) {
       expect(namespaces).toHaveLength(1);
       return path.join(schedules, namespaces[0], HOST_SCHEDULE_CATALOG_FILE);
     }
+    async function snapshot() {
+      const service = initialization.mock.instances.at(-1)!;
+      return service['serial'](async () => readFile(await catalogPath()));
+    }
     async function catalog() {
-      return JSON.parse(await readFile(await catalogPath(), 'utf8')) as {
+      return JSON.parse((await snapshot()).toString('utf8')) as {
         records: { id: string; state: string }[];
         pending: { id: string; scheduleId: string; output?: string }[];
       };
@@ -276,7 +282,7 @@ async function fixture(root: string, backend: Backend) {
       get ws() { return client!; },
       holdReply: () => (replyGate = latch()),
       replaceSelection: (replacement: string) => writeFile(selection(thread.id), replacement),
-      snapshot: async () => readFile(await catalogPath()),
+      snapshot,
       restart: async (snapshot?: Buffer) => {
         await stopCli();
         if (snapshot) await writeFile(await catalogPath(), snapshot);
@@ -485,6 +491,8 @@ describe('Host-timed scheduled turns over the local Router', () => {
       await h.replaceSelection(replacement);
       await h.restart();
       await advanceTo(hour + minute);
+      await vi.waitFor(() => expect(h.acks).toContain(`${id}:host-${hour + minute}`), wait);
+      await h.settleDelivery();
       await vi.waitFor(async () => expect((await h.catalog()).records).toMatchObject([{ id, state: 'failed' }]), wait);
       await advanceTo(hour + 2 * minute);
       await h.restart();
