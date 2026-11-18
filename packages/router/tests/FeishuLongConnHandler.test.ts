@@ -3056,6 +3056,60 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleHelpCommand', () => {
+    it('acknowledges a slow command before the callback deadline and reports a late failure', async () => {
+      vi.useFakeTimers();
+      try {
+        let fail!: (error: Error) => void;
+        vi.spyOn(handler as any, 'clickCommandMenu').mockImplementation(() => new Promise((_ok, reject) => { fail = reject; }));
+        const notify = vi.spyOn(handler, 'sendMessage').mockResolvedValue(true);
+        const click = handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'menu' },
+          action: { value: { action: 'command_menu' } } });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(await click).toMatchObject({ toast: { content: 'Processing your selection.' } });
+        fail(new Error('Selection changed.'));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(notify).toHaveBeenCalledWith('owner', 'Selection changed.');
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('keeps the displayed page when a menu event is delivered twice', async () => {
+      mockClient.im.message.create.mockResolvedValue({ code: 0, data: { message_id: 'existing-menu' } });
+      mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+      const open = () => (handler as any).openCommandMenu('owner', undefined, undefined, undefined, undefined, true, 'event-1');
+      await open();
+      const chooseGroup = { operator: { open_id: 'owner' }, context: { open_message_id: 'existing-menu' },
+        action: { value: { action: 'command_menu', rev: 0, op: 'group', value: 'Devices' } } };
+      expect(await handler.handleCardAction(chooseGroup)).toMatchObject({ toast: { type: 'info' } });
+      await open();
+      expect(mockClient.im.message.create.mock.calls[0][0].data.uuid).toBe(mockClient.im.message.create.mock.calls[1][0].data.uuid);
+      expect(await handler.handleCardAction(chooseGroup)).toMatchObject({ toast: { type: 'error' } });
+    });
+
+    it('opens /skills for the captured thread and routes a shortcut only for its original owner and card', async () => {
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'desktop', deviceName: 'Desktop' });
+      handler.setOnResolveActiveThread(async () => ({ threadId: 'project', threadName: 'Project' }));
+      const fence = { openId: 'owner', deviceId: 'desktop', revision: 1, epoch: 'binding' };
+      handler.setOnCaptureSelection(() => fence);
+      handler.setOnValidateSelection(() => true);
+      mockClient.im.message.create.mockResolvedValue({ code: 0, data: { message_id: 'menu' } });
+      mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+      const pass = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
+      await (handler as any).handleCommand('owner', 'incoming', '/skills', undefined, undefined, undefined, true);
+      const trigger = (user: string, card: string, rev = 0) => handler.handleCardAction({
+        operator: { open_id: user }, context: { open_message_id: card },
+        action: { value: { action: 'command_menu', op: 'choose', value: '/model', rev } },
+      });
+      expect(await trigger('other', 'menu')).toMatchObject({ toast: { type: 'error' } });
+      expect(await trigger('owner', 'copy')).toMatchObject({ toast: { type: 'error' } });
+      expect(await trigger('owner', 'menu')).toMatchObject({ toast: { type: 'info' } });
+      expect(pass).toHaveBeenCalledWith('owner', 'menu', '/model', '/model', 'project', 'Project', 'desktop', false, fence);
+      handler.setOnValidateSelection(() => false);
+      expect(await trigger('owner', 'menu', 1)).toMatchObject({ toast: { type: 'error' } });
+      expect(pass).toHaveBeenCalledTimes(1);
+      await (handler as any).handleCommand('owner', 'incoming', '/skills list');
+      expect(pass).toHaveBeenLastCalledWith('owner', 'incoming', '/skills', '/skills', undefined, undefined, undefined, false);
+    });
+
     it('should send help message', async () => {
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
       await (handler as any).handleHelpCommand('ou_123', 'msg_1');

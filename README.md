@@ -516,7 +516,8 @@ Once connected, use these commands in Feishu:
 | `/help` | Show help information |
 | `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | Show current session context and queue diagnostics |
-| `/skills` | List available skills for the active backend |
+| `/skills` | Open the Feishu command card |
+| `/skills list` | List available skills for the active backend |
 | `/abort` | Abort the currently executing task in this thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Reset all direct backend and managed worker conversations for this thread |
@@ -531,6 +532,10 @@ Once connected, use these commands in Feishu:
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
+
+In Feishu, send `/skills` to open the command card. Quick access opens controls for directories, models, backends, queues, files, and schedules. Browse the groups for device management, thread controls, and forms for one-time and recurring tasks. Choose **Settings / Installed backend skills** or send `/skills list` for the backend skill list. The Slides entry requires a backend that provides a `/slides` extension.
+
+A Feishu bot menu that sends `/skills` opens the same card. For an event-based menu, subscribe to `application.bot.menu_v6` and use the event key `skills`. Enable `card.action.trigger` for card controls.
 
 ### Scheduled tasks
 

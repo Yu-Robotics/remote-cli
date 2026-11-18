@@ -515,7 +515,8 @@ remote-cli stop
 | `/help` | 显示帮助信息 |
 | `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | 显示当前会话上下文和队列诊断信息 |
-| `/skills` | 列出当前 backend 可用的 skills |
+| `/skills` | Open the Feishu command card |
+| `/skills list` | List available skills for the active backend |
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
 | `/queue` | 查看或管理线程中已确认的排队消息 |
 | `/clear` | Reset all direct backend and managed worker conversations for this thread |
@@ -530,6 +531,10 @@ remote-cli stop
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
 | `/device` | 列出绑定设备及其连接状态，或切换设备 |
+
+In Feishu, send `/skills` to open the command card. Quick access opens controls for directories, models, backends, queues, files, and schedules. Browse the groups for device management, thread controls, and forms for one-time and recurring tasks. Choose **Settings / Installed backend skills** or send `/skills list` for the backend skill list. The Slides entry requires a backend that provides a `/slides` extension.
+
+A Feishu bot menu that sends `/skills` opens the same card. For an event-based menu, subscribe to `application.bot.menu_v6` and use the event key `skills`. Enable `card.action.trigger` for card controls.
 
 ### Scheduled tasks
 

@@ -22,6 +22,7 @@ import type { FileInput } from '../files/FileTransfers';
 import type { SelectionFence } from '../binding/ThreadSelectionManager';
 import type { WorkerContextCards } from './WorkerContextCards';
 import type { SettingsCards } from './SettingsCards';
+import { CommandMenu, commandMenuHeader } from './CommandMenu';
 import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
@@ -104,6 +105,10 @@ export class FeishuLongConnHandler {
   // Pattern to match tool use separator lines
   private readonly TOOL_USE_PATTERN = /─+ TOOL USE ─+/;
   private readonly TOOL_SEPARATOR_PATTERN = /─{20,}/;
+  private readonly commandMenus = new Map<string, {
+    openId: string; deviceId?: string; threadId?: string; threadName?: string; fence?: SelectionFence;
+    menu: CommandMenu; expires: number; topLevel: boolean;
+  }>();
 
   constructor(config: FeishuLongConnHandlerConfig) {
     this.appId = config.appId;
@@ -205,7 +210,7 @@ export class FeishuLongConnHandler {
    * that have no parent_id).
    */
   private onResolveActiveThread?: (openId: string, deviceId: string) => Promise<{ threadId: string; threadName: string } | undefined>;
-  onRecoverThreads?: (openId: string, deviceId: string, messageId: string) => Promise<boolean>;
+  onRecoverThreads?: (openId: string, deviceId: string, messageId: string, fence?: SelectionFence) => Promise<boolean>;
 
   /**
    * Set active thread resolution callback
@@ -412,10 +417,19 @@ export class FeishuLongConnHandler {
    */
   private async handleCommand(openId: string, messageId: string, content: string, threadId?: string, threadName?: string,
     sourceDeviceId?: string, useActiveThread = false): Promise<void> {
-    const parts = content.split(/\s+/);
+    const parts = content.trim().split(/\s+/);
     const command = parts[0].toLowerCase();
 
     switch (command) {
+      case '/skills':
+        if (parts.length === 1) {
+          await this.openCommandMenu(openId, messageId, threadId, threadName, sourceDeviceId, useActiveThread);
+          break;
+        }
+        if (content.trim() === '/skills list') content = '/skills';
+        await this.handleSlashCommandPassthrough(openId, messageId, content, command, threadId, threadName, sourceDeviceId, useActiveThread);
+        break;
+
       case '/bind':
         if (parts.length >= 2) {
           await this.handleBindCommand(openId, messageId, parts[1]);
@@ -460,7 +474,8 @@ export class FeishuLongConnHandler {
     threadId?: string,
     threadName?: string,
     sourceDeviceId?: string,
-    useActiveThread = false
+    useActiveThread = false,
+    originalFence?: SelectionFence
   ): Promise<void> {
     try {
       // Find user binding
@@ -517,7 +532,11 @@ export class FeishuLongConnHandler {
         }
       }
 
-      const selectionFence = this.onCaptureSelection?.(openId, activeDevice.deviceId);
+      const selectionFence = originalFence ?? this.onCaptureSelection?.(openId, activeDevice.deviceId);
+      if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
+        await this.replyToMessage(messageId, 'The device or thread selection changed. Reopen /skills.');
+        return;
+      }
 
       console.log(`[FeishuHandler] Passing through slash command: ${command}${threadId ? ` (threadId=${threadId})` : ''}`);
 
@@ -853,6 +872,60 @@ export class FeishuLongConnHandler {
   /**
    * Handle help command
    */
+  private async openCommandMenu(openId: string, messageId?: string, threadId?: string, threadName?: string,
+    sourceDeviceId?: string, topLevel = true, eventId?: string): Promise<void> {
+    try {
+      const device = sourceDeviceId
+        ? (await this.bindingManager.getUserDevices(openId)).find(candidate => candidate.deviceId === sourceDeviceId)
+        : await this.bindingManager.getActiveDevice(openId);
+      if (sourceDeviceId && !device) throw new Error('Device binding expired.');
+      const deviceId = device?.deviceId;
+      const fence = deviceId ? this.onCaptureSelection?.(openId, deviceId) : undefined;
+      if (topLevel && deviceId) {
+        const selected = await this.onResolveActiveThread?.(openId, deviceId);
+        threadId = selected?.threadId;
+        threadName = selected?.threadName;
+      }
+      const menu = new CommandMenu(device ? device.deviceName + ' / ' + (threadName || threadId || 'default') : 'No device bound');
+      const result = await this.client.im.message.create({ params: { receive_id_type: 'open_id' },
+        data: { receive_id: openId, msg_type: 'interactive', uuid: eventId || messageId
+          ? createHash('sha256').update(JSON.stringify([openId, eventId || messageId])).digest('hex').slice(0, 40) : uuidv4(),
+          content: JSON.stringify({ schema: '2.0', header: commandMenuHeader, body: { elements: menu.render() } }) } });
+      const cardId = result?.data?.message_id;
+      if (result.code || !cardId) throw new Error('Menu delivery failed.');
+      if (this.commandMenus.has(cardId)) return;
+      if (this.commandMenus.size >= 1000) this.commandMenus.delete(this.commandMenus.keys().next().value!);
+      this.commandMenus.set(cardId, { openId, deviceId, threadId, threadName, fence, menu, topLevel, expires: Date.now() + 3_600_000 });
+    } catch {
+      const fallback = 'Could not open the command menu. Use /help for commands or /skills list for backend skills.';
+      if (messageId) await this.replyToMessage(messageId, fallback);
+      else await this.sendMessage(openId, fallback);
+    }
+  }
+
+  private async clickCommandMenu(openId: string, cardId: string, action: { rev?: number; op?: string; value?: string },
+    form: unknown): Promise<string> {
+    const state = this.commandMenus.get(cardId);
+    if (!state || state.openId !== openId || state.expires <= Date.now()) throw new Error('Reopen /skills for a fresh menu.');
+    return state.menu.click(action, form, async elements => {
+      const result = await this.client.im.message.patch({ path: { message_id: cardId },
+        data: { content: JSON.stringify({ schema: '2.0', header: commandMenuHeader, body: { elements } }) } });
+      if (result.code) throw new Error('Menu update failed.');
+    }, async content => {
+      const [command] = content.split(/\s+/);
+      if (state.fence && !this.onValidateSelection?.(state.fence)) throw new Error('Selection changed. Reopen /skills.');
+      if (['/bind', '/device', '/unbind', '/tips', '/help'].includes(command)) {
+        await this.handleCommand(openId, cardId, content);
+        return;
+      }
+      if (!state.deviceId) throw new Error('Bind a device and reopen /skills.');
+      if (command === '/thread' && content === '/thread list' && state.topLevel
+        && await this.onRecoverThreads?.(openId, state.deviceId, cardId, state.fence)) return;
+      await this.handleSlashCommandPassthrough(openId, cardId, content, command, state.threadId, state.threadName,
+        state.deviceId, false, state.fence);
+    });
+  }
+
   private async handleHelpCommand(openId: string, messageId: string): Promise<void> {
     const helpMessage = `📖 Feishu Remote Control Help
 
@@ -872,7 +945,8 @@ Backend and session commands (sent to active device):
 /clear - Clear conversation context and start fresh session
 /status - Show backend, model, effort, queue, and thread status
 /context - Show current session context and queue diagnostics
-/skills - List available skills for the active backend
+/skills - Open the interactive command menu
+/skills list - List installed skills for the active backend
 /abort - Abort the currently executing command
 /queue - Inspect or manage confirmed messages for busy threads
 /schedule - Manage one-shot and cron tasks in this thread. Use /schedule help for commands.
@@ -2172,6 +2246,24 @@ Examples:
 
     if (!parsed || typeof parsed !== 'object') return;
     this.recordUserActivity(openId);
+    if (parsed.action === 'command_menu') {
+      const click = this.clickCommandMenu(openId, data.context?.open_message_id, parsed, data.action.form_value)
+        .then(content => ({ type: 'info', content }), error => ({
+          type: 'error', content: error instanceof Error ? error.message : 'Reopen /skills.',
+        }));
+      // Feishu requires an acknowledgement within three seconds, including network time.
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const toast = await Promise.race([click, new Promise<undefined>(resolve => {
+          timer = setTimeout(() => resolve(undefined), 1200);
+        })]);
+        if (toast) return { toast };
+        void click.then(result => {
+          if (result.type === 'error') return this.sendMessage(openId, result.content);
+        }).catch(() => {});
+        return { toast: { type: 'info', content: 'Processing your selection.' } };
+      } finally { clearTimeout(timer); }
+    }
     if (parsed.action === 'automatic_file_enrollment') {
       const cardId = data?.context?.open_message_id;
       if (typeof cardId !== 'string' || !this.onAutomaticFileEnrollment) return { toast: { type: 'error', content: 'File approval unavailable.' } };
@@ -2457,6 +2549,12 @@ Examples:
           },
           'card.action.trigger': async (data: any) => {
             return this.handleCardAction(data);
+          },
+          'application.bot.menu_v6': async data => {
+            const openId = data.operator?.operator_id?.open_id;
+            if (openId && (data.event_key === 'skills' || data.event_key === '/skills')) {
+              await this.openCommandMenu(openId, undefined, undefined, undefined, undefined, true, data.event_id || data.uuid);
+            }
           },
         })
       });

@@ -373,9 +373,9 @@
     "title": "电脑上配置好的Skill，手机上继续用",
     "problem": "电脑上已经配置了常用 Skill，离开电脑后又要重新说明操作步骤。",
     "benefit": "从飞书请求复用当前后端已有的 Skill，可以沿用既有流程和输出要求，不必重新描述整套步骤。",
-    "action": "先发送 /skills 查看当前后端的技能，再用普通文字点名已安装的实际技能并说明任务。",
-    "example": "/skills\n请使用已安装的「实际技能名」检查本次修改，并按该技能要求返回结果。",
-    "detail": "Claude 可用实际技能命令；Codex 仅本地发现，不支持 TUI 透传。列出不等于安装或加载，不会自动跨后端同步；DSH 不支持 /skills。",
+    "action": "先发送 /skills list 查看当前后端的技能，再用普通文字点名已安装的实际技能并说明任务。",
+    "example": "/skills list\n请使用已安装的「实际技能名」检查本次修改，并按该技能要求返回结果。",
+    "detail": "Claude 可用实际技能命令；Codex 本地发现，不支持 TUI 透传。列出不等于安装或加载，不会自动跨后端同步；DSH 不支持 /skills list。",
     "image": "skills-by-backend.png",
     "illustration": {
       "layout": "skills-by-backend",

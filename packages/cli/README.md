@@ -206,7 +206,8 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/help` | Show help information |
 | `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | Show current session context and queue diagnostics |
-| `/skills` | List available skills for the active backend |
+| `/skills` | Open the command card in Feishu |
+| `/skills list` | List available skills for the active backend via Feishu |
 | `/abort` | Abort executing task in current thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Reset all direct backend and managed worker conversations for this thread |

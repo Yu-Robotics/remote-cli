@@ -436,13 +436,13 @@ export class RouterServer {
     this.feishuLongConnHandler.setOnResolveActiveThread(async (openId: string, deviceId: string) => {
       return this.selections.resolve(openId, deviceId);
     });
-    this.feishuLongConnHandler.onRecoverThreads = async (openId, deviceId) => {
+    this.feishuLongConnHandler.onRecoverThreads = async (openId, deviceId, _messageId, menuFence) => {
       if (this.stopping || this.threadInventoryRequests.size >= 100) {
         await this.feishuLongConnHandler.sendMessage(openId, 'Thread controls are busy. Retry shortly.');
         return true;
       }
       const messageId = randomUUID();
-      const fence = this.selections.beginIntent(openId, deviceId);
+      const fence = menuFence ?? this.selections.beginIntent(openId, deviceId);
       const timer = setTimeout(() => {
         if (!this.threadInventoryRequests.delete(messageId)) return;
         void this.feishuLongConnHandler.sendMessage(openId, 'Could not refresh thread controls. Check the device connection and retry /thread list.');

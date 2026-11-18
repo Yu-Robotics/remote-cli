@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.268] - 2026-11-19
+
+### Added
+- Open a grouped Feishu command card from `/skills` or the skills bot menu. Launch existing settings, device, thread and queue controls, or submit parameters for scheduled tasks and other commands. Use `/skills list` for backend skill discovery.
+
 ## [1.6.267] - 2026-11-19
 
 ### Changed
