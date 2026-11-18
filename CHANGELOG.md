@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.264] - 2026-11-18
+
+### Fixed
+- Keep AGY ACP foreground turns open while native questions await an answer. Route replies to the same session and require the native Stop receipt before completing the turn. Release queue admission when a failed foreground leaves the host fenced.
+
 ## [1.6.263] - 2026-11-18
 
 ### Fixed

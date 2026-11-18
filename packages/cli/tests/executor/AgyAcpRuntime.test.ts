@@ -42,6 +42,7 @@ vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
 vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   session = native.sessionId; token: object | undefined = {}; cursor = 0; rows: TranscriptRecord[] = [];
   tasks = new Map<string, string>(); prompts: string[] = []; cancelled = false; closed = false;
+  questionStep?: number;
   controls: Array<[string, string]> = []; model = 'synthetic-default'; thought = 'low'; mode = 'default';
   release?: (value: { stopReason: string }) => void;
   exited: Promise<void>; onExit!: () => void;
@@ -106,8 +107,26 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   }
   async prompt(_id: string, blocks: any[]) {
     const text = blocks[0].text; this.prompts.push(text);
+    if (this.questionStep !== undefined) {
+      this.row('GENERIC', 'Answered: ' + text, 'MODEL', 'DONE', this.questionStep);
+      this.questionStep = undefined;
+      this.hook('PostToolUse'); this.hook('PostInvocation');
+    }
     this.hook('SessionStart'); this.hook('PreInvocation', { initialNumSteps: this.cursor });
     if (text === 'hold') return new Promise<{ stopReason: string }>(resolve => { this.release = resolve; });
+    if (text === 'missing terminal') return { stopReason: 'end_turn' };
+    if (text === 'ask' || text === 'ask again') {
+      const args = { questions: [{ question: 'Choose a fixture option.', options: ['First', 'Second'] }] };
+      this.row('PLANNER_RESPONSE', '');
+      this.rows.at(-1)!.tool_calls = [{ name: 'ask_question', args }];
+      const step = this.cursor++;
+      this.questionStep = step;
+      expect(this.hook('PreToolUse', { stepIdx: step, toolCall: { id: `call-${step}`, name: 'ask_question', args } })).toEqual({ decision: 'allow' });
+      const update = { toolCallId: `toolCallId-${step}`, name: 'ask_question', status: 'pending', rawInput: args };
+      this.callbacks.onToolCall?.(update);
+      this.callbacks.onTextChunk?.({ type: 'text', text: 'Choose a fixture option.\n- [1] First\n- [2] Second' });
+      return { stopReason: 'end_turn' };
+    }
     if (text.startsWith('Execute exactly this native tool once')) this.tool(JSON.parse(text.slice(text.indexOf('\n') + 1)));
     this.callbacks.onTextChunk?.({ type: 'text', text: 'Synthetic streamed text' });
     this.finish(); return { stopReason: 'end_turn' };
@@ -145,6 +164,48 @@ function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRu
 }
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  it.each([false, true])('keeps questions open and forwards free-form replies on the same ACP host (worker=%s)', async worker => {
+    const { runtime } = initialRuntime({ worker });
+    const onStream = vi.fn();
+    const execution = runtime.execute('ask', { onStream });
+    await vi.waitFor(() => expect(runtime.isWaitingInput()).toBe(true));
+    expect(runtime.busy).toBe(true);
+    await expect(runtime.withOperation('waiting', () => true, async () => {}, true)).rejects.toThrow('waiting for the answer');
+    expect(onStream.mock.calls.flat().join('')).toContain('Choose a fixture option.');
+    expect(runtime.sendInput('   ')).toBe(false);
+    expect(runtime.sendInput('ask again')).toBe(true);
+    await vi.waitFor(() => expect(runtime.isWaitingInput()).toBe(true));
+    expect(runtime.sendInput('First, with extra details.')).toBe(true);
+    await expect(execution).resolves.toMatchObject({ success: true, output: 'Synthetic result' });
+    expect(native.clients).toHaveLength(1);
+    expect(last().prompts).toEqual(['ask', 'ask again', 'First, with extra details.']);
+    expect(runtime.sessionId).toBe(native.sessionId);
+    expect(runtime.isWaitingInput()).toBe(false);
+    expect(runtime.busy).toBe(false);
+  });
+
+  it('clears the wait on abort and does not send an answer after cancellation', async () => {
+    const { runtime } = initialRuntime();
+    const execution = runtime.execute('ask', {});
+    await vi.waitFor(() => expect(runtime.isWaitingInput()).toBe(true));
+    await expect(runtime.abort()).resolves.toBe(true);
+    await expect(execution).resolves.toMatchObject({ success: false });
+    expect(last().cancelled).toBe(true);
+    expect(runtime.sendInput('Late response')).toBe(false);
+    expect(last().prompts).toEqual(['ask']);
+    expect(runtime.busy).toBe(false);
+    expect(runtime.blocked).toBeTruthy();
+  });
+
+  it('keeps an unexplained missing Stop fenced without leaving the queue busy', async () => {
+    const { runtime } = initialRuntime();
+    await expect(runtime.execute('missing terminal', {})).rejects.toThrow('foreground output is unconfirmed');
+    expect(runtime.isWaitingInput()).toBe(false);
+    expect(runtime.busy).toBe(false);
+    await expect(runtime.execute('next', {})).rejects.toThrow('terminal is missing');
+    expect(last().prompts).toEqual(['missing terminal']);
+  });
+
   it('leaves native defaults unchanged when no settings are requested', async () => {
     const { runtime } = initialRuntime({ model: undefined, effort: undefined });
     await runtime.start(); expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]);

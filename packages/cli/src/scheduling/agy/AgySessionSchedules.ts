@@ -213,6 +213,11 @@ export class AgySessionSchedules implements NativeScheduleProvider {
 
   /** Called before a genuine foreground prompt; ACP text is not schedule output. */
   beginForeground(): void { this.check(); if (this.operation || this.foreground || this.boundary !== undefined) throw new Error('AGY host is busy.'); this.foregroundResult = undefined; this.foreground = true; this.executionForeground = true; }
+  suspendForeground(): boolean {
+    if (this.failure || !this.foreground || !this.invocation || this.invocation.outputs || this.foregroundResult) return false;
+    this.endOperationTurn();
+    return true;
+  }
   endForeground(): { success: boolean; output: string } | undefined { this.foreground = false; this.endOperationTurn(); return this.foregroundResult; }
   private endOperationTurn(): void {
     if (!this.scope?.inTurn) return;
@@ -305,6 +310,9 @@ export class AgySessionSchedules implements NativeScheduleProvider {
     if (this.failure || !this.options.isCurrent()) return deny;
     if (!call || typeof call.name !== 'string' || typeof call.id !== 'string' || call.id.length > 256
       || !Number.isSafeInteger(payload.stepIdx) || (payload.stepIdx as number) < 0) return deny;
+    if (call.name === 'ask_question' && !this.foreground) {
+      return { decision: 'deny', reason: 'AGY questions require an interactive foreground turn.' };
+    }
     const op = this.operation;
     if (!['schedule', 'manage_task'].includes(call.name) && !/remote_cli_schedule_(create|list|cancel|purge|operation|capabilities)$/.test(call.name)) this.backgroundUnknown = true;
     if (!op) return ['schedule', 'manage_task'].includes(call.name) ? deny : { decision: 'allow' };

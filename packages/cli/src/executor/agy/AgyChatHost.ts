@@ -45,12 +45,13 @@ export class AgyChatHost {
       : event === 'PreToolUse' ? { decision: 'deny' as const, reason: this.failure } : {};
     return decision;
   }
-  async prompt(blocks: AcpContentBlock[]): Promise<{ success: boolean; output: string; stopReason: string }> {
+  suspendForeground(): boolean { return this.monitor.suspendForeground(); }
+  async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
     if (this.active || this.blocked || !this.reusable) throw new Error(this.blocked ?? 'AGY chat is busy or has unsettled native work.');
     this.turnStart = undefined; this.observedTools.clear();
     this.monitor.beginForeground(); this.active = true; this.cancelled = false;
     try {
-      const terminal = await Promise.race([this.client.prompt(this.sessionId, blocks), new Promise<never>((_, reject) => { this.rejectCancel = reject; })]);
+      const terminal = await Promise.race([promptNative(blocks), new Promise<never>((_, reject) => { this.rejectCancel = reject; })]);
       if (terminal.stopReason === 'cancelled' || this.cancelled) {
         // Cancellation is not success and cannot discharge earlier hook faults.
         if (this.blocked) throw new Error(this.blocked);

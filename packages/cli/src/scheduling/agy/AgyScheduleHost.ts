@@ -42,11 +42,11 @@ export class AgyScheduleHost implements NativeScheduleProvider {
   create(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void, admit?: () => boolean): Promise<NativeScheduleHandle> {
     return this.schedules.create(input, emit, admit);
   }
-  async prompt(blocks: AcpContentBlock[]): Promise<{ success: boolean; output: string; stopReason: string }> {
+  async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
     if (this.closing || this.busy) throw new Error('AGY original ACP host is busy or closing.');
     this.schedules.beginForeground(); this.busy = true; this.promptActive = true; this.cancelled = false;
     try {
-      const terminal = await Promise.race([this.client.prompt(this.sessionId, blocks),
+      const terminal = await Promise.race([promptNative(blocks),
         new Promise<never>((_, reject) => { this.rejectCancelled = reject; })]);
       if (terminal.stopReason === 'cancelled' || this.cancelled) {
         this.schedules.foregroundCancelled();

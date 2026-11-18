@@ -566,6 +566,9 @@ Live `/model` and `/effort` changes use confirmed native controls on the same AC
 session. They require idle chat without retained schedules. Settings and managed-tool
 reconnection permanently disable scheduling on that host; loading never creates fresh
 schedule admission. Manual permissions use existing approval cards or text replies.
+When AGY asks a native question in a foreground turn, reply in the same thread.
+The answer resumes the active conversation, and the original turn completes
+when AGY confirms its result. Use `/abort` to stop waiting for a reply.
 Cancellation uses ACP cancel; completed tool effects remain, and an unconfirmed
 terminal prevents continuation. Native Stop errors take precedence over ACP end_turn.
 Explicit compaction remains summarize-then-reset, not native session compaction.
