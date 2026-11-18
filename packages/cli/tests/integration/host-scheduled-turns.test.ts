@@ -226,6 +226,12 @@ async function fixture(root: string, backend: Backend) {
       expect(turns).toHaveLength(0);
       return id;
     }
+    async function settleDelivery() {
+      // The WebSocket ACK precedes atomic catalog replacement. Opening the file
+      // concurrently with rename can prevent the replacement on Windows.
+      const service = initialization.mock.instances.at(-1);
+      if (service) await service['deliveryTail'];
+    }
     async function receipt(index: number, scheduleId: string, output: string, cardExpired = false) {
       const starts = () => feishu.sendStreamingStart.mock.calls.filter(([, intro]) => intro?.includes('Scheduled task result'));
       await vi.waitFor(() => expect(starts()).toHaveLength(index + 1), wait);
@@ -235,6 +241,7 @@ async function fixture(root: string, backend: Backend) {
       expect(intro).toContain(`**Backend:** ${backend}`);
       expect(id).toEqual(expect.any(String));
       await vi.waitFor(() => expect(acks.filter(ack => ack === id)).toHaveLength(1), wait);
+      await settleDelivery();
       expect(responses.get(id!)).toMatchObject({ success: true, output, queueStarted: { source: 'schedule', scheduleId } });
       const finals = feishu.finalizeStreamingMessage.mock.calls.filter(([card]) => card === `card-${id}`);
       expect(finals).toHaveLength(1);
@@ -253,7 +260,7 @@ async function fixture(root: string, backend: Backend) {
       expect(turn.at).toBeLessThan(due + minute);
       expect(checked).toHaveBeenCalledWith(sessionId, sessionId);
     }
-    return { create, command, request, catalog, receipt, expectTurn, turns, acks, checked, sessionId, thread, feishu, close,
+    return { create, command, request, catalog, receipt, settleDelivery, expectTurn, turns, acks, checked, sessionId, thread, feishu, close,
       nativeCreate, nativeManagement, managedCreates,
       get bindingEpoch() { return store.getCardThreadEpoch(openId, deviceId, 'schedule'); },
       switchDevices: async () => {
@@ -401,6 +408,7 @@ describe('Host-timed scheduled turns over the local Router', () => {
       await h.restart(snapshot);
       const id = `${scheduleId}:host-${hour + minute}`;
       await vi.waitFor(() => expect(h.acks).toContain(id), wait);
+      await h.settleDelivery();
       await vi.waitFor(async () => expect(await h.catalog()).toMatchObject({
         pending: [], records: [{ id: scheduleId, state: 'failed', error: expect.stringContaining('unknown') }],
       }), wait);
