@@ -69,14 +69,14 @@ export class DshAcpClient extends AcpClient {
     return this.sendRequest('session/resume', { sessionId, cwd, mcpServers }) as Promise<AcpSessionResult>;
   }
 
-  async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
+  async prompt(sessionId: string, blocks: AcpContentBlock[], assertCurrent?: () => void): Promise<{ stopReason: string }> {
     if (!this.supportsImages && blocks.some(block => block.type === 'image')) {
       throw new Error('This DSH ACP profile/model does not support image input. No part of this prompt was submitted. Send text or a supported document instead.');
     }
     this.foregroundSession = sessionId;
     this.foregroundStopReason = undefined;
     try {
-      const result = await super.prompt(sessionId, blocks);
+      const result = await super.prompt(sessionId, blocks, assertCurrent);
       return this.scheduleEnabled && this.foregroundStopReason ? { stopReason: this.foregroundStopReason } : result;
     } finally { this.foregroundSession = undefined; this.foregroundStopReason = undefined; }
   }

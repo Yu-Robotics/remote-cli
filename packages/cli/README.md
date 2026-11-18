@@ -235,6 +235,47 @@ From CLI and Router 1.6.156, bare `/delegation` opens a thread-only On/Off card 
 
 Backend availability uses colored status badges: blue for the coordinator, green for installed workers, orange for blocked workers, red for unavailable backends and gray for unknown worker availability. Text labels and version or restriction details remain visible; these badges do not prove authentication or quota.
 
+### Scheduled tasks
+
+After upgrading, scheduling is enabled by default for Claude Code, Codex,
+DeepSeek Harness (DSH), AGY, OpenCode, Kimi, Pi, and ZCode. In an established
+conversation, ask for a one-shot or recurring task, for example, “Every weekday
+at 9 AM America/New_York, summarize my open tasks.” The local CLI stores the
+rule and submits the prompt to that same conversation when due. The result
+belongs to the user and Feishu thread that created the task.
+
+Upgrade both the CLI and Router to 1.6.265 or later. A compatible Router
+confirms the device's current user binding before a task can be created or
+dispatched. Rebinding the device invalidates tasks from the previous binding.
+
+The CLI handles timing, cancellation, restart recovery, and result retries
+locally. A model interprets a natural-language request and performs the
+scheduled work. The slash commands below also work directly.
+
+```text
+/schedule after 5m -- Check the build and summarize failures
+/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Summarize open tasks
+/schedule list
+/schedule cancel <id>
+```
+
+For a one-shot at a specific time, use `/schedule at <ISO timestamp with Z or offset> -- <prompt>`.
+Cron takes five fields and an explicit IANA timezone. Month and weekday names
+are supported. You can also ask
+the agent in this thread to create, list, or cancel tasks.
+
+Keep the CLI running when a task is due. Starting with CLI 1.6.265, it saves
+new definitions locally and reloads them after restart. Cron resumes at the next
+scheduled time and skips firings missed while the CLI was offline. Each run
+requires the original thread and a backend that can safely use its conversation.
+If the CLI cannot tell whether a prompt reached the backend, it does not send
+that occurrence again.
+
+Use the managed ID from `/schedule list` to cancel future runs. Work already
+dispatched may still finish. Results awaiting Feishu delivery can be retried
+when a compatible Router reconnects. After an upgrade, existing native tasks
+remain available for manual cleanup. The CLI does not migrate them to its timer.
+
 ### Illustrated Tips
 
 Use `/tips` to browse 27 short Chinese scenario cards, each with its own bundled

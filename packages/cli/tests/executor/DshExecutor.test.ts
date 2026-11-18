@@ -227,6 +227,33 @@ describe('DshExecutor', () => {
     expect(current().loadSession).not.toHaveBeenCalled();
   });
 
+  it.each(['resumed', 'missing', 'diverged'] as const)('pins scheduled foreground dispatch across transport startup (%s)', async state => {
+    expect(() => executor.checkHostScheduleSession('unallocated')).toThrow();
+    await executor.execute('original');
+    const id = executor.getSessionId()!;
+    executor.checkHostScheduleSession(id);
+    await executor.destroy(); executor = create();
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
+    executor.checkHostScheduleSession(id);
+    expect(transports).toHaveLength(1);
+    customize = transport => {
+      if (state === 'missing') transport.loadSession.mockRejectedValue(new Error('session is not resumable: fixture'));
+      if (state === 'diverged') transport.loadSession.mockResolvedValue({ ...{ sessionId: 'another' }, configOptions: [] });
+    };
+    expect((await executor.execute('scheduled', { hostScheduleSessionId: id })).success).toBe(state === 'resumed');
+    expect(current().loadSession).toHaveBeenCalledWith(id, directory,
+      [expect.objectContaining({ name: 'remote-cli-delegation' })], expect.any(Function));
+    expect(current().newSession).not.toHaveBeenCalled();
+    expect(current().prompt).toHaveBeenCalledTimes(state === 'resumed' ? 1 : 0);
+    expect(JSON.parse(fs.readFileSync(pointer(), 'utf8')).id).toBe(id);
+    if (state === 'resumed') {
+      expect(current().prompt).toHaveBeenCalledWith(id, [{ type: 'text', text: 'scheduled' }],
+        current().loadSession.mock.calls[0][3]);
+      fs.rmSync(pointer());
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    }
+  });
+
   it('blocks unqualified scheduled-session resume before spawning, including failed CREATE, while retaining the pointer', async () => {
     customize = item => { (item as any).createNativeSchedule = vi.fn(async () => { throw new Error('ambiguous native CREATE'); }); };
     await executor.execute('original');

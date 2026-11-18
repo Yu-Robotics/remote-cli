@@ -70,3 +70,8 @@ it('refuses legacy attributed or unattributed obligations, including compacted c
   fs.writeFileSync(catalog, '{'); expect(() => guard.assertResume('session')).toThrow();
   fs.writeFileSync(catalog, JSON.stringify({ version: 7, records: [] })); expect(() => guard.assertResume('session')).toThrow('Invalid');
 });
+it('does not treat host-owned schedules as legacy native reminders', () => {
+  const catalog = path.join(root, 'catalog.json'), guard = new ScheduledSessionGuard(root, 'thread', catalog);
+  fs.writeFileSync(catalog, JSON.stringify({ version: 6, records: [{ backend: 'dsh', engine: 'host', threadId: 'thread', state: 'active' }] }));
+  expect(() => guard.assertResume('session')).not.toThrow();
+});

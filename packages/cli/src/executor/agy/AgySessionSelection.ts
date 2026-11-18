@@ -9,6 +9,24 @@ function present(file: string): boolean {
   try { fs.lstatSync(file); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
+
+/** Bind a clean exit to the original SQLite files and hook transcript. A changed
+ * or redirected native store cannot inherit the previous process's proof. */
+export function agyHostScheduleHistory(home: string, session: string, beforeFirstPrompt = false): string {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(session)) throw new Error('Invalid AGY checkpoint session.');
+  const root = path.join(fs.realpathSync(home), '.gemini', 'antigravity-cli');
+  const database = path.join(root, 'conversations', session + '.db');
+  const transcript = path.join(root, 'brain', session, '.system_generated', 'logs', 'transcript_full.jsonl');
+  const fingerprint = createHash('sha256');
+  for (const file of [database, transcript, database + '-wal', database + '-shm', database + '-journal']) {
+    if (file !== database && (file !== transcript || beforeFirstPrompt) && !present(file)) { fingerprint.update('absent\n'); continue; }
+    const stat = fs.lstatSync(file, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || fs.realpathSync(file) !== file) throw new Error('AGY checkpoint history is redirected.');
+    if (beforeFirstPrompt && file === transcript && stat.size !== 0n) throw new Error('AGY settings-only session already has a transcript.');
+    fingerprint.update([stat.dev, stat.ino, stat.size, stat.ctimeNs, stat.mtimeNs].join('/') + '\n');
+  }
+  return fingerprint.digest('hex');
+}
 export function assertAgySelectionResettable(pointer: string): void {
   if (present(pointer + '.allocation-unconfirmed')) throw new Error('AGY allocation ownership is unconfirmed; retained evidence cannot be discarded.');
   if (present(pointer + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');

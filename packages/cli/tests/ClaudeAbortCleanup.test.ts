@@ -529,13 +529,12 @@ describe('Claude abort cleanup ownership', () => {
         reserved.resolve(); handle = await promise; return handle;
       } } });
     await service.initialize(); f.raw.schedules = service;
-    vi.spyOn(f.raw, 'initializeSchedules').mockResolvedValue(service);
-    f.raw.scheduleResultsSupported = true;
     const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: f.raw.scheduleGeneration('thread') };
-    const context = { current: () => current, backend: 'claude', config: { type: 'auto' }, cwd: root };
-    const creating = f.raw.runScheduleOperation(owner, { kind: 'create', prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, 'managed-probe', context);
-    const outcome = creating.then(() => 'unexpected success', (error: Error) => error.message);
+    // A legacy native creation was already admitted before the foreground retired.
+    const creating = main.withNativeScheduleOperation('managed-probe', () => current, () => service.create(owner, {
+      id: 'managed-probe', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    }), true);
     await reserved.promise;
     const action = adapter.action('managed-probe')!;
     expect(action.tool).toBe('CronCreate');
@@ -546,7 +545,10 @@ describe('Claude abort cleanup ownership', () => {
     current = false; raw.isProcessing = true;
     adapter.accept({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'synthetic-create',
       content: 'Scheduled recurring job native-probe (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).', is_error: false }] } });
-    expect(await outcome).toContain('cleanup is pending');
+    expect((await creating).nativeId).toBe('native-probe');
+    const cleanup = main.reconcileNativeSchedule('managed-probe', () => true, () => service.cancel(owner, 'managed-probe'));
+    await expect(cleanup).rejects.toThrow('cleanup is pending');
+    await cleanup.catch(error => service.retainCleanupError(owner, 'managed-probe', error));
     const records = await service.list(owner);
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ id: 'managed-probe', nativeId: 'native-probe', state: 'active' });
@@ -596,12 +598,12 @@ describe('Claude abort cleanup ownership', () => {
       if (handle && !held) { held = true; persisting.resolve(); await release.promise; }
       await originalPersist();
     });
-    vi.spyOn(f.raw, 'initializeSchedules').mockResolvedValue(service); f.raw.scheduleResultsSupported = true;
     const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: f.raw.scheduleGeneration('thread') };
-    const creating = f.raw.runScheduleOperation(owner, { kind: 'create', prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, 'late-create',
-      { current: () => current, backend: 'claude', config: { type: 'auto' }, cwd: root });
-    const outcome = creating.catch((error: Error) => error);
+    await Promise.resolve();
+    const creating = main.withNativeScheduleOperation('late-create', () => current, () => service.create(owner, {
+      id: 'late-create', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    }), true);
     await reserved.promise;
     const action = adapter.action('late-create')!;
     frame({ type: 'control_request', request_id: 'create-hook', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
@@ -625,7 +627,9 @@ describe('Claude abort cleanup ownership', () => {
       frame({ type: 'control_response', response: { subtype: 'success', request_id: settings.request_id, response: { effective: { env: {} } } } });
       await vi.advanceTimersByTimeAsync(0);
     }
-    release.resolve(); expect(await outcome).toBeInstanceOf(Error);
+    release.resolve(); await creating;
+    const cleanup = main.reconcileNativeSchedule('late-create', () => true, () => service.cancel(owner, 'late-create'));
+    await expect(cleanup).rejects.toThrow(state === 'successor' ? 'cleanup is pending' : 'native cleanup is unconfirmed');
     const records = await service.list(owner);
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ nativeId: 'native-late', state: 'interrupted', error: 'Native conversation process exited.' });
@@ -736,7 +740,7 @@ describe('Claude retained cancellation integration', () => {
     ]);
   });
 
-  it.each(['error', 'timeout'] as const)('drains a pending list after foreground %s without a native result frame', async reason => {
+  it.each(['error', 'timeout'] as const)('drains an explicitly requested cleanup review after foreground %s without a native result frame', async reason => {
     const f = await retainedFixture();
     const foreground = f.main.execute('Synthetic inventory request', reason === 'timeout' ? { timeout: 500 } : {})
       .catch(error => error as Error);
@@ -745,15 +749,17 @@ describe('Claude retained cancellation integration', () => {
     const scope = new ScheduleToolOperations().scope({
       owner: { threadId: 'thread', openId: 'synthetic-owner', generation: 'synthetic-generation' },
       messageId: 'synthetic-list-message', backend: 'claude', current: () => true, waitMs: 1,
-      run: (_command, id) => f.main.withNativeScheduleOperation(id, () => true, async () => {
-        await f.raw.schedules().reviewedInventory(() => true); return [];
+      run: async () => [],
+      reviewCleanup: id => f.main.withNativeScheduleOperation(id, () => true, async () => {
+        await f.raw.schedules().reviewedInventory(() => true);
+        throw new Error('Unexpected inventory receipt');
       }, true),
       present: async () => 'Synthetic card', nativeAction: id => { operation = id; return f.main.nativeScheduleAction(id); },
     });
     let drained = false;
     const done = foreground.then(async result => { await scope.drain(); drained = true; return result; });
     try {
-      expect(await scope.invoke('remote_cli_schedule_list', { requestId: 'pending-list' })).toMatchObject({
+      expect(await scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'pending-list' })).toMatchObject({
         status: 'pending', nativeAction: { tool: 'CronList', input: {} },
       });
       if (reason === 'error') f.frame({ type: 'error', content: 'Synthetic foreground failure' });
@@ -853,19 +859,19 @@ describe('Claude retained cancellation integration', () => {
     const service = new ScheduleService({ directory: path.join(root, 'retained-catalog'), isOwnerCurrent: () => true,
       deliver: async () => {}, provider: { create: (input, emit) => f.main.createNativeSchedule(input, emit, () => current) } });
     await service.initialize(); h.raw.schedules = service;
-    vi.spyOn(h.raw, 'initializeSchedules').mockResolvedValue(service); h.raw.scheduleResultsSupported = true;
     const owner = { threadId: 'thread', openId: 'synthetic-owner', generation: h.raw.scheduleGeneration('thread') };
     const foreground = f.main.execute('Create reminder').catch(error => error); await Promise.resolve();
-    const creating = h.raw.runScheduleOperation(owner, { kind: 'create', prompt: 'Synthetic reminder',
-      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, 'mutation-job',
-      { current: () => current, backend: 'claude', config: { type: 'auto' }, cwd: root }).catch((error: Error) => error);
+    const creating = f.main.withNativeScheduleOperation('mutation-job', () => current, () => service.create(owner, {
+      id: 'mutation-job', backend: 'claude', cwd: root, prompt: 'Synthetic reminder',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    }), true).catch((error: Error) => error);
     await vi.waitFor(() => expect(f.main.nativeScheduleAction('mutation-job')).toBeDefined());
     const action = f.main.nativeScheduleAction('mutation-job')!; f.hook(action, 'creation-tool');
     f.inventory.set('native-owned', String(action.input.prompt));
     current = false;
     const abort = f.main.abort(); await Promise.resolve();
     f.frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'creation-tool', is_error: true, content: 'Synthetic rejected receipt after commit' }] } });
-    expect(await abort).toBe(true); await foreground; await creating;
+    expect(await abort).toBe(true); await foreground; expect(await creating).toBeInstanceOf(Error);
     expect(f.inventory.size).toBe(0); expect(f.child.stdin.end).not.toHaveBeenCalled();
     const actions = f.frames.filter(row => row.type === 'user' && row.message.content.startsWith('Perform this authorized'))
       .map(row => JSON.parse(row.message.content.split('\n').at(-1)));

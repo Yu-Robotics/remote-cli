@@ -173,7 +173,7 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
       return true;
     }), isConnected: () => true, hasPendingTaskResults: () => false, trackTask: vi.fn(),
       onClose: () => () => {}, onTaskResultAck: (callback: (id: string) => void) => { acknowledge = callback; return () => {}; } };
-    const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent' } : undefined,
+    const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent' } : key === 'deviceId' ? 'fixture-device' : undefined,
       getConfigDir: () => path.join(root, 'purge-handler-config'), getSharedSymlinks: () => [] };
     const handler = new MessageHandler(ws, pool, manager, guard, config);
     vi.spyOn(handler as any, 'detectBackends').mockResolvedValue([{ id: 'auto', label: 'Claude', installed: true }]);
@@ -219,11 +219,20 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     } finally { await handler.destroy(); }
   });
 
-  it.each([false, true])('reviews, replaces and delivers a timer in one resumed Agent turn (manual Cron disable=%s)', async disabled => {
-    await create(); await create('second');
+  it.each([
+    { disabled: false, legacyOwner: true }, { disabled: true, legacyOwner: true },
+    { disabled: false, legacyOwner: false }, { disabled: true, legacyOwner: false },
+  ])('reviews legacy timers and requests a host timer in the resumed Agent turn (Cron disabled=$disabled, owned predecessor=$legacyOwner)', async ({ disabled, legacyOwner }) => {
+    if (legacyOwner) {
+      await create(); await create('second');
+    } else {
+      inventory.set('native-selected', 'Selected native reminder');
+      inventory.set('native-sibling', 'Unrelated native reminder');
+    }
     const [[target, oldPrompt], [sibling, siblingPrompt]] = [...inventory];
     const session = executor.getSessionId();
     await abruptRestart(false);
+    vi.useFakeTimers({ now: Date.UTC(2030, 0, 7, 8, 0, 5), shouldAdvanceTime: true, toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     if (disabled) vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '1');
     const { handler, thread, ws } = handlerFixture();
     const state = handler as any;
@@ -231,7 +240,6 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     vi.spyOn(state.scheduleToolOperations, 'scope').mockImplementation((options: any) => scope({ ...options, waitMs: 10 }));
     const invoke = (name: string, args: Record<string, unknown>) =>
       state.delegationBridges.get(thread.id).handler(`remote_cli_schedule_${name}`, args, 'fixture-call');
-    const replacement = 'native-replacement';
     async function operate(name: string, args: { requestId: string; [key: string]: unknown }) {
       let result = await invoke(name, args);
       for (let attempt = 0; result.status === 'pending' && attempt < 100; attempt++) {
@@ -258,13 +266,6 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
               expect(inventory.delete(target)).toBe(true);
               content = `Cancelled job ${target}.`; receipt = { id: target };
               break;
-            case 'CronCreate':
-              expect(action.input).toMatchObject({ durable: false, recurring: true, cron: '* * * * *', prompt: expect.stringContaining('Synthetic replacement') });
-              expect(inventory.has(replacement)).toBe(false);
-              inventory.set(replacement, action.input.prompt);
-              content = `Scheduled recurring job ${replacement} (fixture). Next run: later. Session-only (not written to disk, dies when Claude exits).`;
-              receipt = { id: replacement };
-              break;
             default: throw new Error(`Unexpected native action ${action.tool}`);
           }
           frame({ type: 'user', tool_use_result: receipt, message: { content: [{ type: 'tool_result', tool_use_id: toolId, content }] } });
@@ -275,7 +276,8 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     }
     let foreground: Promise<void> | undefined, uuid: string | undefined;
     try {
-      await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { scheduleResultsV1: true, taskRecovery: true } } } as any);
+      await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true, taskRecovery: true },
+        scheduleBinding: { deviceId: 'fixture-device', openId: owner.openId, epoch: 'original-binding' } } } as any);
       holdForeground = id => { uuid = id; };
       foreground = handler.handleMessage({ type: 'command', threadId: thread.id, openId: owner.openId, messageId: 'replace-timer',
         content: 'Review my timers and replace the selected timer.', isSlashCommand: false, timestamp: Date.now() } as any);
@@ -287,31 +289,40 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
       const createArgs = { requestId: 'create', when: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' }, prompt: 'Synthetic replacement' };
       if (disabled) {
         expect(review).toMatchObject({ status: 'failed', error: expect.stringContaining('Cron disabled') });
-        expect(await operate('create', createArgs)).toMatchObject({ status: 'failed', error: expect.stringContaining('Cron disabled') });
         expect([...inventory]).toEqual([[target, oldPrompt], [sibling, siblingPrompt]]);
+      } else {
+        expect(review, review.error).toMatchObject({ status: 'succeeded', cleanupReview: { sessionId: session,
+          candidates: expect.arrayContaining([expect.objectContaining({ id: target, prompt: oldPrompt, durable: false }),
+            expect.objectContaining({ id: sibling, prompt: siblingPrompt, durable: false })]) } });
+        const deletion = await operate('cleanup_delete', { requestId: 'delete', token: review.cleanupReview.token, nativeIds: [target] });
+        expect(deletion, deletion.error).toMatchObject({ status: 'succeeded', cleanup: { absentIds: [target] } });
+        expect([...inventory]).toEqual([[sibling, siblingPrompt]]);
+      }
+      if (legacyOwner) {
+        // Same-boot abrupt exit leaves predecessor work unconfirmed even after an exact deletion.
+        expect(await operate('create', createArgs)).toMatchObject({ status: 'failed', error: expect.stringContaining('unresolved native work') });
+        expect(await (await state.initializeSchedules()).list({ ...owner, generation: state.scheduleGeneration(thread.id) })).toEqual([]);
         return;
       }
-      expect(review, review.error).toMatchObject({ status: 'succeeded', cleanupReview: { sessionId: session,
-        candidates: expect.arrayContaining([expect.objectContaining({ id: target, prompt: oldPrompt, durable: false }),
-          expect.objectContaining({ id: sibling, prompt: siblingPrompt, durable: false })]) } });
-      const deletion = await operate('cleanup_delete', { requestId: 'delete', token: review.cleanupReview.token, nativeIds: [target] });
-      expect(deletion, deletion.error).toMatchObject({ status: 'succeeded', cleanup: { absentIds: [target] } });
-      expect([...inventory]).toEqual([[sibling, siblingPrompt]]);
+      const nativeBeforeCreate = [...inventory];
       const created = await operate('create', createArgs);
       expect(created, created.error).toMatchObject({ status: 'succeeded', scheduleId: expect.any(String) });
       terminal(uuid!); await foreground; foreground = undefined;
-      wake('replacement-wake', inventory.get(replacement)!);
-      expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response).toEqual({});
-      frame({ type: 'result', uuid: 'replacement-result', is_error: false, terminal_reason: 'completed', result: 'Replacement fired' });
-      frame({ type: 'command_lifecycle', command_uuid: 'replacement-wake', state: 'completed' });
+      holdForeground = undefined;
+      const [record] = await state.schedules.list(state.scheduleOwner(thread.id, owner.openId));
+      expect(record).toMatchObject({ id: created.scheduleId, engine: 'host', sessionId: session, state: 'active' });
+      await vi.advanceTimersByTimeAsync(Math.max(0, record.nextDueAt - Date.now()));
       await vi.waitFor(() => expect(ws.send.mock.calls.map(([message]: any[]) => message)
         .filter((message: any) => message.type === 'response' && message.queueStarted?.source === 'schedule')).toEqual([
-        expect.objectContaining({ success: true, messageId: `${created.scheduleId}:replacement-wake`, openId: owner.openId, threadId: thread.id,
-          queueStarted: expect.objectContaining({ scheduleId: created.scheduleId }), output: 'Replacement fired' }),
+        expect.objectContaining({ success: true, messageId: `${created.scheduleId}:host-${record.nextDueAt}`, openId: owner.openId, threadId: thread.id,
+          queueStarted: expect.objectContaining({ scheduleId: created.scheduleId }), output: 'Synthetic result' }),
       ]));
       expect(executor.getSessionId()).toBe(session);
       expect(child).toBe(resumedHost);
-      expect(child.stdin.write.mock.calls.filter(([line]: [string]) => JSON.parse(line).type === 'user')).toHaveLength(1);
+      const prompts = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line)).filter((packet: any) => packet.type === 'user');
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1].message.content).toBe('Synthetic replacement');
+      expect([...inventory]).toEqual(nativeBeforeCreate);
     } finally {
       holdForeground = undefined;
       if (uuid && foreground) terminal(uuid);
@@ -365,6 +376,32 @@ describe('Claude abrupt lifecycle and exact cleanup', () => {
     expect(hosts).toHaveLength(1);
     expect((await service.list(owner))[0].recovery?.status).toBe('blocked');
     expect(inventory.size).toBe(1);
+  });
+  it('admits a host timer in the original conversation after verified reboot and confirmed cleanup of its last native job', async () => {
+    await create();
+    const sessionId = executor.getSessionId();
+    await abruptRestart(true);
+    const retired = await executor.withNativeScheduleOperation('retire-last', () => true, () => service.cancel(owner, 'first'), false);
+    expect(retired).toMatchObject({ state: 'cancelled', cleanupConfirmed: true });
+    expect(inventory.size).toBe(0);
+    const { handler, thread, ws } = handlerFixture();
+    try {
+      const state = handler as any;
+      const directory = state.scheduleDirectory();
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, 'schedule-catalog.json'), JSON.stringify({ version: 3, pending: [], purged: [],
+        records: [{ ...retired, generation: state.scheduleGeneration(thread.id) }] }));
+      await handler.prepareScheduleStartup();
+      await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true },
+        scheduleBinding: { deviceId: 'fixture-device', openId: owner.openId, epoch: 'original-binding' } } } as any);
+      await handler.handleMessage({ type: 'command', messageId: 'host-after-upgrade', openId: owner.openId, threadId: thread.id,
+        content: '/schedule after 1h -- New explicit reminder', isSlashCommand: true, timestamp: Date.now() } as any);
+      const response = ws.send.mock.calls.map(([message]: any[]) => message).find((message: any) => message.type === 'response' && message.messageId === 'host-after-upgrade');
+      expect(response?.success, response?.error).toBe(true);
+      expect(await state.schedules.list(state.scheduleOwner(thread.id, owner.openId))).toContainEqual(
+        expect.objectContaining({ engine: 'host', state: 'active', sessionId }));
+      expect(inventory.size).toBe(0);
+    } finally { await handler.destroy(); }
   });
   it.each([false, true])('cancels a retained native definition without recreation (verified reboot=%s)', async nextBoot => {
     await create(); await create('second'); const [target, sibling] = [...inventory.keys()];

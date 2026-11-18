@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.265] - 2026-11-18
+
+### Changed
+- Enable CLI-owned one-shot and five-field cron schedules by default for Claude Code, Codex, DSH, AGY, OpenCode, Kimi, Pi, and ZCode. The CLI handles timing, cancellation, startup recovery, and delivery retries without inference. Each occurrence targets the original conversation and its owner's Feishu thread.
+- Reload saved definitions after a CLI restart, skip cron firings missed offline, and suppress repeat dispatch when the previous dispatch outcome is unknown. Running a task still requires safe access to its original backend conversation.
+- Require a Router that confirms the current user and device binding epoch. Recheck this binding before dispatch and Feishu delivery.
+- Use the managed task ID to cancel future runs. Existing native tasks remain available for manual cleanup without migration.
+
 ## [1.6.264] - 2026-11-18
 
 ### Fixed

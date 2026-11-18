@@ -10,7 +10,8 @@ function fixture(count = 1, rule = '* * * * * (UTC)') {
   const menu: ScheduleMenu = { snapshotId: 'snapshot', threadId: 'original-thread', threadName: 'Original thread', expiresAt: Date.now() + 60_000,
     entries: Array.from({ length: count }, (_, index) => ({ value: `choice-${index}`, id: `schedule-${index}`, backend: 'claude',
       state: 'active', rule, prompt: '<at id="all">**synthetic**</at>', canCancel: true })) };
-  const transport = { ownsDevice: vi.fn(async () => true), available: vi.fn(() => true), send: vi.fn(async () => true), update: vi.fn(async () => {}) };
+  const transport = { ownsDevice: vi.fn(async () => true), captureOwnership: () => () => true,
+    available: vi.fn(() => true), send: vi.fn(async () => true), update: vi.fn(async () => {}) };
   const cards = new ScheduleCards(transport);
   const present = cards.present({ openId: 'owner', deviceId: 'device', expectedThreadId: 'original-thread', menu })!;
   present.deliver(['card']);
@@ -28,9 +29,14 @@ function fixture(count = 1, rule = '* * * * * (UTC)') {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ScheduleCards', () => {
-  it('accepts AGY catalog identities without making executor admission decisions', () => {
-    const f = fixture(); f.menu.entries[0].backend = 'agy';
-    expect(parseScheduleMenu(f.menu)?.entries[0].backend).toBe('agy');
+  it('accepts eight known backends with expanded support and three on legacy connections', () => {
+    const f = fixture();
+    for (const backend of ['claude', 'agy', 'dsh', 'codex', 'opencode', 'kimi', 'zcode', 'pi']) {
+      const entry = { ...f.menu.entries[0], backend };
+      expect(parseScheduleMenu({ ...f.menu, entries: [entry] })?.entries[0].backend).toBe(backend);
+      expect(Boolean(parseScheduleMenu({ ...f.menu, entries: [entry] }, false))).toBe(['claude', 'agy', 'dsh'].includes(backend));
+    }
+    expect(parseScheduleMenu({ ...f.menu, entries: [{ ...f.menu.entries[0], backend: 'unknown' }] })).toBeUndefined();
     f.cards.destroy();
   });
 
@@ -45,7 +51,7 @@ describe('ScheduleCards', () => {
     expect(JSON.stringify(f.latest())).toContain('schedule-0');
     expect(f.latest().find(element => element.content?.startsWith('When:'))?.content).toBe('When: \\* \\* \\* \\* \\* \\(UTC\\)\nReference: `schedule-0`');
     expect(f.latest().at(-1)).toMatchObject({ tag: 'markdown', text_size: 'notation' });
-    expect(f.latest().at(-1).content).toContain('not recreated after restart');
+    expect(f.latest().at(-1).content).toBe('Keep the CLI running when a task is due. Use /schedule list for a fresh card.');
     f.cards.destroy();
   });
 

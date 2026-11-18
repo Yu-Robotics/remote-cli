@@ -8,13 +8,14 @@ import type { ScheduleOwner, ScheduleRecord } from './types';
 export type ScheduleOperation = Extract<ScheduleCommand, { kind: 'create' | 'cancel' }> | { kind: 'list' };
 type PublicRecord = Pick<ScheduleRecord, 'id' | 'state' | 'backend' | 'rule' | 'prompt' | 'error'>;
 interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; nativeCleanupUnresolved?: { id: string; backend: string; reason: string; detail: string }[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview; purge?: SchedulePurgeResult; cleanup?: { absentIds: string[]; warning: string } }
-interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; result: Result; done: Promise<void> }
+interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; mayUseNative: boolean; result: Result; done: Promise<void> }
 interface Options {
   owner: ScheduleOwner;
+  bindingEpoch?: string;
   messageId: string;
   backend: keyof typeof NATIVE_SCHEDULE_CAPABILITIES;
   current(): boolean;
-  run(command: ScheduleOperation, scheduleId: string): Promise<ScheduleRecord[]>;
+  run(command: ScheduleOperation, scheduleId: string, allowNativeAction: () => void): Promise<ScheduleRecord[]>;
   reviewCleanup?(id: string): Promise<NativeCleanupReview>;
   deleteCleanup?(command: Extract<ScheduleCommand, { kind: 'cleanup-confirm' }>, id: string): Promise<{ absentIds: string[]; warning: string }>;
   listCleanup?(): Promise<{ id: string; backend: string; reason: string; detail: string }[]>;
@@ -97,8 +98,9 @@ export class ScheduleToolScope {
         now: new Date().toISOString(), hostTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
     }
     if (typeof args.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(args.requestId)) throw new Error('A stable requestId is required.');
-    const scope = JSON.stringify([this.options.owner, this.options.messageId]);
-    const key = createHash('sha256').update(JSON.stringify([this.options.owner, this.options.messageId, args.requestId])).digest('hex');
+    const identity = this.requestIdentity();
+    const scope = JSON.stringify(identity);
+    const key = createHash('sha256').update(JSON.stringify([...identity, args.requestId])).digest('hex');
     let receipt = this.receipts.get(key);
     if (name === 'remote_cli_schedule_operation') {
       keys(args, ['requestId']);
@@ -118,7 +120,7 @@ export class ScheduleToolScope {
         if (this.receipts.size >= 200 || this.tasks.size >= 5) throw new Error('Scheduling operation limit reached. Use /schedule list.');
         if (parsed.kind !== 'list') this.hasSideEffects = true;
         const scheduleId = `managed-${key.slice(0, 48)}`;
-        receipt = { scope, settled: false, digest, sideEffect: parsed.kind !== 'list', result: { status: 'pending', requestId: args.requestId,
+        receipt = { scope, settled: false, digest, sideEffect: parsed.kind !== 'list', mayUseNative: parsed.kind === 'cleanup-review' || parsed.kind === 'cleanup-confirm' || parsed.kind === 'purge', result: { status: 'pending', requestId: args.requestId,
           ...(parsed.kind === 'create' ? { scheduleId } : {}) }, done: Promise.resolve() };
         this.receipts.set(key, receipt);
         const admitted = receipt;
@@ -141,7 +143,7 @@ export class ScheduleToolScope {
               admitted.result = { ...admitted.result, status: 'succeeded', cleanupReview: await this.options.reviewCleanup(scheduleId) };
               return;
             }
-            const records = await this.options.run(parsed, scheduleId);
+            const records = await this.options.run(parsed, scheduleId, () => { if (parsed.kind === 'cancel') admitted.mayUseNative = true; });
             admitted.result = { ...admitted.result, status: 'succeeded', records: records.map(record => ({
               id: record.id, state: record.state, backend: record.backend, rule: record.rule,
               prompt: record.prompt.slice(0, 240), error: record.error?.slice(0, 240),
@@ -164,23 +166,21 @@ export class ScheduleToolScope {
     if (!this.options.current()) throw new Error('Scheduling context changed. Inspect /schedule list after reconnecting.');
     if (receipt.result.status === 'pending') receipt.pendingObserved = true;
     else receipt.terminalObserved = true;
-    const nativeAction = receipt.result.status === 'pending' ? this.options.nativeAction?.(`managed-${key.slice(0, 48)}`) : undefined;
-    if (nativeAction && !receipt.sideEffect) {
-      const readOnly = object(nativeAction) && object(nativeAction.input) && (
-        this.options.backend === 'claude' && nativeAction.tool === 'CronList' && Object.keys(nativeAction.input).length === 0
-        || this.options.backend === 'agy' && nativeAction.tool === 'manage_task'
-          && nativeAction.input.Action === 'list' && Object.keys(nativeAction.input).length === 1);
-      if (!readOnly) throw new Error('Read-only schedule listing cannot authorize this native action. No native action was returned.');
-    }
+    const nativeAction = receipt.mayUseNative && receipt.result.status === 'pending' ? this.options.nativeAction?.(`managed-${key.slice(0, 48)}`) : undefined;
     return { ...structuredClone(receipt.result), ...(nativeAction ? { nativeAction,
       instruction: 'Call this exact authorized native tool now in this conversation, once. Do not report success until remote_cli_schedule_operation confirms its native receipt. Do not change any arguments.' } : {}) };
   }
   unreportedFailures(): Result[] {
     if (!this.options.current()) return [];
-    const scope = JSON.stringify([this.options.owner, this.options.messageId]);
+    const scope = JSON.stringify(this.requestIdentity());
     return [...this.receipts.values()].filter(receipt => receipt.scope === scope
       && receipt.pendingObserved && !receipt.terminalObserved && receipt.result.status === 'failed')
       .map(receipt => structuredClone(receipt.result));
+  }
+  private requestIdentity(): (ScheduleOwner | string)[] {
+    const identity = [this.options.owner, this.options.messageId];
+    if (this.options.bindingEpoch) identity.push(this.options.bindingEpoch);
+    return identity;
   }
   async drain(): Promise<void> { await Promise.allSettled([...this.tasks]); }
   async close(): Promise<void> { this.active = false; await this.drain(); }

@@ -1,4 +1,6 @@
 import type { ScheduleRule } from './types';
+import { parseScheduleTimestamp, validateHostCron } from './host/HostScheduleRule';
+export { parseScheduleTimestamp } from './host/HostScheduleRule';
 
 export const MAX_SCHEDULE_PROMPT_BYTES = 16 * 1024;
 export const MAX_SCHEDULE_DELAY_MS = 365 * 24 * 60 * 60 * 1000;
@@ -13,7 +15,7 @@ export const SCHEDULE_USAGE = [
   '/schedule cleanup confirm <review-token> <request-id> <native-id,...>',
   '/schedule after <positive integer><m|h|d> -- <prompt>',
   '/schedule at <ISO timestamp with Z or offset> -- <prompt>',
-  '/schedule cron "<five numeric fields>" --tz <IANA timezone> -- <prompt>',
+  '/schedule cron "<five cron fields>" --tz <IANA timezone> -- <prompt>',
   'Claude and DSH schedules require their native host process to remain running; Claude shares the foreground conversation.',
   'Restarted schedules are marked interrupted and are never automatically recreated.',
   'One-shot times round up to the next minute; native firing times may include jitter.',
@@ -42,55 +44,9 @@ export function validateSchedulePrompt(prompt: unknown): asserts prompt is strin
   }
 }
 
-/** Validate field values and grammar, not just the number of cron tokens. */
 export function validateScheduleCron(expression: unknown, timezone: unknown): void {
-  if (typeof expression !== 'string' || expression.length > 256) throw new Error('Invalid cron expression.');
-  const fields = expression.trim().split(/\s+/);
-  const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
-  if (fields.length !== bounds.length) throw new Error('Cron requires exactly five numeric fields.');
-  fields.forEach((field, index) => {
-    const [min, max] = bounds[index];
-    for (const part of field.split(',')) {
-      const match = /^(\*|\d+(?:-\d+)?)(?:\/(\d+))?$/.exec(part);
-      if (!match) throw new Error(`Invalid cron field ${index + 1}.`);
-      const [base, step] = [match[1], match[2]];
-      if (step !== undefined && (base !== '*' && !base.includes('-')
-        || !Number.isSafeInteger(Number(step)) || Number(step) < 1 || Number(step) > max - min + 1)) {
-        throw new Error(`Invalid cron step in field ${index + 1}.`);
-      }
-      if (base !== '*') {
-        const [start, end = start] = base.split('-').map(Number);
-        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
-          || start < min || end > max || start > end) {
-          throw new Error(`Cron field ${index + 1} must be within ${min}-${max}, with ascending ranges.`);
-        }
-      }
-    }
-  });
-  if (typeof timezone !== 'string' || timezone.length > 128
-    || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+.-]+)*$/.test(timezone)) {
-    throw new Error('An explicit IANA timezone is required.');
-  }
-  try { new Intl.DateTimeFormat('en', { timeZone: timezone }); }
-  catch { throw new Error('Unknown IANA timezone.'); }
-}
-
-/** Date.parse normalizes invalid calendar days, so validate the calendar first. */
-export function parseScheduleTimestamp(value: unknown): number {
-  if (typeof value !== 'string') throw new Error('An ISO timestamp with an explicit offset or Z is required.');
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
-  if (!match) throw new Error('An ISO timestamp with an explicit offset or Z is required.');
-  const [, year, month, day, hour, minute, second = '0', , zone] = match;
-  const lastDay = new Date(0);
-  lastDay.setUTCFullYear(Number(year), Number(month), 0);
-  if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > lastDay.getUTCDate()
-    || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59
-    || (zone !== 'Z' && (Number(zone.slice(1, 3)) > 23 || Number(zone.slice(4)) > 59))) {
-    throw new Error('Invalid ISO calendar date or time.');
-  }
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) throw new Error('Invalid ISO timestamp.');
-  return time;
+  if (typeof expression !== 'string' || typeof timezone !== 'string') throw new Error('Invalid cron expression or timezone.');
+  validateHostCron(expression, timezone);
 }
 
 export function validateScheduleRule(rule: ScheduleRule, nowMs?: number): void {

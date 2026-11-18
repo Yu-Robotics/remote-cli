@@ -36,6 +36,7 @@ vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
     constructor(_home: string, accept: any, fault: any) { native.accept = accept; native.fault = fault; }
     async start() { return { url: 'http://127.0.0.1:1/hook', token: 'synthetic-token' }; }
     bindSession = native.bind;
+    async confirmsTerminal() { return true; }
     async close() {}
   },
 }));
@@ -63,7 +64,9 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
     if (configId === 'mode') this.mode = value;
     return this.state();
   }
-  async newSessionWithSetup(_cwd: string, _servers: unknown, setup?: AcpSessionSetup) {
+  servers?: unknown;
+  async newSessionWithSetup(_cwd: string, servers: unknown, setup?: AcpSessionSetup) {
+    this.servers = servers;
     this.token = undefined; const state = this.state();
     await setup?.(state, (id, value) => this.configure(id, value));
     this.token = {}; return state;
@@ -164,6 +167,114 @@ function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRu
 }
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  async function captureTimedSession(checkOwnership = true) {
+    if (checkOwnership) await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
+    const creating = executor.execute('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const id = executor.getSessionId()!;
+    if (checkOwnership) {
+      expect(() => executor.checkHostScheduleSession('different-session')).toThrow();
+      executor.checkHostScheduleSession(id);
+    }
+    const store = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread', '.gemini', 'antigravity-cli');
+    const db = path.join(store, 'conversations', id + '.db');
+    const transcript = path.join(store, 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
+    for (const file of [db, transcript]) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'Synthetic history');
+    }
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(creating).resolves.toMatchObject({ success: true });
+    return { id, db };
+  }
+  it('can schedule after a clean restart even when the first chat had no tools or timer', async () => {
+    const { id } = await captureTimedSession(false);
+    await executor.destroy();
+    expect(last().prompts).toEqual(['hold']);
+    executor = make();
+    executor.checkHostScheduleSession(id);
+    expect(native.clients).toHaveLength(1);
+    await expect(executor.execute('first timed task', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['first timed task']);
+    expect(last().session).toBe(id);
+  });
+  it('installs scheduling tools on the first allocation even when settings open it before chat', async () => {
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
+    await executor.setEffort('high');
+    expect(last().servers[0].env).toContainEqual({ name: 'REMOTE_CLI_TOOL_GROUPS', value: '["scheduling"]' });
+    expect(last().prompts).toEqual([]);
+    await executor.execute('first chat');
+    executor.checkHostScheduleSession(executor.getSessionId()!);
+    expect(last().prompts).toEqual(['first chat']);
+    expect(native.clients).toHaveLength(1);
+  });
+  it.each(['intact', 'changed', 'unexpected-transcript'] as const)(
+    'binds a late tool connection to the original settings-only allocation (%s)', async state => {
+      await executor.setEffort('high');
+      const id = executor.getSessionId()!;
+      const root = path.join(last().launch.env.HOME, '.gemini', 'antigravity-cli');
+      const db = path.join(root, 'conversations', id + '.db');
+      await fs.mkdir(path.dirname(db), { recursive: true });
+      await fs.writeFile(db, 'Original settings');
+      if (state === 'unexpected-transcript') {
+        const transcript = path.join(root, 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
+        await fs.mkdir(path.dirname(transcript), { recursive: true });
+        await fs.writeFile(transcript, 'Unexplained history');
+      }
+      await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
+      expect(last().prompts).toEqual([]);
+      expect(() => make().checkHostScheduleSession(id)).toThrow();
+      if (state === 'changed') {
+        await fs.appendFile(db, 'Changed');
+        await expect(executor.execute('first chat')).rejects.toThrow();
+        expect(native.clients).toHaveLength(1);
+        return;
+      }
+      await executor.execute('first chat');
+      expect(last().session).toBe(id);
+      if (state === 'intact') executor.checkHostScheduleSession(id);
+      else expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      expect(last().prompts).toEqual(['first chat']);
+    });
+  it('runs a host-timed turn after exact close and reconstruction in the original main conversation', async () => {
+    const { id } = await captureTimedSession();
+    expect(() => make().checkHostScheduleSession(id)).toThrow();
+    native.exitConfirmed = false;
+    await expect(executor.destroy()).rejects.toThrow('group unconfirmed');
+    expect(() => make().checkHostScheduleSession(id)).toThrow();
+    native.exitConfirmed = true; await executor.destroy();
+    executor = make();
+    executor.checkHostScheduleSession(id);
+    await expect(executor.execute('scheduled foreground', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(last().token).toBeUndefined(); expect(last().session).toBe(id);
+    expect(last().prompts).toEqual(['scheduled foreground']); expect(last().tasks.size).toBe(0);
+    expect(() => make().checkHostScheduleSession(id)).toThrow();
+    await executor.destroy(); make().checkHostScheduleSession(id);
+  });
+  it.each(['conversations', 'brain'])('withholds host timing for a preexisting identity in %s', async directory => {
+    const store = path.join(home, '.remote-cli', 'agy-homes', 'synthetic-thread', '.gemini', 'antigravity-cli', directory);
+    await fs.mkdir(store, { recursive: true });
+    if (directory === 'brain') await fs.mkdir(path.join(store, native.sessionId));
+    else await fs.writeFile(path.join(store, native.sessionId + '.db'), 'Preexisting history');
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
+    await executor.execute('ordinary');
+    expect(() => executor.checkHostScheduleSession(native.sessionId)).toThrow();
+    await executor.destroy(); expect(() => make().checkHostScheduleSession(native.sessionId)).toThrow();
+  });
+  it.each(['changed-history', 'failed-load', 'native-owner', 'missing-terminal'] as const)(
+    'refuses an unsafe host-timed continuation (%s)', async fault => {
+      const { id, db } = await captureTimedSession();
+      if (fault === 'missing-terminal') await expect(executor.execute('missing terminal')).rejects.toThrow();
+      await executor.destroy(); executor = make();
+      if (fault === 'changed-history') await fs.appendFile(db, 'Changed native history');
+      if (fault === 'failed-load') native.settingFailure = true;
+      if (fault === 'native-owner') {
+        await fs.writeFile(path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json.native-schedules'), '{}');
+      }
+      await expect(executor.execute('must not run', { hostScheduleSessionId: id })).rejects.toThrow();
+      expect(last().prompts).not.toContain('must not run');
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    });
   it.each([false, true])('keeps questions open and forwards free-form replies on the same ACP host (worker=%s)', async worker => {
     const { runtime } = initialRuntime({ worker });
     const onStream = vi.fn();
@@ -325,6 +436,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   it('keeps factory/chat/schedule on the same original host, retaining settings and private HOME', async () => {
     const stream = vi.fn(), display = vi.fn();
     expect(native.clients).toHaveLength(0);
+    await executor.withNativeScheduleOperation('legacy-host', () => true, async () => {}, false);
     await executor.execute('hello', { onStream: stream, onDisplayText: display, resolvePrompt: id => `hello ${id}` });
     const client = last(); expect(client.prompts[0]).toBe('hello synthetic-session');
     expect(client.args).toContain('acp'); expect(client.args).not.toContain('--model'); expect(client.args).not.toContain('--effort');
@@ -347,6 +459,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(handle.retirementConfirmed).toBe(false);
   });
   it('authorizes in-turn MCP actions without nesting a client prompt, including initial qualification', async () => {
+    await executor.withNativeScheduleOperation('legacy-host', () => true, async () => {}, false);
     const foreground = executor.execute('hold'); await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
     const work = executor.withNativeScheduleOperation('op', () => true, () => executor.createNativeSchedule(input(), () => {}), true);
     await vi.waitFor(() => expect(executor.nativeScheduleAction('op')?.tool).toBe('manage_task'));
@@ -426,6 +539,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(executor.getSessionId()).toBe('synthetic-session'); expect(executor.hasPendingCancellation()).toBe(false);
   });
   it('projects in-turn native tool cards and exposes only the requested local permission choice', async () => {
+    await executor.withNativeScheduleOperation('legacy-host', () => true, async () => {}, false);
     const onToolUse = vi.fn(), onToolResult = vi.fn();
     const pending = executor.execute('hold', { onToolUse, onToolResult });
     await vi.waitFor(() => expect(last()?.release).toBeTypeOf('function'));
@@ -669,7 +783,8 @@ describe('review regressions through the AGY executor and runtime', () => {
   it('refuses controlled reconnect of a main host that returned a denial', async () => {
     const pending = executor.execute('hold'); await vi.waitFor(() => expect(last()?.prompts).toContain('hold'));
     expect(last().hook('PreToolUse', { stepIdx: 0, toolCall: { id: 'synthetic-deny', name: 'schedule', args: {} } }).decision).toBe('deny');
-    last().finish(); last().release({ stopReason: 'end_turn' }); await pending;
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(pending).rejects.toThrow('tool denial');
     await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-next' })).rejects.toThrow('reconnect was refused');
     expect(native.clients).toHaveLength(1);
   });

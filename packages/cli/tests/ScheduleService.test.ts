@@ -3,12 +3,12 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { isMainThread } from 'node:worker_threads';
-import { SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
+import { HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
 import { ScheduleToolOperations } from '../src/scheduling/ScheduleToolScope';
 import type { ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
 import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError } from '../src/scheduling/types';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
-  ScheduleDelivery, ScheduleOwner } from '../src/scheduling/types';
+  ScheduleDelivery, ScheduleOwner, ScheduleRecord } from '../src/scheduling/types';
 
 // Keep real filesystem operations, with configurable exports for the write barrier test.
 vi.mock('node:fs/promises', async importOriginal => ({
@@ -85,6 +85,469 @@ describe('ScheduleService', () => {
     await Promise.allSettled(services.map(service => service.destroy()));
     vi.restoreAllMocks(); vi.unstubAllEnvs();
     await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  describe('host timing', () => {
+    const owner: ScheduleOwner = { threadId: 'thread-a', openId: 'user-a', generation: 'epoch-a', bindingEpoch: 'binding-a' };
+    const read = async () => JSON.parse(await fs.readFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), 'utf8'));
+    const interval = 300_000;
+    let clock: number;
+    const hostInput = (id = 'host-a', cron = false): NativeScheduleInput => ({
+      ...input(id, cron), engine: 'host', sessionId: 'original-session', bindingEpoch: owner.bindingEpoch,
+    });
+    type Dispatch = NonNullable<ScheduleServiceOptions['hostDispatch']>;
+    const run = async (hostDispatch: Dispatch, options: Partial<ScheduleServiceOptions> = {}) => {
+      const service = make({ now: () => clock, hostDispatch, ...options });
+      await service.initialize();
+      return service;
+    };
+    const tick = async (milliseconds: number) => {
+      clock += milliseconds;
+      await vi.advanceTimersByTimeAsync(milliseconds);
+    };
+    beforeEach(() => {
+      clock = now;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      provider.cleanupFor = vi.fn(() => { throw new Error('Unexpected native cleanup lookup'); });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('requires the captured Router epoch before accepting a host definition', async () => {
+      const service = await run(vi.fn());
+      for (const bindingEpoch of [undefined, '', 'different']) {
+        await expect(service.create(owner, { ...hostInput(), bindingEpoch })).rejects.toThrow();
+      }
+      await service.create({ ...owner, bindingEpoch: undefined }, hostInput());
+      expect(current).toHaveBeenCalledWith(owner);
+      expect(await read()).toMatchObject({ version: 7, records: [{ bindingEpoch: owner.bindingEpoch }] });
+      const rebound = { ...owner, bindingEpoch: 'new' };
+      expect(await service.list(rebound)).toEqual([]);
+      await expect(service.cancel(rebound, 'host-a')).rejects.toThrow(/owner/);
+      expect((await service.purge(rebound, { ids: ['host-a'] })).removedIds).toEqual([]);
+    });
+
+    it.each(['same user', 'different user'])('retires a full outbox on verified rebind to the %s', async identity => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_r, _id, admit) =>
+        await admit() ? { success: true, output: 'Old private result' } : undefined);
+      const options = { maxPendingDeliveries: 1, maxRecords: 2, maxLiveSchedules: 2 };
+      let service = await run(dispatch, options);
+      await service.create(owner, hostInput('completed'));
+      await service.create(owner, hostInput('queued', true));
+      deliver.mockRejectedValue(new Error('Offline'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await service.destroy();
+      current.mockReturnValue(undefined);
+      service = await run(dispatch, options);
+      await service.retryDeliveries();
+      expect((await read()).pending).toHaveLength(1);
+      expect(service.hasActiveSchedules()).toBe(true);
+      const rebound = { ...owner, openId: identity === 'same user' ? owner.openId : 'user-b', bindingEpoch: 'new-binding' };
+      current.mockImplementation(candidate => candidate.openId === rebound.openId && candidate.bindingEpoch === rebound.bindingEpoch);
+      await service.retryDeliveries();
+      expect(service.hasPendingResults()).toBe(false);
+      expect(service.hasActiveSchedules()).toBe(false);
+      expect((await read()).records.every((row: ScheduleRecord) => row.state === 'interrupted')).toBe(true);
+      expect(await service.list(rebound)).toEqual([]);
+      await service.create(rebound, { ...hostInput('new', true), bindingEpoch: rebound.bindingEpoch });
+      expect((await read()).purged).toContainEqual({ ...owner, id: 'completed' });
+      await service.destroy();
+      service = await run(dispatch, options);
+      deliver.mockResolvedValue(undefined);
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(dispatch.mock.calls.map(([record]) => record.id)).toEqual(['completed', 'new']);
+      expect(deliver.mock.calls[1][0].schedule).toMatchObject(rebound);
+      await expect(service.create(rebound, { ...hostInput('completed', true), bindingEpoch: rebound.bindingEpoch })).rejects.toThrow(/purged/);
+    });
+
+    it('holds an admitted result and other due work through unknown binding, then delivers to the original epoch', async () => {
+      const admitted = deferred<void>(), finish = deferred<void>();
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (row, _id, admit) => {
+        if (!await admit()) return undefined;
+        if (row.id === 'running') { admitted.resolve(); await finish.promise; }
+        return { success: true, output: row.id };
+      });
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('running'));
+      await service.create(owner, { ...hostInput('future'), rule: { kind: 'once', at: new Date(now + 2 * interval).toISOString() } });
+      await tick(interval); await admitted.promise;
+      current.mockReturnValue(undefined);
+      finish.resolve();
+      await vi.waitFor(() => expect(service.hasPendingResults()).toBe(true));
+      await service.destroy();
+      current.mockImplementation(() => { throw new Error('Binding unavailable'); });
+      service = await run(dispatch);
+      await tick(interval);
+      await service.retryDeliveries();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(deliver).not.toHaveBeenCalled();
+      expect((await read()).pending[0].output).toBe('running');
+      current.mockReturnValue(true);
+      await service.retryDeliveries(); await tick(1);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(dispatch.mock.calls.map(([row]) => row.id)).toEqual(['running', 'future']);
+      expect(deliver.mock.calls.map(([delivery]) => delivery.schedule.bindingEpoch)).toEqual([owner.bindingEpoch, owner.bindingEpoch]);
+    });
+
+    it('keeps the same slot when registration disappears while admission is being persisted', async () => {
+      const refused = deferred<void>();
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>()
+        .mockImplementationOnce(async (_record, _id, admit) => {
+          const rename = fs.rename;
+          vi.spyOn(fs, 'rename').mockImplementationOnce(async (...args) => {
+            await rename(...args);
+            current.mockReturnValue(undefined);
+          });
+          expect(await admit()).toBe(false);
+          refused.resolve();
+          return undefined;
+        })
+        .mockImplementationOnce(async (_record, _id, admit) => await admit() ? { success: true } : undefined);
+      const service = await run(dispatch);
+      await service.create(owner, hostInput());
+      await tick(interval); await refused.promise;
+      expect((await read()).records[0]).toMatchObject({ state: 'active', nextDueAt: clock });
+      expect(service.hasPendingResults()).toBe(false);
+      current.mockReturnValue(true);
+      await service.retryDeliveries(); await tick(1);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(dispatch.mock.calls[0][1]).toBe(dispatch.mock.calls[1][1]);
+    });
+
+    it('releases only the stale owner from a full outbox and runs the waiting current owner', async () => {
+      const sibling = { ...other, bindingEpoch: 'binding-b' };
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (record, _id, admit) =>
+        await admit() ? { success: true, output: record.openId } : undefined);
+      const service = await run(dispatch, { maxPendingDeliveries: 1 });
+      await service.create(owner, hostInput('stale'));
+      await service.create(sibling, { ...hostInput('sibling'), bindingEpoch: sibling.bindingEpoch });
+      deliver.mockRejectedValue(new Error('Offline'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      current.mockImplementation(candidate => candidate.bindingEpoch === sibling.bindingEpoch);
+      deliver.mockResolvedValue(undefined);
+      await service.retryDeliveries(); await tick(1);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(deliver.mock.calls[1][0]).toMatchObject({ output: sibling.openId, schedule: { ...sibling, id: 'sibling' } });
+      expect(dispatch.mock.calls.map(([row]) => row.id)).toEqual(['stale', 'sibling']);
+      expect((await service.list(sibling)).map(row => row.id)).toEqual(['sibling']);
+    });
+
+    it('interrupts an epochless v6 host row without delivering its pending output', async () => {
+      const dispatch = vi.fn();
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('old', true));
+      await service.destroy();
+      const catalog = await read();
+      catalog.version = 6;
+      delete catalog.records[0].bindingEpoch;
+      catalog.pending.push({ id: 'old:prior', scheduleId: 'old', occurrenceId: 'prior', success: true, output: 'Old private result' });
+      await fs.writeFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
+      service = await run(dispatch);
+      await service.retryDeliveries();
+      expect((await read()).records[0].state).toBe('interrupted');
+      expect(service.hasPendingResults()).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it.each(['claude', 'dsh', 'agy', 'codex', 'kimi', 'opencode', 'pi', 'zcode'] as const)('restores future %s work and admits once with a durable original-session receipt', async backend => {
+      const native = deferred<void>();
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (record, occurrenceId, admit) => {
+        expect(record).toMatchObject({ ...owner, sessionId: 'original-session', backend, engine: 'host' });
+        expect(await admit()).toBe(true);
+        expect((await read()).records[0]).toMatchObject({ state: 'running', inFlightDueAt: now + interval });
+        expect(occurrenceId).toBe(`host-${now + interval}`);
+        expect(await admit()).toBe(false);
+        native.resolve();
+        return { success: true, output: 'native result' };
+      });
+      const first = await run(dispatch);
+      await first.create(owner, { ...hostInput(), backend });
+      expect(first.canRestartWithoutActiveWork()).toBe(true);
+      await first.destroy();
+      expect(vi.getTimerCount()).toBe(0);
+      const service = await run(dispatch);
+      await tick(interval - 1);
+      expect(dispatch).not.toHaveBeenCalled();
+      await tick(1); await native.promise;
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await service.retryDeliveries();
+      expect(deliver.mock.calls[0][0]).toMatchObject({ schedule: { ...owner, state: 'completed' }, success: true, output: 'native result' });
+      expect((await read()).pending).toEqual([]);
+      expect(service.canRestartWithoutActiveWork()).toBe(true);
+      expect(provider.create).not.toHaveBeenCalled();
+      expect(provider.cleanupFor).not.toHaveBeenCalled();
+    });
+
+    it('uses one timer, skips offline cron slots, and publishes a missed once without replay', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, admit) =>
+        await admit() ? { success: true } : undefined);
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('cron', true));
+      await service.create(owner, hostInput('once'));
+      expect(vi.getTimerCount()).toBe(1);
+      await service.destroy();
+      clock += 3 * interval + 10;
+      service = await run(dispatch);
+      await service.retryDeliveries();
+      const records = await service.list(owner);
+      expect(records).toEqual([expect.objectContaining({ id: 'cron', state: 'active', nextDueAt: now + 4 * interval }),
+        expect.objectContaining({ id: 'once', state: 'failed', error: expect.stringMatching(/missed/) })]);
+      expect(deliver.mock.calls[0][0]).toMatchObject({ schedule: { id: 'once' }, success: false, error: expect.stringMatching(/missed/) });
+      expect(dispatch).not.toHaveBeenCalled();
+      await tick(interval - 10);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect((await service.list(owner))[0].nextDueAt).toBe(now + 5 * interval);
+    });
+
+    it('keeps the earliest timer armed across unrelated catalog writes', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, admit) =>
+        await admit() ? { success: true } : undefined);
+      const service = await run(dispatch);
+      await service.create(owner, hostInput('first'));
+      const scheduled = service['hostTimer'];
+      expect(scheduled).toBeDefined();
+      await service.create(owner, { ...hostInput('later'), rule: { kind: 'once', at: new Date(now + interval * 2).toISOString() } });
+      await service.cancel(owner, 'later');
+      expect(service['hostTimer']).toBe(scheduled);
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(dispatch.mock.calls[0][0].id).toBe('first');
+    });
+
+    it('defers busy threads under the same occurrence ID and expires the prior admission callback', async () => {
+      let stale!: () => Promise<boolean>;
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>()
+        .mockImplementationOnce(async (_record, _id, admit) => { stale = admit; return undefined; })
+        .mockImplementationOnce(async (_record, _id, admit) => {
+          expect(await stale()).toBe(false);
+          return await admit() ? { success: true } : undefined;
+        });
+      const service = await run(dispatch);
+      await service.create(owner, hostInput());
+      await tick(interval);
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+      expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: clock });
+      expect(await stale()).toBe(false);
+      await tick(1000);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(dispatch.mock.calls[0][1]).toEqual(dispatch.mock.calls[1][1]);
+    });
+
+    it.each(['cancel', 'owner change', 'shutdown'])('denies admission after %s during reservation', async barrier => {
+      const ticket = deferred<() => Promise<boolean>>();
+      const release = deferred<void>();
+      const dispatch: Dispatch = async (_record, _id, admit) => { ticket.resolve(admit); await release.promise; return undefined; };
+      const service = await run(dispatch);
+      await service.create(owner, hostInput());
+      await tick(interval); const admit = await ticket.promise;
+      expect(service.canRestartWithoutActiveWork()).toBe(false);
+      if (barrier === 'cancel') await service.cancel(owner, 'host-a');
+      if (barrier === 'owner change') current.mockReturnValue(false);
+      if (barrier === 'shutdown') await service.destroy();
+      expect(await admit()).toBe(false);
+      release.resolve();
+      if (barrier !== 'shutdown') {
+        await vi.waitFor(() => expect(service.canRestartWithoutActiveWork()).toBe(true));
+        expect((await service.list(owner))[0].state).toBe(barrier === 'cancel' ? 'cancelled' : 'interrupted');
+      }
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it('retains an admitted result across cancellation, disconnect and restart, then purges without native cleanup', async () => {
+      const admitted = deferred<void>(), finish = deferred<void>();
+      const dispatch: Dispatch = async (_r, _id, admit) => {
+        if (!await admit()) throw new Error('Expected admission');
+        admitted.resolve(); await finish.promise;
+        return { success: true, output: 'already started' };
+      };
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('cron', true));
+      await tick(interval); await admitted.promise;
+      await service.cancel(owner, 'cron');
+      expect(service.hasActiveSchedules(owner.threadId)).toBe(true);
+      expect(service.needsNativePurge(owner, 'cron')).toBe(false);
+      expect((await service.purge(owner, { ids: ['cron'] })).pending[0].reason).toBe('occurrence_running');
+      deliver.mockRejectedValue(new Error('Disconnected'));
+      finish.resolve();
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(service.canRestartWithoutActiveWork()).toBe(false);
+      await service.destroy();
+      deliver.mockResolvedValue(undefined);
+      service = await run(dispatch);
+      await service.retryDeliveries();
+      expect(deliver.mock.calls[1][0]).toEqual(deliver.mock.calls[0][0]);
+      expect(deliver.mock.calls[1][0]).toMatchObject({ success: true, output: 'already started', schedule: { state: 'cancelled' } });
+      expect(await service.purge(owner, { ids: ['cron'] })).toMatchObject({ status: 'complete', removedIds: ['cron'], nativeCleanupUnresolved: [] });
+      await expect(service.create(owner, hostInput('cron', true))).rejects.toThrow(/purged/);
+      expect(provider.cleanupFor).not.toHaveBeenCalled();
+    });
+
+    it('fences an unknown in-flight occurrence across restart and ignores late completion from the old owner', async () => {
+      const admitted = deferred<void>(), finish = deferred<void>();
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, admit) => {
+        if (!await admit()) throw new Error('Expected admission');
+        admitted.resolve(); await finish.promise;
+        return { success: true, output: 'late' };
+      });
+      const first = await run(dispatch);
+      await first.create(owner, hostInput());
+      await expect(make().initialize()).rejects.toThrow(/owns the schedule catalog/);
+      await tick(interval); await admitted.promise; await first.destroy();
+      const next = await run(dispatch);
+      finish.resolve();
+      await next.retryDeliveries();
+      expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, error: expect.stringMatching(/outcome is unknown/) });
+      await tick(2 * interval);
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await read()).pending).toEqual([]);
+    });
+
+    it.each(['throw', 'domain failure', 'success without admission', 'undefined after admission'])('makes %s terminal for only its own job', async mode => {
+      const dispatch: Dispatch = async (_record, _id, admit) => {
+        if (mode === 'throw') throw new Error('Session mismatch');
+        if (mode === 'success without admission') return { success: true };
+        await admit();
+        if (mode === 'domain failure') return { success: false, error: 'Backend session unavailable.' };
+        return undefined;
+      };
+      const service = await run(dispatch);
+      await service.create(owner, hostInput('cron', true));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await service.retryDeliveries();
+      expect((await service.list(owner))[0]).toMatchObject({ state: 'failed', error: expect.any(String) });
+      expect(service.canRestartWithoutActiveWork()).toBe(true);
+      await tick(interval);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(await service.create(owner, hostInput('second', true))).toMatchObject({ state: 'active' });
+    });
+
+    it('reserves bounded outbox capacity and admits waiting work only after ACK', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_r, _id, admit) =>
+        await admit() ? { success: true } : undefined);
+      const service = await run(dispatch, { maxPendingDeliveries: 1, maxOccurrencesPerSchedule: 1, maxLiveSchedules: 2 });
+      await service.create(owner, hostInput('first', true));
+      await service.create(owner, hostInput('second'));
+      await expect(service.create(owner, hostInput('third'))).rejects.toThrow(/limit/);
+      deliver.mockRejectedValue(new Error('Offline'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect((await service.list(owner))[0].state).toBe('active');
+      deliver.mockResolvedValue(undefined);
+      await service.retryDeliveries();
+      await tick(1);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(3));
+      expect(dispatch).toHaveBeenCalledTimes(2);
+    });
+
+    it('rolls the bounded cron history without losing future work or replaying an unacknowledged result', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, admit) =>
+        await admit() ? { success: true } : undefined);
+      let service = await run(dispatch, { maxOccurrencesPerSchedule: 1 });
+      await service.create(owner, { ...hostInput('recurring', true), backend: 'pi' });
+      deliver.mockRejectedValue(new Error('Offline'));
+      for (let i = 1; i <= 3; i++) {
+        await tick(interval);
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(i));
+      }
+      expect((await read()).pending).toHaveLength(3);
+      await service.destroy();
+      service = await run(dispatch, { maxOccurrencesPerSchedule: 1 });
+      expect(await service.list(owner)).toMatchObject([{ state: 'active', nextDueAt: clock + interval,
+        completedOccurrences: [`host-${clock}`] }]);
+      deliver.mockResolvedValue(undefined);
+      await service.retryDeliveries();
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      await tick(interval);
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(4));
+    });
+
+    it.each([[2, false], [2, true], [6, false], [6, true]] as const)(
+      'creates host work independently of a full v%s pre-host catalog (retired schema=%s)', async (version, retired) => {
+      const filename = path.join(directory, SCHEDULE_CATALOG_FILE);
+      const catalog = { version, ...(version === 6 && { cleanup: [], purged: [] }),
+        records: [{ ...input('legacy'), threadId: owner.threadId, openId: owner.openId, generation: owner.generation, backend: 'claude', state: 'interrupted',
+        createdAt: now, ...(retired && { faultCleanup: 'pending', cancelRequested: true }),
+        recovery: { version: 1, provider: 'fixture', strategy: 'reconstruct', identity: 'fixture', status: 'blocked' } }], pending: [] };
+      await fs.writeFile(filename, JSON.stringify(catalog));
+      const dispatch = vi.fn(async () => undefined);
+      let service = await run(dispatch, { maxRecords: 1 });
+      expect(service.legacyCatalogUnavailable).toBe(retired);
+      await expect(service.create(owner, { ...hostInput('legacy'), backend: 'codex' })).rejects.toThrow(/already exists/);
+      await service.create(owner, { ...hostInput('fresh'), backend: 'codex' });
+      await service.destroy();
+      service = await run(dispatch, { maxRecords: 1 });
+      expect(await service.list(owner)).toContainEqual(expect.objectContaining({ id: 'fresh', state: 'active' }));
+      await service.cancel(owner, 'fresh');
+      expect(await service.purge(owner, { ids: ['fresh'] })).toMatchObject({ removedIds: ['fresh'] });
+      expect(provider.cleanupFor).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      const legacy = JSON.parse(await fs.readFile(filename, 'utf8'));
+      expect(legacy.records).toEqual(catalog.records);
+      if (retired) expect(legacy).toEqual(catalog);
+    });
+
+    it('keeps every missed one-shot receipt when recovery exceeds the outbox limit', async () => {
+      const dispatch = vi.fn(async () => undefined);
+      let service = await run(dispatch, { maxPendingDeliveries: 1 });
+      await service.create(owner, hostInput('first'));
+      await service.create(owner, hostInput('second'));
+      await service.destroy();
+      clock += interval + 1;
+      deliver.mockRejectedValue(new Error('Offline'));
+      service = await run(dispatch, { maxPendingDeliveries: 1 });
+      await service.retryDeliveries();
+      expect((await read()).pending).toHaveLength(1);
+      await service.destroy();
+      deliver.mockResolvedValue(undefined);
+      service = await run(dispatch, { maxPendingDeliveries: 1 });
+      await service.retryDeliveries();
+      await tick(1);
+      await vi.waitFor(() => expect(deliver.mock.calls.at(-1)?.[0]).toMatchObject({
+        schedule: { id: 'second' }, success: false, error: expect.stringMatching(/missed/),
+      }));
+      await service.retryDeliveries();
+      expect((await service.list(owner)).map(record => record.state)).toEqual(['failed', 'failed']);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((await read()).pending).toEqual([]);
+    });
+
+    it('purges a host task when the legacy catalog has filled its replay fence limit', async () => {
+      const purged = Array.from({ length: 10_000 }, (_, index) => ({
+        threadId: owner.threadId, openId: owner.openId, generation: owner.generation, id: `old-${index}`,
+      }));
+      await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records: [], pending: [], purged }));
+      const service = await run(vi.fn(async () => undefined));
+      await service.create(owner, hostInput());
+      expect(await service.purge(owner, { ids: ['host-a'] })).toMatchObject({ status: 'complete', removedIds: ['host-a'] });
+      expect((await read()).purged).toEqual([{ ...owner, id: 'host-a' }]);
+      await expect(service.create(owner, hostInput('old-0'))).rejects.toThrow(/purged/);
+    });
+
+    it.each([
+      { engine: 'native' }, { engine: undefined }, { nativeId: 'legacy-id' },
+      { nextDueAt: null }, { nextDueAt: now + 1 }, { inFlightDueAt: now + interval },
+      { completedOccurrences: [`host-${now + interval}`] }, { cancelRequested: true },
+      { bindingEpoch: undefined }, { bindingEpoch: null }, { bindingEpoch: '' }, { bindingEpoch: 'x'.repeat(257) },
+      { sessionId: undefined },
+    ])('rejects conflicting host timing receipts %o before arming any work', async fields => {
+      const dispatch = vi.fn(async () => undefined);
+      const service = await run(dispatch);
+      await service.create(owner, hostInput());
+      await service.destroy();
+      const catalog = await read();
+      Object.assign(catalog.records[0], fields);
+      await fs.writeFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
+      await expect(run(dispatch)).rejects.toThrow(/host|identifier/i);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
   });
 
   it.each([false, true])('saves a late CREATE cleanup identity while destruction never waits for native work (failure=%s)', async failure => {

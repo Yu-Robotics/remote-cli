@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { ScheduleOwner, ScheduleRecord, ScheduleRule } from './types';
+import { isNativeScheduleBackend, type NativeScheduleBackend } from './ScheduleCapabilities';
 
 export type CleanupReason = 'native_absence_unknown' | 'predecessor_unknown' | 'unattributed';
 /** Deletion-only selector. No prompt, output, execution options or recovery permission. */
 export interface ScheduleCleanupRecord extends ScheduleOwner {
   id: string;
   historyRemoved: true;
-  backend: ScheduleRecord['backend'];
+  backend: NativeScheduleBackend;
   cwd: string;
   nativeId?: string;
   reason: CleanupReason;
@@ -20,6 +21,7 @@ export function cleanupDetail(reason: CleanupReason): string {
 export function promptHash(prompt: string): string { return createHash('sha256').update(prompt).digest('hex'); }
 
 export function cleanupRecord(record: ScheduleRecord, reason: CleanupReason): ScheduleCleanupRecord {
+  if (record.engine === 'host' || !isNativeScheduleBackend(record.backend)) throw new Error('Native cleanup requires a legacy schedule.');
   const result: ScheduleCleanupRecord = { id: record.id, threadId: record.threadId, openId: record.openId,
     generation: record.generation, backend: record.backend, cwd: record.cwd, historyRemoved: true, reason,
     ...(record.nativeId ? { nativeId: record.nativeId } : {}) };

@@ -175,10 +175,10 @@ remote-cli service uninstall
 
 The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. `remote-cli stop` also stops an active managed service, while `remote-cli service stop` and `remote-cli service start` pause and resume it without removing automatic startup. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
 
-From CLI 1.6.257, every schedule-host exit is treated as abrupt. Shutdown and
-updates do not invoke schedule management, drain results, or write clean recovery
-proof. Generated Linux units retain their bounded owned-process shutdown policy;
-its timeout is not a recovery guarantee. The retained-host mode remains removed.
+From CLI 1.6.265, the CLI reloads locally saved task definitions after restart.
+Cron skips firings missed while the CLI was offline. Legacy native schedules
+retain their original shutdown and cleanup rules. Generated Linux units retain
+their bounded owned-process shutdown policy.
 Idle future schedules do not indefinitely block updates. Active work, pending
 results and uncertain live operations retain their independent admission guards.
 
@@ -532,29 +532,50 @@ Once connected, use these commands in Feishu:
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
 
-### Native scheduled tasks
+### Scheduled tasks
 
-`/schedule` manages native scheduled work through Claude Code, fresh AGY ACP
-conversations (runtime capability checks), and DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
-`/schedule capabilities` shows the supported adapter and the specific reason
-for each temporarily unsupported backend. Creation on an unsupported backend
-returns that reason without switching backends or starting a fallback job.
-An adapter requires both native timing and autonomous results over the existing
-backend transport. Product UI features, third-party schedulers, and unverified
-headless behavior do not qualify. Listing and cancelling existing tasks remain
-available after a backend switch.
+After upgrading, scheduling is enabled by default for Claude Code, Codex,
+DeepSeek Harness (DSH), AGY, OpenCode, Kimi, Pi, and ZCode. In an established
+conversation, ask for a one-shot or recurring task, for example, “Every weekday
+at 9 AM America/New_York, summarize my open tasks.” The local CLI stores the
+rule and submits the prompt to that same conversation when due. The result
+belongs to the user and Feishu thread that created the task.
 
-Fresh AGY conversations now use the original native ACP host for chat and
-`/schedule`, including managed scheduling tools with delegation disabled. Native
-one-shot and host-timezone cron tasks use exact tool receipts and authenticated
-hook-triggered transcript records; idle results use the existing original-thread
-catalog, outbox and Router acknowledgements. Equal-prompt tasks retain distinct
-native identities, and cancelling one task preserves its siblings. No executable
-version gate, client timer, model polling or alternate backend is used.
+Upgrade both the CLI and Router to 1.6.265 or later. A compatible Router
+confirms the device's current user binding before a task can be created or
+dispatched. Rebinding the device invalidates tasks from the previous binding.
+
+The CLI handles timing, cancellation, restart recovery, and result retries
+locally. A model interprets a natural-language request and performs the
+scheduled work. The slash commands below also work directly.
+
+```text
+/schedule after 5m -- Check the build and summarize failures
+/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Summarize open tasks
+/schedule list
+/schedule cancel <id>
+```
+
+For a one-shot at a specific time, use `/schedule at <ISO timestamp with Z or offset> -- <prompt>`.
+Cron takes five fields and an explicit IANA timezone. Month and weekday names
+are supported. You can also ask
+the agent in this thread to create, list, or cancel tasks.
+
+Keep the CLI running when a task is due. Starting with CLI 1.6.265, it saves
+new definitions locally and reloads them after restart. Cron resumes at the next
+scheduled time and skips firings missed while the CLI was offline. Each run
+requires the original thread and a backend that can safely use its conversation.
+If the CLI cannot tell whether a prompt reached the backend, it does not send
+that occurrence again.
+
+Use the managed ID from `/schedule list` to cancel future runs. Work already
+dispatched may still finish. Results awaiting Feishu delivery can be retried
+when a compatible Router reconnects. After an upgrade, existing native tasks
+remain available for manual cleanup. The CLI does not migrate them to its timer.
+
+#### AGY session requirements
 
 From CLI 1.6.260, AGY main conversations and managed workers use ACP exclusively.
-The scheduling capability response also states that legacy selections require explicit
-clear and managed ACP workers cannot create native schedules.
 AGY 1.5.10 is the native acceptance baseline. Linux, macOS and Windows x64/ARM64
 require the matching published remote-cli native helper. Missing helpers or unsupported
 native controls fail visibly; no conversation transport fallback is attempted.
@@ -564,8 +585,8 @@ silently migrated, replaced or erased; existing ownership and deletion guards re
 
 Live `/model` and `/effort` changes use confirmed native controls on the same ACP
 session. They require idle chat without retained schedules. Settings and managed-tool
-reconnection permanently disable scheduling on that host; loading never creates fresh
-schedule admission. Manual permissions use existing approval cards or text replies.
+reconnection disable legacy native scheduling on that host. Manual permissions
+use existing approval cards or text replies.
 When AGY asks a native question in a foreground turn, reply in the same thread.
 The answer resumes the active conversation, and the original turn completes
 when AGY confirms its result. Use `/abort` to stop waiting for a reply.
@@ -584,7 +605,7 @@ hook coverage. Previous continuity receipts require explicit clear. Hook failure
 can fail open: completely missing hook and transcript evidence remains a native
 limit, not proof that arbitrary saved queues are empty. Nonforeground permission
 requests are denied; only the current foreground turn uses approval cards/text.
-No automatic schedule recovery, replay, checkpoint restoration or exit-time model
+No automatic native schedule recovery, replay, checkpoint restoration or exit-time model
 handoff is used.
 
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
@@ -614,6 +635,33 @@ The 1.6.256 fixes still retire only the currently owned AGY host before thread
 reset, deletion or directory changes. Unknown predecessors, checkpoint-transition
 locks, live siblings and unconfirmed exits prevent data erasure. These cleanup
 checks do not grant schedule replay or certify arbitrary saved ACP chat as safe.
+
+#### Native scheduled tasks
+
+Tasks created through 1.6.264 retain their native identifiers and ownership
+records. For legacy Claude tasks, use `/schedule cleanup review` in the bound
+session to inspect the native IDs before selecting any for deletion.
+
+<details>
+<summary>Legacy native scheduling, cancellation and cleanup through CLI 1.6.264</summary>
+
+`/schedule` manages native scheduled work through Claude Code, fresh AGY ACP
+conversations (runtime capability checks), and DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
+`/schedule capabilities` shows the supported adapter and the specific reason
+for each temporarily unsupported backend. Creation on an unsupported backend
+returns that reason without switching backends or starting a fallback job.
+An adapter requires both native timing and autonomous results over the existing
+backend transport. Product UI features, third-party schedulers, and unverified
+headless behavior do not qualify. Listing and cancelling existing tasks remain
+available after a backend switch.
+
+Fresh AGY conversations now use the original native ACP host for chat and
+`/schedule`, including managed scheduling tools with delegation disabled. Native
+one-shot and host-timezone cron tasks use exact tool receipts and authenticated
+hook-triggered transcript records; idle results use the existing original-thread
+catalog, outbox and Router acknowledgements. Equal-prompt tasks retain distinct
+native identities, and cancelling one task preserves its siblings. No executable
+version gate, client timer, model polling or alternate backend is used.
 
 The shared scheduling service stays dormant without a task catalog: ordinary
 connection, reconnection, chat and control commands do not create a catalog or
@@ -987,6 +1035,8 @@ changes still stop the host. Other backends keep their existing abort behavior.
 The catalog and pending results contain task text and are local private state.
 See the [eight-backend inventory](docs/native-scheduling-inventory.md) for the
 native capability and transport evidence behind the adapter choice.
+
+</details>
 
 ### Illustrated Tips
 
@@ -1936,9 +1986,8 @@ saving the requested preference. A correlated late reply can settle admission bu
 does not retroactively save that preference. A settled internal error permits an
 explicit `/model` retry on the same host; a still-pending or unclassified outcome
 requires its reply or explicit destructive `/clear`/`/new`, which loses session-only
-jobs. `/abort` does not cancel an unresolved settings request. Orderly schedule
-recovery is a separate capability with the platform and handoff requirements
-described in the scheduling section above; same-boot dirty-crash recovery remains disabled.
+native jobs. `/abort` does not cancel an unresolved settings request. See
+[Scheduled tasks](#scheduled-tasks) for CLI-timed tasks and legacy cleanup.
 
 From CLI 1.6.203, Codex integration uses the native app-server handshake path that preserves its default User-Agent instead of adding a remote-cli identity to that header. Native Codex still determines the version, platform details, and inherited environment behavior; remote-cli does not replace the header or change global Codex configuration. This is app-server behavior, not a promise to match the interactive TUI. The native exemption was checked against Codex 0.166.0. Missing User-Agent metadata or an unexpected backend identity rewrite stops startup before a task is sent; upgrade native Codex if this check fails. Upgrade the local CLI; a Router-only upgrade does not apply this change.
 

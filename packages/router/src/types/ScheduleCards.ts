@@ -1,8 +1,16 @@
+const scheduleBackends = ['claude', 'dsh', 'agy', 'codex', 'opencode', 'kimi', 'zcode', 'pi'] as const;
+export type ScheduleBackend = typeof scheduleBackends[number];
+
+export function isScheduleBackend(value: unknown, allBackends: boolean): value is ScheduleBackend {
+  if (value === 'claude' || value === 'dsh' || value === 'agy') return true;
+  return allBackends && scheduleBackends.some(backend => backend === value);
+}
+
 /** Additive scheduleCardsV1 protocol. Values identify immutable CLI-owned choices. */
 export interface ScheduleCardEntry {
   value: string;
   id: string;
-  backend: 'claude' | 'dsh' | 'agy';
+  backend: ScheduleBackend;
   state: 'creating' | 'active' | 'running' | 'completed' | 'cancelled' | 'interrupted' | 'failed';
   rule: string;
   prompt: string;

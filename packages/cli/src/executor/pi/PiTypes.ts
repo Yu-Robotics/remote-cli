@@ -38,8 +38,10 @@ export interface PiModel {
 }
 
 export interface PiTransport {
-  start(): Promise<void>;
+  start(beforeStart?: () => void): Promise<void>;
   request(command: Record<string, unknown>, timeoutMs?: number): Promise<PiRpcResponse>;
+  /** RPCs on this process only. A retired process cannot be restarted by the returned function. */
+  bindRunningProcess?(): PiTransport['request'];
   send(message: Record<string, unknown>): void;
   onEvent(handler: (event: Record<string, any>) => void): () => void;
   stop(): Promise<void>;

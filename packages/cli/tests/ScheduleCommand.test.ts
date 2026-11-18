@@ -76,7 +76,8 @@ describe('ScheduleCommand', () => {
     expect(parse(`/schedule ${args}`)).toMatchObject({ kind: 'invalid' });
   });
 
-  it.each(['*/5 * * * *', '0,15,30,45 8-18/2 1-31 1,6,12 0-7', '0 9 * * 1-5'])('accepts numeric cron grammar %s', expression => {
+  it.each(['*/5 * * * *', '0,15,30,45 8-18/2 1-31 1,6,12 0-7', '0 9 * * 1-5',
+    '0 0 * JAN MON', '0 9 * Jan-Mar/2,Sep Fri-Sun'])('accepts five-field cron grammar %s', expression => {
     expect(parse(`/schedule cron "${expression}" --tz America/New_York -- Check`)).toEqual({
       kind: 'create', rule: { kind: 'cron', expression, timezone: 'America/New_York' }, prompt: 'Check',
     });
@@ -86,7 +87,7 @@ describe('ScheduleCommand', () => {
     '* * * *', '* * * * * *', '60 * * * *', '* 24 * * *', '* * 0 * *', '* * * 13 *', '* * * * 8',
     '*/0 * * * *', '*/61 * * * *', '1-5/0 * * * *', '20-10 * * * *', '1-60 * * * *',
     '1,,2 * * * *', ',1 * * * *', '1, * * * *', '1/2 * * * *', '*/-2 * * * *',
-    '1.2 * * * *', '? * * * *', '0 0 L * *', '0 0 * JAN MON', '@daily',
+    '1.2 * * * *', '? * * * *', '0 0 L * *', '0 0 * JANU MON', '0 0 * MON JAN', '@daily',
     '0 0 * * 1#2', '* * * * 1W', '* * * * *;echo', '999999999999999999999 * * * *',
   ])('rejects invalid cron values or dialect %s', expression => {
     expect(parse(`/schedule cron "${expression}" --tz UTC -- Check`)).toMatchObject({ kind: 'invalid' });

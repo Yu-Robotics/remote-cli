@@ -754,8 +754,9 @@ describe('Claude foreground native schedule protocol', () => {
         h.adapter.processClosed();
       });
     it('returns current-turn native actions for managed cancellation and makes request retries idempotent', async () => {
-      const h = harness(); const operations = new ScheduleToolOperations(); const run = vi.fn(async (command, id) => {
+      const h = harness(); const operations = new ScheduleToolOperations(); const run = vi.fn(async (command, id, allowNativeAction) => {
         expect(command).toEqual({ kind: 'cancel', id: 'managed-fixture-target' });
+        allowNativeAction();
         await h.adapter.inToolOperation(id, () => true,
           () => h.adapter.cancelRetained(retained(), 'original-native', () => true, 'UTC'));
         return [{ id: command.id, state: 'cancelled', backend: 'claude', rule: input().rule, prompt: input().prompt }] as any;

@@ -21,7 +21,7 @@ type TestSocket = EventEmitter & {
   readyState: number;
 };
 
-describe.each(['claude', 'dsh', 'agy'])('Scheduled %s result delivery', backend => {
+describe.each(['claude', 'dsh', 'agy', 'codex', 'opencode', 'kimi', 'zcode', 'pi'])('Scheduled %s result delivery', backend => {
   let directory: string;
   let server: RouterServer;
   let wss: EventEmitter;
@@ -87,11 +87,12 @@ describe.each(['claude', 'dsh', 'agy'])('Scheduled %s result delivery', backend 
     return socket.send.mock.calls.map(call => JSON.parse(call[0]));
   }
 
-  const capabilities = { queueStarted: true, taskRecovery: true, scheduleResultsV1: true };
+  const epoch = '00000000-0000-4000-8000-000000000001';
+  const capabilities = { queueStarted: true, taskRecovery: true, scheduleResultsV1: true, hostSchedulesV1: true };
   function start(overrides: Record<string, unknown> = {}) {
     return { type: 'queue_started', messageId: 'scheduled-result', openId: 'owner', threadId: 'original-thread',
       cwd: directory, queueStarted: { source: 'schedule', scheduleId: 'schedule-1', threadName: 'Original thread',
-        backend, cwd: directory, preview: 'Review the project', remainingCount: 0 }, ...overrides };
+        bindingEpoch: epoch, backend, cwd: directory, preview: 'Review the project', remainingCount: 0 }, ...overrides };
   }
   function response(overrides: Record<string, unknown> = {}) {
     return { ...start(), type: 'response', success: true, output: 'Scheduled output', ...overrides };
@@ -99,15 +100,102 @@ describe.each(['claude', 'dsh', 'agy'])('Scheduled %s result delivery', backend 
   function acks(socket: TestSocket) { return replies(socket).filter(message => message.type === 'task_result_ack'); }
 
   it.each([
-    {}, { scheduleResultsV1: true }, { queueStarted: true, scheduleResultsV1: true },
+    {}, { hostSchedulesV1: true }, { scheduleResultsV1: true }, { queueStarted: true, scheduleResultsV1: true },
     { taskRecovery: true, scheduleResultsV1: true }, { taskRecovery: true, queueStarted: true }, capabilities,
   ])('negotiates only the complete additive capability set (%j)', async requested => {
     const socket = connect(); await register(socket, requested);
     const confirmation = replies(socket).find(message => message.type === 'binding_confirm');
     expect(confirmation.data.capabilities?.scheduleResultsV1).toBe(requested === capabilities ? true : undefined);
+    expect(confirmation.data.capabilities?.hostSchedulesV1).toBe(requested === capabilities ? true : undefined);
+    expect(confirmation.data.scheduleBinding).toEqual(requested === capabilities ? { deviceId: 'device-1', openId: 'owner', epoch } : undefined);
     await receive(socket, start()); await receive(socket, response());
     expect(feishu.sendStreamingStart).toHaveBeenCalledTimes(requested === capabilities ? 1 : 0);
     expect(acks(socket)).toHaveLength(requested === capabilities ? 1 : 0);
+    expect(feishu.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('limits legacy result negotiation to the original three backends', async () => {
+    const socket = connect();
+    await register(socket, { queueStarted: true, taskRecovery: true, scheduleResultsV1: true });
+    const { bindingEpoch, ...queueStarted } = start().queueStarted;
+    await receive(socket, start({ queueStarted })); await receive(socket, response({ queueStarted }));
+    expect(acks(socket)).toHaveLength(['claude', 'agy', 'dsh'].includes(backend) ? 1 : 0);
+  });
+
+  it('requires the original epoch independently on both result frames', async () => {
+    const socket = connect(); await register(socket, capabilities);
+    const { bindingEpoch, ...withoutEpoch } = start().queueStarted;
+    for (const queueStarted of [withoutEpoch, { ...withoutEpoch, bindingEpoch: 'different' }]) {
+      await receive(socket, start({ queueStarted }));
+    }
+    expect(feishu.sendStreamingStart).not.toHaveBeenCalled();
+    await receive(socket, start());
+    for (const queueStarted of [withoutEpoch, { ...withoutEpoch, bindingEpoch: 'different' }]) {
+      await receive(socket, response({ queueStarted }));
+    }
+    expect(feishu.finalizeStreamingMessage).not.toHaveBeenCalled();
+    expect(acks(socket)).toHaveLength(0);
+    await receive(socket, response());
+    expect(acks(socket)).toHaveLength(1);
+  });
+
+  it('withholds an admitted result after same-user rebind and refuses its old epoch on reconnect', async () => {
+    const socket = connect(); await register(socket, capabilities); await receive(socket, start());
+    const nextEpoch = '00000000-0000-4000-8000-000000000002';
+    feishu.finalizeStreamingMessage.mockImplementationOnce(async (...args: any[]) => {
+      expect(await args[11].current()).toBe(true);
+      vi.spyOn((server as any).bindingManager, 'getCardThreadEpoch').mockReturnValue(nextEpoch);
+      expect(await args[11].current()).toBe(false);
+      return true;
+    });
+    await receive(socket, response()); expect(acks(socket)).toHaveLength(0);
+    const replacement = connect(); await register(replacement, capabilities);
+    expect(replies(replacement).at(-1).data.scheduleBinding).toEqual({ openId: 'owner', deviceId: 'device-1', epoch: nextEpoch });
+    await receive(replacement, start()); await receive(replacement, response());
+    expect(acks(replacement)).toHaveLength(0);
+    expect(feishu.sendStreamingStart).toHaveBeenCalledOnce();
+    expect(feishu.finalizeStreamingMessage).toHaveBeenCalledOnce();
+  });
+
+  it('scopes completed receipts to the captured owner and thread across reconnection', async () => {
+    const original = connect(); await register(original, capabilities);
+    await receive(original, start()); await receive(original, response());
+    const replacement = connect(); await register(replacement, capabilities);
+    await receive(replacement, response({ threadId: 'other-thread' }));
+    owners.set('device-1', 'new-owner');
+    await receive(replacement, response({ openId: 'new-owner' }));
+    await receive(replacement, start()); await receive(replacement, response());
+    expect(acks(replacement)).toHaveLength(0);
+    expect(feishu.sendStreamingStart).toHaveBeenCalledOnce();
+    expect(feishu.finalizeStreamingMessage).toHaveBeenCalledOnce();
+    expect(feishu.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('discards a card whose recipient lost ownership while creation was pending', async () => {
+    const socket = connect(); await register(socket, capabilities);
+    feishu.sendStreamingStart.mockImplementationOnce(async () => {
+      owners.set('device-1', 'new-owner');
+      return 'old-card';
+    });
+    await receive(socket, start());
+    expect(feishu.sendStreamingStart.mock.calls[0][0]).toBe('owner');
+    expect((server as any).streamingMessages.has('scheduled-result')).toBe(false);
+    await receive(socket, response({ openId: 'new-owner' }));
+    expect(feishu.finalizeStreamingMessage).not.toHaveBeenCalled();
+    expect(acks(socket)).toHaveLength(0);
+  });
+
+  it('withholds the result receipt when binding changes during Feishu finalization', async () => {
+    const socket = connect(); await register(socket, capabilities); await receive(socket, start());
+    feishu.finalizeStreamingMessage.mockImplementationOnce(async (...args: any[]) => {
+      expect(args[3]).toBe('owner');
+      expect(await args[11].current()).toBe(true);
+      owners.set('device-1', 'new-owner');
+      expect(await args[11].current()).toBe(false);
+      return true;
+    });
+    await receive(socket, response());
+    expect(acks(socket)).toHaveLength(0);
     expect(feishu.sendMessage).not.toHaveBeenCalled();
   });
 
@@ -150,7 +238,7 @@ describe.each(['claude', 'dsh', 'agy'])('Scheduled %s result delivery', backend 
 
   it('keeps ordinary queue behavior for a legacy peer without the new capability', async () => {
     const socket = connect(); await register(socket, { queueStarted: true });
-    const frame = start(); const { source, scheduleId, ...legacy } = frame.queueStarted;
+    const frame = start(); const { source, scheduleId, bindingEpoch, ...legacy } = frame.queueStarted;
     await receive(socket, { ...frame, queueStarted: legacy });
     expect(feishu.sendStreamingStart.mock.calls[0][1]).toContain('Running');
     await receive(socket, { type: 'response', messageId: frame.messageId, openId: 'owner', success: true });

@@ -34,7 +34,9 @@ export class ScheduleCardService {
     if (this.snapshots.size >= 100) this.snapshots.delete(this.snapshots.keys().next().value!);
     const menu: ScheduleMenu = { snapshotId: randomUUID(), threadId: owner.threadId,
       threadName: literal(this.dependencies.threadName(owner.threadId), 100), expiresAt: Date.now() + TTL,
-      entries: records.slice(0, 100).map(record => ({ value: randomUUID(), id: record.id, backend: record.backend,
+      entries: records.filter(record => record.openId === owner.openId && record.threadId === owner.threadId
+        && record.generation === owner.generation).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100)
+        .map(record => ({ value: randomUUID(), id: record.id, backend: record.backend,
         state: record.state, rule: literal(record.rule.kind === 'once' ? record.rule.at
           : `${record.rule.expression} (${record.rule.timezone})`, 160), prompt: literal(record.prompt, 240),
         ...(record.error ? { error: literal(record.error, 240) } : {}),

@@ -60,6 +60,12 @@ interface QueuedCommand {
   reject: (error: Error) => void;
 }
 
+interface SessionSelection {
+  model?: string;
+  hostSessionId?: string;
+  assertCurrent(): void;
+}
+
 interface ActiveCallbacks {
   onStream?: (chunk: string) => void;
   onDisplayText?: ExecuteOptions['onDisplayText'];
@@ -200,6 +206,8 @@ export abstract class AcpExecutor implements IExecutor {
   private activeCallbacks: ActiveCallbacks = {};
   private commandQueue: QueuedCommand[] = [];
   private isProcessing = false;
+  private hostTurn = false;
+  private hostPromptClient?: AcpTransport;
   private isDestroyed = false;
   private abortTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPermission: PendingPermission | null = null;
@@ -243,6 +251,9 @@ export abstract class AcpExecutor implements IExecutor {
 
   execute(prompt: string, options: ExecuteOptions = {}): Promise<ExecuteResult> {
     if (this.isDestroyed) return Promise.reject(new Error('Executor has been destroyed'));
+    if (options.hostScheduleSessionId !== undefined && (this.isBusy() || this.nativeReceiptOperations)) {
+      return Promise.resolve({ success: false, error: 'The original scheduled conversation is busy.' });
+    }
     return new Promise((resolve, reject) => {
       this.commandQueue.push({ prompt, options, resolve, reject });
       void this.processQueue();
@@ -304,7 +315,7 @@ export abstract class AcpExecutor implements IExecutor {
 
   async abort(): Promise<boolean> {
     if (!this.client || !this.sessionId || !this.isProcessing) {
-      if ((this.options.managedLifecycle || this.options.approvalModes) && this.isProcessing) {
+      if ((this.options.managedLifecycle || this.options.approvalModes || this.hostTurn) && this.isProcessing) {
         this.destroyClient();
         return true;
       }
@@ -399,6 +410,20 @@ export abstract class AcpExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.sessionId;
+  }
+
+  checkHostScheduleSession(id: string): void {
+    this.assertHostScheduleSelection(id);
+  }
+
+  protected assertHostScheduleSelection(id: string): void {
+    if (!id || this.sessionId !== id || this.delegationWorker || this.isDestroyed || this.abortTimer) {
+      throw new Error('The original scheduled conversation is unavailable.');
+    }
+    const pointer = JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8'));
+    if (pointer.id !== id || pointer.cwd && pointer.cwd !== this.currentWorkingDirectory) {
+      throw new Error('The saved scheduled conversation changed.');
+    }
   }
 
   getExecutionMetadata() {
@@ -605,6 +630,7 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.isProcessing || this.commandQueue.length === 0) return;
     const command = this.commandQueue.shift()!;
     this.isProcessing = true;
+    this.hostTurn = command.options.hostScheduleSessionId !== undefined;
     try {
       command.resolve(await this.executeQueued(command.prompt, command.options));
     } catch (error) {
@@ -620,6 +646,8 @@ export abstract class AcpExecutor implements IExecutor {
       this.activityTracker.reset();
       this.activityTracker.setCallback(undefined);
       this.isProcessing = false;
+      this.hostTurn = false;
+      this.hostPromptClient = undefined;
       void this.processQueue();
     }
   }
@@ -647,7 +675,17 @@ export abstract class AcpExecutor implements IExecutor {
       onPlanMode: options.onPlanMode,
       onImage: options.onImage,
     };
-    const { client, sessionId } = await this.ensureSession();
+    const pinned = options.hostScheduleSessionId;
+    const revision = this.catalogLifecycleRevision;
+    const selection = pinned === undefined ? undefined : {
+      hostSessionId: pinned,
+      assertCurrent: () => {
+        if (revision !== this.catalogLifecycleRevision) throw new Error('Scheduled conversation initialization expired.');
+        this.assertHostScheduleSelection(pinned);
+      },
+    };
+    const { client, sessionId } = await this.ensureSession(selection);
+    selection?.assertCurrent();
     if (options.resolvePrompt) {
       const resolved = options.resolvePrompt(sessionId);
       if (prompt) blocks.shift();
@@ -657,7 +695,13 @@ export abstract class AcpExecutor implements IExecutor {
     // Only events from the new prompt belong to its public activity snapshot.
     this.activityTracker.reset();
     this.activityTracker.setCallback(options.onActivity);
-    const result = await client.prompt(sessionId, blocks);
+    let result;
+    if (selection) {
+      selection.assertCurrent();
+      this.hostPromptClient = client;
+      result = await client.prompt(sessionId, blocks, selection.assertCurrent);
+      selection.assertCurrent();
+    } else result = await client.prompt(sessionId, blocks);
     const success = !['refusal', 'cancelled', 'error'].includes(result.stopReason);
     return {
       success,
@@ -682,7 +726,8 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
 
-  protected async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
+  protected async ensureSession(selection?: SessionSelection): Promise<{ client: AcpTransport; sessionId: string }> {
+    if (this.hostTurn && selection?.hostSessionId === undefined) throw new Error('A scheduled turn owns the original conversation.');
     this.nativeReceiptOperations++;
     try {
       if (selection) return await this.ensureSessionInternal(selection);
@@ -694,7 +739,7 @@ export abstract class AcpExecutor implements IExecutor {
     finally { this.nativeReceiptOperations--; }
   }
 
-  private async ensureSessionInternal(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
+  private async ensureSessionInternal(selection?: SessionSelection): Promise<{ client: AcpTransport; sessionId: string }> {
     const managed = this.isDelegationManaged() || selection !== undefined;
     selection?.assertCurrent();
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
@@ -730,7 +775,9 @@ export abstract class AcpExecutor implements IExecutor {
       if (this.sessionId) {
         try {
           this.replayingSession = managed;
-          result = await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
+          result = selection?.hostSessionId
+            ? await client.loadSession(this.sessionId, this.currentWorkingDirectory, extra[0], selection.assertCurrent)
+            : await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
           assertCurrent();
         } catch (error) {
           assertCurrent();
@@ -740,6 +787,9 @@ export abstract class AcpExecutor implements IExecutor {
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         } finally { this.replayingSession = false; }
+        if (result?.sessionId !== undefined && result.sessionId !== this.sessionId) {
+          throw new Error(`${this.backendLabel} resumed a different conversation. The original selection was retained.`);
+        }
       }
       if (!this.sessionId) {
         let nativeRoot: HistoryEntry | undefined;
@@ -788,7 +838,7 @@ export abstract class AcpExecutor implements IExecutor {
       assertCurrent();
       // Preserve cancellation through the cached client for existing transports.
       // Native approval policy must be confirmed before its client becomes reusable.
-      if (!this.options.approvalModes) this.client = client;
+      if (!this.options.approvalModes && !selection?.hostSessionId) this.client = client;
       await this.applyConfiguredOptions(client, this.sessionId!, selection?.model, assertCurrent);
       assertCurrent();
       this.client = client;
@@ -801,11 +851,13 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private createClient(): AcpTransport {
+    let client: AcpTransport;
+    const acceptsTurn = () => !this.hostTurn || !!client && this.hostPromptClient === client && this.client === client;
     const callbacks: AcpEventCallbacks = {
-      onTextChunk: (content) => this.handleContent(content, false),
-      onThoughtChunk: (content) => this.handleContent(content, true),
+      onTextChunk: (content) => { if (acceptsTurn()) this.handleContent(content, false); },
+      onThoughtChunk: (content) => { if (acceptsTurn()) this.handleContent(content, true); },
       onToolCall: (tool) => {
-        if (this.replayingSession) return;
+        if (this.replayingSession || !acceptsTurn()) return;
         const previous = this.activeToolCalls.get(tool.toolCallId);
         const merged = { ...previous, ...tool };
         this.activeToolCalls.set(tool.toolCallId, merged);
@@ -816,7 +868,7 @@ export abstract class AcpExecutor implements IExecutor {
         this.activityTracker.emitTool(mapped.name, mapped.input, merged.title);
       },
       onToolResult: (tool) => {
-        if (this.replayingSession) return;
+        if (this.replayingSession || !acceptsTurn()) return;
         const merged = { ...this.activeToolCalls.get(tool.toolCallId), ...tool };
         this.activeToolCalls.delete(tool.toolCallId);
         this.activeCallbacks.onToolResult?.({
@@ -826,7 +878,7 @@ export abstract class AcpExecutor implements IExecutor {
         });
       },
       onPlan: (entries) => {
-        if (this.replayingSession) return;
+        if (this.replayingSession || !acceptsTurn()) return;
         this.activeCallbacks.onPlanMode?.(
           entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
         );
@@ -837,6 +889,7 @@ export abstract class AcpExecutor implements IExecutor {
       },
       onConfigOptions: (options) => { this.configOptions = options; this.reportedConfigOptions = options; },
       onPermissionRequest: async (title, options) => {
+        if (!acceptsTurn()) return -1;
         const isQuestion = options.some((option) => /^q\d+_/.test(option.optionId));
         if (this.autoApprove && !isQuestion) {
           let allowed = options.findIndex((option) => option.kind === 'allow_once');
@@ -853,7 +906,8 @@ export abstract class AcpExecutor implements IExecutor {
         });
       },
     };
-    return this.clientFactory(callbacks, this.currentWorkingDirectory);
+    client = this.clientFactory(callbacks, this.currentWorkingDirectory);
+    return client;
   }
 
   private handleContent(content: AcpContentBlock, thinking: boolean): void {

@@ -34,6 +34,14 @@ describe('private AGY event relay and hook overlay', () => {
     expect(accept).toHaveBeenCalledWith('PreToolUse', expect.any(Object), [expect.objectContaining({ content: 'Synthetic result' })]);
     expect(fault).not.toHaveBeenCalled();
   });
+  it('requires the exact transcript observed at the terminal for clean host retirement', async () => {
+    const records = [JSON.parse(await fs.readFile(target, 'utf8'))];
+    await expect(relay.confirmsTerminal(records)).resolves.toBe(true);
+    await fs.appendFile(target, JSON.stringify({ ...records[0], step_index: 1 }) + '\n');
+    await expect(relay.confirmsTerminal(records)).resolves.toBe(false);
+    await fs.unlink(target);
+    await expect(relay.confirmsTerminal(records)).resolves.toBe(false);
+  });
   it('rejects an unauthenticated caller without reading a transcript or fencing the owner', async () => {
     const status = await new Promise(resolve => {
       const request = http.request(descriptor.url, { method: 'POST' }, response => { response.resume(); resolve(response.statusCode); });

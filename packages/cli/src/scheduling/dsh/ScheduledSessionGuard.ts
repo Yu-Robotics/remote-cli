@@ -46,7 +46,7 @@ export class ScheduledSessionGuard {
     if (![1, 2, 3, 4, 5, 6].includes(value.version) || !Array.isArray(value.records)
       || value.cleanup !== undefined && !Array.isArray(value.cleanup)) throw new Error('Invalid schedule catalog');
     return [...value.records, ...(value.cleanup ?? [])].some(row => {
-      if (row?.backend !== 'dsh' || row.threadId !== this.threadId || row.creationRefused === true) return false;
+      if (row?.backend !== 'dsh' || row.threadId !== this.threadId || row.creationRefused === true || row.engine === 'host') return false;
       // Missing attribution is uncertainty, not permission to resume the selected session.
       try {
         const id = row.attribution?.sessionId ?? JSON.parse(row.recovery?.identity).sessionId;

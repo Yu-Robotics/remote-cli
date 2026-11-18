@@ -75,6 +75,23 @@ describe('CodexAppServerClient', () => {
   });
   afterEach(() => { vi.useRealTimers(); });
 
+  it('submits a pinned request to the running process synchronously and refuses a closed transport', async () => {
+    const child = fakeProcess(); mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient();
+    await expect(client.request('turn/start', {}, undefined, true)).rejects.toThrow('unavailable');
+    expect(mockSpawn).not.toHaveBeenCalled();
+    await client.start();
+    const call = client.request('turn/start', { threadId: 'original' }, undefined, true);
+    const message = JSON.parse(child.stdin.writes.at(-1));
+    expect(message).toMatchObject({ method: 'turn/start', params: { threadId: 'original' } });
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ id: message.id, result: {} }) + '\n'));
+    await call;
+    const stop = client.stop();
+    child.emit('close', 0, null); await stop;
+    await expect(client.request('turn/start', {}, undefined, true)).rejects.toThrow('unavailable');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])('isolates only worker launches and does not certify fake PIDs: %s', async delegationWorker => {
     const child = fakeProcess();
     mockSpawn.mockReturnValue(child);

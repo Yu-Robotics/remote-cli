@@ -220,6 +220,8 @@ export interface QueueStartedInfo {
   source?: 'schedule';
   /** Required with source=schedule; at most 256 characters. */
   scheduleId?: string;
+  /** Original Router binding returned when hostSchedulesV1 was negotiated. */
+  bindingEpoch?: string;
   threadName: string;
   backend: string;
   cwd: string;

@@ -1,16 +1,19 @@
 import { randomUUID } from 'crypto';
+import { isScheduleBackend } from '../types/ScheduleCards';
 import type { ScheduleActionMessage, ScheduleActionResult, ScheduleCardEntry, ScheduleMenu } from '../types/ScheduleCards';
 
 interface Transport {
   ownsDevice(openId: string, deviceId: string): Promise<boolean>;
-  available(deviceId: string): boolean;
+  available(deviceId: string, allBackends?: boolean): boolean;
+  captureOwnership(openId: string, deviceId: string): () => boolean;
   send(deviceId: string, message: ScheduleActionMessage): Promise<boolean>;
-  update(cardId: string, elements: any[]): Promise<void>;
+  update(cardId: string, elements: any[], current: () => Promise<boolean>): Promise<void>;
 }
 interface State {
   id: string;
   openId: string;
   deviceId: string;
+  ownsBinding: () => boolean;
   menu: ScheduleMenu;
   cards: Set<string>;
   revision: number;
@@ -54,7 +57,7 @@ function statusPresentation(state: ScheduleCardEntry['state'], cleanupPending: b
 }
 
 /** Reject malformed peer views before they enter card state or callback authority. */
-export function parseScheduleMenu(value: unknown): ScheduleMenu | undefined {
+export function parseScheduleMenu(value: unknown, allBackends = true): ScheduleMenu | undefined {
   if (!value || typeof value !== 'object' || Buffer.byteLength(JSON.stringify(value)) > 128 * 1024) return;
   const menu = value as ScheduleMenu;
   if (!id(menu.snapshotId) || !id(menu.threadId) || !text(menu.threadName, 100)
@@ -63,7 +66,7 @@ export function parseScheduleMenu(value: unknown): ScheduleMenu | undefined {
   const values = new Set<string>();
   for (const entry of menu.entries) {
     if (!entry || !id(entry.value) || !id(entry.id) || values.has(entry.value)
-      || !['claude', 'dsh', 'agy'].includes(entry.backend) || !['creating', 'active', 'running', 'completed', 'cancelled', 'interrupted', 'failed'].includes(entry.state)
+      || !isScheduleBackend(entry.backend, allBackends) || !['creating', 'active', 'running', 'completed', 'cancelled', 'interrupted', 'failed'].includes(entry.state)
       || !text(entry.rule, 160) || !text(entry.prompt, 240) || typeof entry.canCancel !== 'boolean'
       || (entry.error !== undefined && !text(entry.error, 240))) return;
     values.add(entry.value);
@@ -78,7 +81,7 @@ export class ScheduleCards {
 
   present(input: { openId: string; deviceId: string; menu: unknown; expectedThreadId?: string }) {
     this.prune();
-    const menu = parseScheduleMenu(input.menu);
+    const menu = parseScheduleMenu(input.menu, this.transport.available(input.deviceId, true));
     if (!menu || !input.expectedThreadId || menu.threadId !== input.expectedThreadId
       || !this.transport.available(input.deviceId)) return;
     if (this.states.size >= MAX_CARDS) {
@@ -87,6 +90,7 @@ export class ScheduleCards {
       this.drop(oldest);
     }
     const state: State = { id: randomUUID(), openId: input.openId, deviceId: input.deviceId, menu,
+      ownsBinding: this.transport.captureOwnership(input.openId, input.deviceId),
       cards: new Set(), revision: 1, page: 0, chain: Promise.resolve() };
     this.states.set(state.id, state);
     return { elements: this.render(state), deliver: (cards: string[]) => {
@@ -170,7 +174,7 @@ export class ScheduleCards {
         || message.snapshotId !== pending.request.snapshotId || !this.active(state)) continue;
       if (!await this.transport.ownsDevice(state.openId, deviceId) || !this.active(state)
         || state.pending !== pending || !this.transport.available(deviceId)) return;
-      const menu = parseScheduleMenu(message.menu);
+      const menu = parseScheduleMenu(message.menu, this.transport.available(deviceId, true));
       if (menu && menu.threadId !== state.menu.threadId) return;
       clearTimeout(pending.timer); state.pending = undefined;
       const selectedId = state.menu.entries[state.page]?.id;
@@ -197,16 +201,17 @@ export class ScheduleCards {
     }
   }
   destroy(): void { for (const state of this.states.values()) this.drop(state); }
-  private active(state: State): boolean { return this.states.get(state.id) === state && !state.expired && state.menu.expiresAt > Date.now(); }
+  private active(state: State): boolean { return this.states.get(state.id) === state && !state.expired && state.ownsBinding() && state.menu.expiresAt > Date.now(); }
   private drop(state: State): void { clearTimeout(state.pending?.timer); this.states.delete(state.id); }
   private prune(): void { for (const state of this.states.values()) if (state.menu.expiresAt <= Date.now()) this.drop(state); }
   private changed(state: State): void {
     state.revision++;
     state.chain = state.chain.catch(() => {}).then(async () => {
-      if (this.states.get(state.id) !== state || !await this.transport.ownsDevice(state.openId, state.deviceId)
-        || this.states.get(state.id) !== state) return;
+      const current = async () => this.active(state) && await this.transport.ownsDevice(state.openId, state.deviceId)
+        && this.active(state) && this.transport.available(state.deviceId);
+      if (!await current()) return;
       const elements = this.render(state);
-      for (const card of state.cards) await this.transport.update(card, elements);
+      for (const card of state.cards) await this.transport.update(card, elements, current);
     }).catch(() => {});
   }
 
@@ -249,7 +254,7 @@ export class ScheduleCards {
       if (state.pending.timedOut) elements.push(row([button('retry', 'Retry confirmation', undefined, !this.active(state))]));
     }
     elements.push(notation(state.expired ? 'Connection ended. Use /schedule list after reconnecting.'
-      : `Keep the CLI running. Native timing is approximate; tasks are not recreated after restart.${entry?.backend === 'claude' ? ' Claude recurring tasks expire after seven days.' : ''} Use /schedule list for a fresh card.`));
+      : 'Keep the CLI running when a task is due. Use /schedule list for a fresh card.'));
     return elements;
   }
 }

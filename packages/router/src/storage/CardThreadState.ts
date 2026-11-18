@@ -15,7 +15,7 @@ export interface CardThreadAssociation {
 
 export interface CardThreadState {
   version: 1;
-  generations: Record<string, { openId: string; epoch: string }>;
+  generations: Record<string, { openId: string; epoch: string; scheduleEpoch?: string }>;
   cards: Record<string, CardThreadAssociation>;
 }
 
@@ -46,6 +46,11 @@ export function reconcileCardThreads(raw: unknown, bindings: Record<string, User
     const previous = valid && Object.hasOwn(raw.generations, deviceId) ? raw.generations[deviceId] : undefined;
     generations[deviceId] = previous?.openId === openId && !invalidate.has(deviceId)
       ? { openId, epoch: previous.epoch } : { openId, epoch: randomUUID() };
+    if (previous?.openId === openId) {
+      const scheduleEpoch = previous.scheduleEpoch === undefined ? previous.epoch
+        : epoch(previous.scheduleEpoch) ? previous.scheduleEpoch : randomUUID();
+      if (generations[deviceId].epoch !== scheduleEpoch) generations[deviceId].scheduleEpoch = scheduleEpoch;
+    }
   }
   const cards: CardThreadState['cards'] = Object.create(null);
   const counts = new Map<string, number>();

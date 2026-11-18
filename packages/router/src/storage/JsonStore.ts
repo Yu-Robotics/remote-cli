@@ -374,10 +374,11 @@ export class JsonStore {
       current.deviceToUserMap, invalidate) };
   }
 
-  getCardThreadEpoch(openId: string, deviceId: string): string {
+  getCardThreadEpoch(openId: string, deviceId: string, scope: 'card' | 'schedule' = 'card'): string {
     this.assertReconciled();
     const owner = this.data.cardThreads?.generations[deviceId];
-    return owner?.openId === openId ? owner.epoch : '';
+    if (!owner || owner.openId !== openId) return '';
+    return scope === 'schedule' ? owner.scheduleEpoch ?? owner.epoch : owner.epoch;
   }
 
   getCardThread(cardId: string): Readonly<CardThreadAssociation> | undefined {

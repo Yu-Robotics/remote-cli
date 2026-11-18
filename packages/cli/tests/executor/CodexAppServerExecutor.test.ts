@@ -155,6 +155,119 @@ describe('CodexAppServerExecutor', () => {
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } }); await second;
   });
 
+  const sessionPointer = () => path.join(tempHome, '.remote-cli', 'codex-sessions', 'remote-thread.json');
+
+  async function establishSession() {
+    const first = executor.execute('Establish the original conversation');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    // A management tool may capture the session during the creating foreground turn.
+    executor.checkHostScheduleSession(transport.nextThreadId);
+    transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
+    await expect(first).resolves.toMatchObject({ success: true });
+    transport.requests = [];
+  }
+
+  it('resumes a pinned thread with scheduling tools alone and the selected sandbox after reconnect', async () => {
+    await establishSession();
+    await executor.configureSandbox('read-only');
+    await executor.configureSandbox('network off');
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1234/', token: 'fixture-token', groups: ['scheduling'] });
+    const sessionId = transport.nextThreadId;
+    const saved = await fs.readFile(sessionPointer());
+    const turn = executor.execute('Scheduled check', { hostScheduleSessionId: sessionId });
+    await vi.waitFor(() => expect(transport.requests.map(r => r.method)).toEqual(['thread/resume', 'turn/start']));
+    const [resume, start] = transport.requests;
+    expect(resume.params).toMatchObject({ threadId: sessionId, sandbox: 'read-only', approvalPolicy: 'on-request' });
+    const mcp = resume.params.config['mcp_servers.remote_cli_delegation'];
+    expect(mcp.enabled_tools).toContain('remote_cli_schedule_create');
+    expect(mcp.enabled_tools.every((name: string) => name.startsWith('remote_cli_schedule_'))).toBe(true);
+    expect((await fs.stat(resume.params.config['shell_environment_policy.set.TMPDIR'])).isDirectory()).toBe(true);
+    expect(start.params).toMatchObject({ threadId: sessionId, approvalPolicy: 'on-request',
+      sandboxPolicy: { type: 'readOnly', networkAccess: false } });
+    transport.emit({ method: 'turn/completed', params: { threadId: sessionId, turn: { id: 'turn-1', status: 'completed' } } });
+    await expect(turn).resolves.toMatchObject({ success: true });
+    expect(await fs.readFile(sessionPointer())).toEqual(saved);
+  });
+
+  it.each(['unestablished', 'missing', 'replaced', 'mismatched-pin'])('refuses a %s scheduled selection without allocating a thread', async fault => {
+    if (fault !== 'unestablished') await establishSession();
+    if (fault === 'missing') await fs.unlink(sessionPointer());
+    if (fault === 'replaced') await fs.writeFile(sessionPointer(), JSON.stringify({ id: 'different-thread' }));
+    const saved = await fs.readFile(sessionPointer()).catch(() => null);
+    const pin = fault === 'mismatched-pin' ? 'different-thread' : transport.nextThreadId;
+    await expect(executor.execute('Scheduled check', { hostScheduleSessionId: pin })).resolves.toMatchObject({ success: false });
+    expect(transport.requests).toEqual([]);
+    expect(await fs.readFile(sessionPointer()).catch(() => null)).toEqual(saved);
+  });
+
+  it.each(['tools', 'sandbox', 'directory'])('defers a pinned turn while the %s configuration is reconnecting', async setting => {
+    await establishSession();
+    const release = deferred<void>();
+    vi.spyOn(transport, 'stop').mockImplementationOnce(async () => { await release.promise; transport.running = false; });
+    const directory = path.join(projectDir, 'other');
+    await fs.mkdir(directory);
+    const changing = setting === 'tools' ? executor.configureManagedTools(undefined)
+      : setting === 'sandbox' ? executor.configureSandbox('read-only') : executor.setWorkingDirectory(directory);
+    try {
+      await expect(executor.execute('Scheduled check', { hostScheduleSessionId: transport.nextThreadId }))
+        .resolves.toMatchObject({ success: false, error: expect.stringContaining('already running') });
+      expect(transport.requests).toEqual([]);
+    } finally { release.resolve(); await changing; }
+    expect(executor.getSessionId()).toBe(setting === 'directory' ? null : transport.nextThreadId);
+  });
+
+  it.each(['start', 'resume', 'prepare-turn'] as const)('rechecks the pinned selection after asynchronous %s work', async boundary => {
+    await establishSession();
+    await executor.configureManagedTools(undefined);
+    const id = transport.nextThreadId;
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    if (boundary === 'start') {
+      vi.spyOn(transport, 'start').mockImplementationOnce(async () => {
+        entered.resolve(); await release.promise; transport.running = true;
+      });
+    } else if (boundary === 'resume') {
+      const request = transport.request.bind(transport);
+      vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+        const result = await request(method, params);
+        if (method === 'thread/resume') { entered.resolve(); await release.promise; }
+        return result;
+      });
+    }
+    const replacement = JSON.stringify({ id: 'replacement-thread' });
+    const pending = executor.execute('Scheduled check', { hostScheduleSessionId: id,
+      resolvePrompt: () => {
+        if (boundary === 'prepare-turn') executor.resetContext();
+        return 'Scheduled check';
+      } });
+    if (boundary !== 'prepare-turn') {
+      await entered.promise;
+      if (boundary === 'start') executor.resetContext();
+      else await fs.writeFile(sessionPointer(), replacement);
+      release.resolve();
+    }
+    await expect(pending).resolves.toMatchObject({ success: false });
+    expect(transport.requests.map(r => r.method)).not.toContain('thread/start');
+    expect(transport.requests.map(r => r.method)).not.toContain('turn/start');
+    if (boundary === 'start') expect(transport.requests.map(r => r.method)).not.toContain('thread/resume');
+    if (boundary === 'resume') expect(await fs.readFile(sessionPointer(), 'utf8')).toBe(replacement);
+    else expect(executor.getSessionId()).toBeNull();
+  });
+
+  it.each(['missing', 'different-id'])('preserves the pin after a %s native resume reply', async fault => {
+    await establishSession();
+    await executor.configureManagedTools(undefined);
+    const saved = await fs.readFile(sessionPointer());
+    if (fault === 'missing') transport.resumeError = new Error('Thread not found');
+    else vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      transport.requests.push({ method, params }); return { thread: { id: 'different-thread' } };
+    });
+    await expect(executor.execute('Scheduled check', { hostScheduleSessionId: transport.nextThreadId })).resolves.toMatchObject({ success: false });
+    expect(transport.requests.map(r => r.method)).toEqual(['thread/resume']);
+    expect(await fs.readFile(sessionPointer())).toEqual(saved);
+    expect(executor.getSessionId()).toBe(transport.nextThreadId);
+  });
+
   it('persists a managed creation receipt before its first turn and never observes a foreground session', async () => {
     expect(() => executor.observeNativeSessionCreation(async () => {})).toThrow('managed worker');
     await executor.destroy();

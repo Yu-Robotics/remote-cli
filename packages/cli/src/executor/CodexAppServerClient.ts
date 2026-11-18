@@ -237,8 +237,11 @@ export class CodexAppServerClient {
     }
   }
 
-  async request(method: string, params?: any, timeoutMs = this.requestTimeoutMs): Promise<any> {
-    await this.start();
+  async request(method: string, params?: any, timeoutMs = this.requestTimeoutMs, requireRunning = false): Promise<any> {
+    // A pinned turn belongs to the verified process. Write in this same tick.
+    if (requireRunning) {
+      if (!this.proc || this.stopping) throw new Error('The verified Codex app-server is unavailable.');
+    } else await this.start();
     return this.requestRaw(method, params, timeoutMs);
   }
 

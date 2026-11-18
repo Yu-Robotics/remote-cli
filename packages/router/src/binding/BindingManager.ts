@@ -191,8 +191,8 @@ export class BindingManager {
     return binding.devices.find(device => device.deviceId === binding.activeDeviceId) ?? null;
   }
 
-  getCardThreadEpoch(openId: string, deviceId: string): string {
-    return this.store.getCardThreadEpoch(openId, deviceId);
+  getCardThreadEpoch(openId: string, deviceId: string, scope: 'card' | 'schedule' = 'card'): string {
+    return this.store.getCardThreadEpoch(openId, deviceId, scope);
   }
 
   async invalidateDeviceCards(deviceId: string): Promise<void> {

@@ -26,13 +26,27 @@ describe('FeishuLongConnHandler', () => {
 
   it('patches dedicated schedule cards under a bounded payload and rejects negative API receipts', async () => {
     mockClient.im.message.patch.mockResolvedValue({ code: 0 });
-    await handler.updateScheduleCard('schedule-card', [{ tag: 'markdown', content: 'Synthetic status' }]);
+    await handler.updateScheduleCard('schedule-card', [{ tag: 'markdown', content: 'Synthetic status' }], async () => true);
     expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: 'schedule-card' } }));
     mockClient.im.message.patch.mockResolvedValue({ code: 1 });
-    await expect(handler.updateScheduleCard('schedule-card', [])).rejects.toThrow('update failed');
+    await expect(handler.updateScheduleCard('schedule-card', [], async () => true)).rejects.toThrow('update failed');
     mockClient.im.message.patch.mockClear();
-    await expect(handler.updateScheduleCard('schedule-card', [{ content: 'x'.repeat(17 * 1024) }])).rejects.toThrow('size budget');
+    await expect(handler.updateScheduleCard('schedule-card', [{ content: 'x'.repeat(17 * 1024) }], async () => true)).rejects.toThrow('size budget');
     expect(mockClient.im.message.patch).not.toHaveBeenCalled();
+  });
+
+  it('stops split scheduled result delivery if the binding changes after the first patch', async () => {
+    let owned = true;
+    mockClient.im.message.patch.mockImplementationOnce(async () => { owned = false; return { code: 0 }; });
+    const body = Array.from({ length: 200 }, () => ({ tag: 'markdown', content: 'Task result' }));
+    const onDelivered = vi.fn();
+    expect(await handler.finalizeStreamingMessage('schedule-card', body, undefined, 'owner', undefined,
+      'Original', undefined, 'thread', undefined, undefined, true, { current: async () => owned, onDelivered })).toBe(false);
+    expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+    expect(mockClient.im.message.create).not.toHaveBeenCalled();
+    expect(onDelivered).not.toHaveBeenCalled();
+    await handler.updateScheduleCard('schedule-card', [], async () => owned);
+    expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
   });
 
   beforeEach(() => {
@@ -3049,7 +3063,7 @@ describe('FeishuLongConnHandler', () => {
       const helpMessage = replySpy.mock.calls.at(-1)?.[1] as string;
       expect(helpMessage).toContain('/delegation [on|off]');
       expect(helpMessage).toContain('/goal [objective|pause|resume|clear]');
-      expect(helpMessage).toContain('/schedule - Manage native scheduled tasks');
+      expect(helpMessage).toContain('/schedule - Manage one-shot and cron tasks in this thread');
       expect(helpMessage).toContain('/backend <index> - Switch all threads');
       expect(helpMessage).toContain('/backend <index> @ - Switch only the current thread');
       expect(helpMessage).toContain('/backend default @ - Clear the current thread override');

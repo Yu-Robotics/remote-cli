@@ -134,6 +134,8 @@ export interface QueueStartedInfo {
   source?: 'schedule';
   /** Required with source=schedule; at most 256 characters. */
   scheduleId?: string;
+  /** Original device binding for CLI-hosted schedule results. */
+  bindingEpoch?: string;
   threadName: string;
   backend: string;
   cwd: string;

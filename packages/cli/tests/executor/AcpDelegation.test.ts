@@ -11,7 +11,6 @@ import { ZCodeClient } from '../../src/executor/zcode/ZCodeClient';
 import type { AcpExecutor } from '../../src/executor/AcpExecutor';
 
 // A real subprocess verifies wire data and lifecycle independently of the adapter.
-const originalHome = os.homedir();
 const fixture = String.raw`
 const fs = require('fs');
 const readline = require('readline');
@@ -33,10 +32,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'session/subscribe') return reply({eventSeq:0});
   if (method === 'session/send') {
     reply({accepted:true});
-    send({method:'session/event',params:{sessionId:'session',seq:1,type:'model.streaming',payload:{kind:'text_delta',delta:'tools='+servers.length,turnId:'turn'}}});
-    return send({method:'session/event',params:{sessionId:'session',seq:2,type:'turn.completed',payload:{turnId:'turn',resultType:'success'}}});
+    send({method:'session/event',params:{sessionId:'session',seq:1,type:'turn.started',payload:{turnId:'turn'}}});
+    if (params.content === 'Scheduled') send({method:'session/event',params:{sessionId:'session',seq:2,type:'model.streaming',payload:{kind:'text_delta',delta:'OLD TURN',turnId:'previous'}}});
+    send({method:'session/event',params:{sessionId:'session',seq:3,type:'model.streaming',payload:{kind:'text_delta',delta:'tools='+servers.length,turnId:'turn'}}});
+    return send({method:'session/event',params:{sessionId:'session',seq:4,type:'turn.completed',payload:{turnId:'turn',resultType:'success'}}});
   }
   if (method === 'session/prompt') {
+    if (params.prompt[0].text === 'Scheduled') send({method:'session/update',params:{sessionId:'foreign',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'OTHER SESSION'}}}});
     send({method:'session/update',params:{sessionId:'session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'tools='+servers.length}}}});
     return reply({stopReason:'end_turn'});
   }
@@ -48,12 +50,89 @@ describe('ACP-family delegation sessions', () => {
   let directory: string;
   let executor: AcpExecutor | undefined;
   beforeEach(() => {
-    directory = fs.realpathSync(fs.mkdtempSync(path.join(originalHome, '.acp-delegation-test-')));
+    directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'acp-delegation-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    vi.stubEnv('HOME', directory); vi.stubEnv('USERPROFILE', directory);
     fs.writeFileSync(path.join(directory, 'server.cjs'), fixture);
   });
   afterEach(async () => {
     await executor?.destroy(); await executor?.waitForExit();
     fs.rmSync(directory, { recursive: true, force: true });
+    vi.restoreAllMocks(); vi.unstubAllEnvs();
+  });
+
+  it.each(['opencode', 'kimi', 'zcode'] as const)('loads the original %s session with scheduling-only tools and returns only scheduled output', async backend => {
+    const log = path.join(directory, 'schedule.jsonl');
+    const factory = (callbacks: AcpEventCallbacks, cwd: string) => backend === 'zcode'
+      ? new ZCodeClient({ cwd, launch: { command: process.execPath, args: [path.join(directory, 'server.cjs'), log], env: process.env } }, callbacks)
+      : new AcpClient(process.execPath, [path.join(directory, 'server.cjs'), log], cwd, callbacks);
+    const options = { initialWorkingDirectory: directory, sessionBaseDir: directory, threadId: 'test', clientFactory: factory };
+    const Constructor = { opencode: OpenCodeExecutor, kimi: KimiExecutor, zcode: ZCodeExecutor }[backend];
+    executor = new Constructor(new DirectoryGuard([directory]), options);
+    const connection = { url: 'http://127.0.0.1:1/', token: 'fixture', groups: ['scheduling'] as const };
+    await executor.configureManagedTools(connection);
+    expect(await executor.execute('Set a reminder')).toMatchObject({ success: true, output: 'tools=1' });
+    const id = executor.getSessionId()!;
+    await executor.destroy(); await executor.waitForExit();
+    executor = new Constructor(new DirectoryGuard([directory]), options);
+    executor.checkHostScheduleSession(id);
+    expect(() => executor!.checkHostScheduleSession('other')).toThrow();
+    await executor.configureManagedTools(connection);
+    expect(await executor.execute('Scheduled', { hostScheduleSessionId: id })).toMatchObject({ success: true, output: 'tools=1' });
+    const sessions = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      .filter(request => ['session/new', 'session/load', 'session/create', 'session/resume'].includes(request.method));
+    expect(sessions).toHaveLength(2);
+    expect(sessions[1].params.sessionId).toBe(id);
+    for (const { params } of sessions) expect(params.mcpServers).toEqual([expect.objectContaining({
+      command: process.execPath, env: expect.arrayContaining([{ name: 'REMOTE_CLI_TOOL_GROUPS', value: '["scheduling"]' }]),
+    })]);
+  });
+
+  it.each(['missing', 'different receipt', 'pointer replaced', 'reset', 'aborted'])('refuses pinned ACP resume when %s', async failure => {
+    const pointer = path.join(directory, 'test.json');
+    fs.writeFileSync(pointer, JSON.stringify({ id: 'original', cwd: directory }));
+    const transport = {
+      initialize: vi.fn(async () => ({})),
+      loadSession: vi.fn(async () => {
+        if (failure === 'missing') throw new Error('Session not found');
+        if (failure === 'different receipt') return { sessionId: 'other' };
+        if (failure === 'pointer replaced') fs.writeFileSync(pointer, JSON.stringify({ id: 'other', cwd: directory }));
+        if (failure === 'reset') executor!.resetContext();
+        if (failure === 'aborted') await executor!.abort();
+        return { sessionId: 'original' };
+      }),
+      newSession: vi.fn(), setConfigOption: vi.fn(), prompt: vi.fn(), destroy: vi.fn(),
+    };
+    executor = new OpenCodeExecutor(new DirectoryGuard([directory]), { initialWorkingDirectory: directory, model: 'selected',
+      sessionBaseDir: directory, threadId: 'test', clientFactory: () => transport as any });
+    expect(await executor.execute('Scheduled', { hostScheduleSessionId: 'original' })).toMatchObject({ success: false });
+    expect(transport.newSession).not.toHaveBeenCalled();
+    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.prompt).not.toHaveBeenCalled();
+    if (failure !== 'reset') expect(JSON.parse(fs.readFileSync(pointer, 'utf8')).id).toBe(failure === 'pointer replaced' ? 'other' : 'original');
+  });
+
+  it('keeps a concurrent catalog query and a second wake from opening another session during pinned resume', async () => {
+    fs.writeFileSync(path.join(directory, 'test.json'), JSON.stringify({ id: 'original', cwd: directory }));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const transport = {
+      initialize: vi.fn(async () => ({})),
+      loadSession: vi.fn(async () => { await gate; return { sessionId: 'original' }; }),
+      prompt: vi.fn(async () => ({ stopReason: 'end_turn' })), destroy: vi.fn(),
+    };
+    const factory = vi.fn(() => transport as any);
+    executor = new OpenCodeExecutor(new DirectoryGuard([directory]), { initialWorkingDirectory: directory,
+      sessionBaseDir: directory, threadId: 'test', clientFactory: factory });
+    const active = executor.execute('Scheduled', { hostScheduleSessionId: 'original' });
+    await vi.waitFor(() => expect(transport.loadSession).toHaveBeenCalledOnce());
+    try {
+      await expect(executor.listModels()).rejects.toThrow(/scheduled turn/);
+      await expect(executor.execute('Second wake', { hostScheduleSessionId: 'original' })).resolves.toMatchObject({ success: false });
+    } finally { release(); }
+    await expect(active).resolves.toMatchObject({ success: true });
+    expect(factory).toHaveBeenCalledOnce();
+    expect(transport.prompt).toHaveBeenCalledOnce();
   });
 
   it.each(['opencode', 'kimi', 'zcode'] as const)('registers, resumes, and removes %s tools without changing the session', async backend => {

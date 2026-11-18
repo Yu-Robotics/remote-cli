@@ -123,6 +123,15 @@ export class ClaudeScheduleOwnership {
     } catch (error) { if (!existing) gate.close(); throw error; }
   }
   hostClosed(): void { this.live = false; }
+  /** Called under the cancellation lease after authoritative empty inventory. */
+  retireAfterReboot(): void {
+    if (!this.gate || this.live) return;
+    this.gate.verify();
+    const saved = this.read(), current = this.dependencies.identity();
+    if (!saved || saved.identity.host !== current.host || saved.identity.boot === current.boot) return;
+    fs.renameSync(this.filename, `${this.filename}.cleared-${randomUUID()}`);
+    syncDirectory(path.dirname(this.filename));
+  }
   close(): void { this.gate?.close(); this.gate = undefined; this.live = false; }
   private read(): Receipt | undefined {
     let stat: fs.Stats;

@@ -21,6 +21,7 @@ interface ActivePrompt {
   resolve: (value: { stopReason: string }) => void;
   reject: (error: Error) => void;
   turnId?: string;
+  pinned?: boolean;
   tools: Map<string, AcpToolCallUpdate>;
 }
 
@@ -137,21 +138,25 @@ export class ZCodeClient implements AcpTransport {
     return this.captureSession(sessionId, result);
   }
 
-  async loadSession(sessionId: string, cwd: string, mcpServers = this.sessionServers): Promise<AcpSessionResult> {
+  async loadSession(sessionId: string, cwd: string, mcpServers = this.sessionServers, assertCurrent?: () => void): Promise<AcpSessionResult> {
     this.sessionServers = mcpServers;
     const result = await this.request('session/resume', {
       sessionId,
       workspace: { workspacePath: cwd, workspaceKey: cwd },
       ...(this.sessionServers ? { mcpServers: this.nativeMcpServers() } : {}),
     });
-    return this.captureSession(sessionId, result);
+    assertCurrent?.();
+    if (assertCurrent && result?.session?.sessionId !== sessionId) {
+      throw new Error('ZCode resumed a different conversation.');
+    }
+    return this.captureSession(result?.session?.sessionId ?? sessionId, result);
   }
 
   private nativeMcpServers() {
     return this.sessionServers?.map(server => ({ ...server, isolation: 'session', timeoutMs: 35_000 }));
   }
 
-  async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
+  async prompt(sessionId: string, blocks: AcpContentBlock[], assertCurrent?: () => void): Promise<{ stopReason: string }> {
     if (this.prompts.has(sessionId)) throw new Error('ZCode session is already running a prompt');
     const text = blocks.flatMap((block) => block.type === 'text' && 'text' in block ? [block.text] : []).join('\n');
     const images = blocks.flatMap((block) => block.type === 'image'
@@ -174,16 +179,21 @@ export class ZCodeClient implements AcpTransport {
       includeSnapshot: false,
       afterSeq: this.sequence.get(sessionId) ?? 0,
     });
+    let subscription;
     try {
-      await subscribe();
+      subscription = await subscribe();
     } catch (error) {
-      if (!/session is not active/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      if (assertCurrent || !/session is not active/i.test(error instanceof Error ? error.message : String(error))) throw error;
       await this.loadSession(sessionId, this.cwd);
       await subscribe();
     }
 
+    assertCurrent?.();
+    if (assertCurrent && Number.isSafeInteger(subscription?.eventSeq)) {
+      this.sequence.set(sessionId, Math.max(this.sequence.get(sessionId) ?? 0, subscription.eventSeq));
+    }
     return new Promise((resolve, reject) => {
-      this.prompts.set(sessionId, { resolve, reject, tools: new Map() });
+      this.prompts.set(sessionId, { resolve, reject, tools: new Map(), pinned: !!assertCurrent });
       void this.request('session/send', {
         sessionId,
         content: text,
@@ -375,15 +385,18 @@ export class ZCodeClient implements AcpTransport {
   private handleSessionEvent(event: Record<string, any>): void {
     const sessionId = String(event.sessionId ?? '');
     if (!sessionId) return;
-    if (typeof event.seq === 'number') this.sequence.set(sessionId, Math.max(event.seq, this.sequence.get(sessionId) ?? 0));
     const prompt = this.prompts.get(sessionId);
+    if (prompt?.pinned && typeof event.seq === 'number' && event.seq <= (this.sequence.get(sessionId) ?? -1)) return;
+    if (typeof event.seq === 'number') this.sequence.set(sessionId, Math.max(event.seq, this.sequence.get(sessionId) ?? 0));
     if (!prompt) return;
     const payload = event.payload ?? {};
+    if (prompt.pinned && prompt.turnId && payload.turnId && prompt.turnId !== payload.turnId) return;
     if (event.type === 'turn.started') {
       prompt.turnId = typeof payload.turnId === 'string' ? payload.turnId : prompt.turnId;
       return;
     }
     if (event.type === 'model.streaming') {
+      if (prompt.pinned && (!prompt.turnId || payload.turnId !== prompt.turnId)) return;
       this.handleStreaming(prompt, payload);
       return;
     }
@@ -396,6 +409,10 @@ export class ZCodeClient implements AcpTransport {
       return;
     }
     if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.terminal') {
+      if (prompt.pinned && (!prompt.turnId || payload.turnId !== prompt.turnId)) {
+        this.failPrompt(sessionId, new Error('ZCode did not identify the scheduled turn at completion.'));
+        return;
+      }
       if (prompt.turnId && payload.turnId && prompt.turnId !== payload.turnId) return;
       this.prompts.delete(sessionId);
       if (event.type === 'turn.failed') prompt.reject(new Error(this.formatError(payload.error ?? payload)));

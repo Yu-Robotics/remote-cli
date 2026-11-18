@@ -75,6 +75,64 @@ describe('Claude shared foreground scheduling integration', () => {
     await executor.destroy();
     vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true });
   });
+  it('pins host-timed dispatch and blocks absent or divergent native submit identities', async () => {
+    const id = 'original-native-session';
+    executor.checkHostScheduleSession(id);
+    const active = executor.execute('timed foreground', { hostScheduleSessionId: id });
+    executor.checkHostScheduleSession(id);
+    for (const session_id of [undefined, 'other', id]) {
+      frame({ type: 'control_request', request_id: 'submit', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+        input: { hook_event_name: 'UserPromptSubmit', session_id, prompt: 'timed foreground' } } });
+      expect(wire.at(-1).response.response.decision).toBe(session_id === id ? undefined : 'block');
+    }
+    expect(nativeTools).toEqual([]); result(lastUser().uuid); await active;
+    frame({ type: 'system', subtype: 'init', session_id: 'other' });
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.execute('refused', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: false });
+    expect(lastUser().message.content).toBe('timed foreground');
+  });
+  it('dispatches with verified hooks even when native Cron and its timezone are unavailable', async () => {
+    const id = 'original-native-session';
+    raw.clearCatalogCache();
+    raw.scheduleHooksReady = false;
+    raw.sessionSchedules.cronDisabledAtStartup();
+    nativeSettings = { effective: { env: { TZ: 'fixture-invalid-timezone' } } };
+    frame({ type: 'system', subtype: 'init', session_id: id, tools: [], capabilities: [] });
+    wire.length = 0;
+    const active = executor.execute('timed task', { hostScheduleSessionId: id });
+    await vi.waitFor(() => expect(lastUser()?.message.content).toBe('timed task'));
+    expect(wire.filter(row => row.type === 'control_request').map(row => row.request.subtype))
+      .toEqual(['initialize', 'get_settings']);
+    expect(wire.filter(row => row.type === 'user')).toHaveLength(1);
+    result(lastUser().uuid);
+    await expect(active).resolves.toMatchObject({ success: true });
+  });
+  it('verifies hook policy before pinned dispatch on a previously initialized ordinary host', async () => {
+    raw.scheduleGuardRequired = false;
+    nativeSettings = { effective: { allowManagedHooksOnly: true } };
+    const stopped = vi.spyOn(raw, 'stopProcess').mockResolvedValue(undefined);
+    await expect(executor.execute('refused timed task', { hostScheduleSessionId: 'original-native-session' }))
+      .resolves.toMatchObject({ success: false });
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(lastUser()).toBeUndefined();
+  });
+  it('refuses pinned dispatch if a cached catalog cannot establish callback registration', async () => {
+    raw.scheduleHooksReady = false;
+    const stopped = vi.spyOn(raw, 'stopProcess').mockResolvedValue(undefined);
+    await expect(executor.execute('unverified task', { hostScheduleSessionId: 'original-native-session' }))
+      .resolves.toMatchObject({ success: false });
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(lastUser()).toBeUndefined();
+  });
+  it('retains the original pointer if a pinned Claude turn observes a different initialized session', async () => {
+    const id = 'original-native-session';
+    const stop = vi.spyOn(raw, 'stopProcess').mockResolvedValue(undefined);
+    const active = executor.execute('timed foreground', { hostScheduleSessionId: id });
+    frame({ type: 'system', subtype: 'init', session_id: 'unexpected-session' });
+    await expect(active).rejects.toThrow('different conversation');
+    expect(stop).toHaveBeenCalledOnce(); expect(executor.getSessionId()).toBe(id);
+    expect(JSON.parse(await fs.readFile(raw.sessionFilePath, 'utf8')).id).toBe(id);
+  });
   it('combines predecessor proof with current native work and host validity for purge', async () => {
     raw.delegation = { groups: ['scheduling'] };
     const ownership = raw.scheduleHostOwnership();
@@ -148,35 +206,54 @@ describe('Claude shared foreground scheduling integration', () => {
     return { handle, action, events };
   }
 
-  it('closes managed MCP creation in the caller turn and preserves subsequent user turns and session identity', async () => {
+  it('creates a host schedule in the MCP caller turn and preserves subsequent user turns and session identity', async () => {
+    const nativeCreate = vi.fn(async () => { throw new Error('Unexpected native schedule creation'); });
+    const service = new ScheduleService({ directory: path.join(root, 'schedules'), provider: { create: nativeCreate },
+      hostDispatch: vi.fn(), deliver: vi.fn(), isOwnerCurrent: () => true, now: () => Date.UTC(2026, 0, 1) });
+    await service.initialize();
     const display = vi.fn();
     const foreground = executor.execute('Create a recurring task from this conversation', { onDisplayText: display });
     const first = lastUser(); const present = vi.fn(async () => 'Original-thread card delivered');
-    const owner = { openId: 'synthetic-owner', threadId: 'synthetic-thread', generation: 'epoch-a' };
+    const owner = { openId: 'synthetic-owner', threadId: 'synthetic-thread', generation: 'epoch-a', bindingEpoch: 'synthetic-binding' };
+    let admit!: () => void;
+    const admission = new Promise<void>(resolve => { admit = resolve; });
+    const nativeAction = vi.spyOn(executor, 'nativeScheduleAction');
     const scope = new ScheduleToolOperations().scope({ owner, messageId: 'message-a', backend: 'claude', current: () => true, waitMs: 1,
       nativeAction: id => executor.nativeScheduleAction(id),
-      run: (command, id) => executor.withNativeScheduleOperation(id, () => true, async () => {
-        if (command.kind !== 'create') return [];
-        const handle = await executor.createNativeSchedule({ id, cwd: root, rule: command.rule, prompt: command.prompt }, vi.fn());
-        return [{ ...owner, id, backend: 'claude', cwd: root, rule: command.rule, prompt: command.prompt, createdAt: Date.now(), state: 'active', nativeId: handle.nativeId }];
-      }, true), present });
+      run: async (command, id) => {
+        if (command.kind !== 'create') throw new Error('Expected host schedule creation');
+        const sessionId = executor.getSessionId()!;
+        executor.checkHostScheduleSession(sessionId);
+        await admission;
+        return [await service.create(owner, { engine: 'host', backend: 'claude', bindingEpoch: owner.bindingEpoch,
+          sessionId, id, cwd: root, rule: command.rule, prompt: command.prompt })];
+      }, present });
     const args = { requestId: 'request-a', prompt: 'Use our latest discussion', when: { kind: 'cron', expression: '* * * * *', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } };
-    const accepted: any = await scope.invoke('remote_cli_schedule_create', args);
-    expect(accepted.status).toBe('pending'); expect(accepted.nativeAction.tool).toBe('CronCreate');
-    expect(wire.filter(row => row.type === 'user')).toHaveLength(1);
-    expect(await scope.invoke('remote_cli_schedule_create', args)).toEqual(accepted);
-    hook(accepted.nativeAction, 'creation-tool'); receipt(created('native-a'), 'creation-tool');
-    await scope.drain();
-    expect(await scope.invoke('remote_cli_schedule_operation', { requestId: 'request-a' })).toMatchObject({ status: 'succeeded' });
-    expect(present).toHaveBeenCalledOnce();
-    frame({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Your task is scheduled.' }] } });
-    result(first.uuid); await expect(foreground).resolves.toMatchObject({ success: true });
-    expect(display).toHaveBeenCalledWith('Your task is scheduled.');
-    const next = executor.execute('Here is additional information for future occurrences');
-    expect(lastUser().message.content).toBe('Here is additional information for future occurrences');
-    expect(raw.sessionId).toBe('original-native-session');
-    expect(wire.filter(row => row.type === 'control_request' && row.request.subtype === 'initialize')).toHaveLength(1);
-    result(lastUser().uuid); await next; await scope.close();
+    try {
+      const accepted: any = await scope.invoke('remote_cli_schedule_create', args);
+      expect(accepted).toMatchObject({ status: 'pending', scheduleId: expect.any(String) });
+      expect(accepted).not.toHaveProperty('nativeAction');
+      expect(await scope.invoke('remote_cli_schedule_create', args)).toEqual(accepted);
+      admit(); await scope.drain();
+      const completed = await scope.invoke('remote_cli_schedule_operation', { requestId: 'request-a' });
+      expect(completed).toMatchObject({ status: 'succeeded', records: [{ id: accepted.scheduleId, state: 'active' }] });
+      expect(completed).not.toHaveProperty('nativeAction');
+      expect(await service.list(owner)).toMatchObject([{ id: accepted.scheduleId, engine: 'host', sessionId: 'original-native-session' }]);
+      expect(nativeAction).not.toHaveBeenCalled(); expect(nativeCreate).not.toHaveBeenCalled();
+      expect(wire.filter(row => row.type === 'user')).toHaveLength(1);
+      expect(present).toHaveBeenCalledOnce();
+      frame({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Your task is scheduled.' }] } });
+      result(first.uuid); await expect(foreground).resolves.toMatchObject({ success: true });
+      expect(display).toHaveBeenCalledWith('Your task is scheduled.');
+      const next = executor.execute('Here is additional information for future occurrences');
+      expect(lastUser().message.content).toBe('Here is additional information for future occurrences');
+      expect(executor.getSessionId()).toBe('original-native-session');
+      expect(wire.filter(row => row.type === 'control_request' && row.request.subtype === 'initialize')).toHaveLength(1);
+      result(lastUser().uuid); await next;
+    } finally {
+      if (raw.isProcessing) result(lastUser().uuid);
+      admit(); await scope.close(); await service.destroy();
+    }
   });
 
   it('isolates idle scheduled output and completion from a later foreground request without replaying history', async () => {

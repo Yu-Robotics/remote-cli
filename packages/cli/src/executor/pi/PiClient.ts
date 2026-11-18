@@ -62,8 +62,9 @@ export class PiClient implements PiTransport {
     return () => this.handlers.delete(handler);
   }
 
-  async start(): Promise<void> {
+  async start(beforeStart?: () => void): Promise<void> {
     if (this.stopPromise) await this.stopPromise;
+    beforeStart?.();
     if (this.unconfirmedStopProc) throw new Error('Pi RPC process exit could not be confirmed');
     if (this.proc) return;
     if (this.startPromise) return this.startPromise;
@@ -77,6 +78,19 @@ export class PiClient implements PiTransport {
 
   async request(command: Record<string, unknown>, timeoutMs = this.requestTimeoutMs): Promise<PiRpcResponse> {
     await this.start();
+    return this.requestRunning(command, timeoutMs);
+  }
+
+  bindRunningProcess(): PiTransport['request'] {
+    const process = this.proc;
+    if (!process) throw new Error('Pi RPC process is unavailable');
+    return (command, timeoutMs) => {
+      if (process !== this.proc) return Promise.reject(new Error('The verified Pi RPC process has exited'));
+      return this.requestRunning(command, timeoutMs);
+    };
+  }
+
+  private requestRunning(command: Record<string, unknown>, timeoutMs = this.requestTimeoutMs): Promise<PiRpcResponse> {
     const id = typeof command.id === 'string' ? command.id : `req-${this.nextRequestId++}`;
     const payload = { ...command, id };
     return new Promise((resolve, reject) => {

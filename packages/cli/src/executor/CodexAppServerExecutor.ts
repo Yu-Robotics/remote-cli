@@ -23,7 +23,7 @@ import { codexWebSearchUse, codexWebSearchResult } from './CodexWebSearch';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
-  request(method: string, params?: any, timeoutMs?: number): Promise<any>;
+  request(method: string, params?: any, timeoutMs?: number, requireRunning?: boolean): Promise<any>;
   respond(id: number | string, result: any): void;
   respondError(id: number | string, message: string, code?: number): void;
   onMessage(handler: (message: AppServerMessage) => void): () => void;
@@ -236,10 +236,19 @@ export class CodexAppServerExecutor implements IExecutor {
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
     if (this.isBusy()) throw new Error('Cannot change delegation while Codex is busy');
-    await this.client.stop();
+    await this.reconfigureTransport(() => {
+      this.delegation = connection;
+      this.delegationConfigured = true;
+    });
+  }
+
+  private async reconfigureTransport(apply: () => void): Promise<void> {
     this.threadReady = false;
-    this.delegation = connection;
-    this.delegationConfigured = true;
+    this.threadLoads++;
+    try {
+      await this.client.stop();
+      apply();
+    } finally { this.threadLoads--; }
   }
 
   constructor(directoryGuard: DirectoryGuard, options: CodexAppServerExecutorOptions = {}) {
@@ -300,8 +309,10 @@ export class CodexAppServerExecutor implements IExecutor {
       return { success: false, error: 'Codex thread is already running a command' };
     }
 
+    const pinned = options.hostScheduleSessionId;
     try {
-      await this.ensureThread();
+      await this.ensureThread(pinned);
+      if (pinned !== undefined) this.checkHostScheduleSession(pinned);
       if (this.isBusy()) return { success: false, error: 'Codex thread is already running a command' };
     } catch (error) {
       return { success: false, error: this.errorMessage(error) };
@@ -311,13 +322,17 @@ export class CodexAppServerExecutor implements IExecutor {
     try {
       // Resolve paths before marking a turn active so a rejected policy cannot
       // leave the executor busy without an actual app-server turn.
-      const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       const input = await this.buildInput(options.resolvePrompt?.(this.codexThreadId) ?? prompt, options.attachments, temporaryFiles);
       const speedOptions = await this.speedOptions();
       if (this.isBusy()) {
         await this.cleanupTemporaryFiles(temporaryFiles);
         return { success: false, error: 'Codex thread is already running a command' };
       }
+      if (pinned !== undefined) {
+        this.checkHostScheduleSession(pinned);
+        if (!this.threadReady || !this.client.isRunning()) throw new Error('The scheduled Codex thread is no longer loaded.');
+      }
+      const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       return await new Promise<ExecuteResult>((resolve) => {
         const active: ActiveTurn = {
           options,
@@ -342,7 +357,7 @@ export class CodexAppServerExecutor implements IExecutor {
         this.armInactivityTimer();
 
         const params: any = {
-          threadId: this.codexThreadId,
+          threadId: pinned ?? this.codexThreadId,
           input,
           cwd: this.currentWorkingDirectory,
           ...(this.model ? { model: this.model } : {}),
@@ -355,7 +370,7 @@ export class CodexAppServerExecutor implements IExecutor {
           ...sandboxOptions,
         };
 
-        void this.client.request('turn/start', params).then((response) => {
+        void this.client.request('turn/start', params, undefined, pinned !== undefined).then((response) => {
           if (this.activeTurn !== active) return;
           this.captureReportedSettings(response);
           const turnId = response?.turn?.id;
@@ -693,10 +708,11 @@ export class CodexAppServerExecutor implements IExecutor {
     );
     if (resolved === this.currentWorkingDirectory) return;
     if (this.isBusy()) throw new Error('Cannot change working directory while Codex is busy');
-    await this.client.stop();
-    this.resetContext();
-    this.currentWorkingDirectory = resolved;
-    this.client.setWorkingDirectory(resolved);
+    await this.reconfigureTransport(() => {
+      this.resetContext();
+      this.currentWorkingDirectory = resolved;
+      this.client.setWorkingDirectory(resolved);
+    });
   }
 
   getSandboxStatus(): string {
@@ -724,9 +740,7 @@ export class CodexAppServerExecutor implements IExecutor {
           return { success: false, error: 'That directory is not an extra grant. Default development directories are controlled by developmentDirectories in the configuration.' };
         }
       } else return { success: false, error: 'Usage: /sandbox on|off|read-only|default; /sandbox network on|off; /sandbox allow|remove <directory>' };
-      await this.client.stop();
-      this.threadReady = false;
-      this.sandbox.configure(next);
+      await this.reconfigureTransport(() => this.sandbox.configure(next));
       return { success: true, output: this.getSandboxStatus() };
     } catch (error) {
       return { success: false, error: this.errorMessage(error) };
@@ -839,6 +853,21 @@ export class CodexAppServerExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.codexThreadId;
+  }
+
+  checkHostScheduleSession(id: string): void {
+    if (!id || this.codexThreadId !== id || this.destroyed || this.delegationWorker || this.transportStop
+      || this.goalRun || this.goalControl || this.goalNeedsResume || this.compactWaiter) {
+      throw new Error('The original Codex conversation is unavailable for scheduling.');
+    }
+    try {
+      const stat = fs.lstatSync(this.sessionFilePath);
+      if (stat.isFile() && stat.nlink === 1 && stat.size <= 65536) {
+        const saved = JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8'));
+        if (saved.id === id && (saved.goalManaged === true) === this.goalManaged) return;
+      }
+    } catch { /* Missing or unreadable selection cannot authorize a scheduled turn. */ }
+    throw new Error('The saved Codex conversation is missing or changed.');
   }
 
   isWaitingInput(): boolean {
@@ -1286,13 +1315,14 @@ export class CodexAppServerExecutor implements IExecutor {
     this.sandbox.deleteData();
   }
 
-  private async ensureThread(): Promise<void> {
+  private async ensureThread(pinned?: string): Promise<void> {
     this.threadLoads++;
-    try { await this.loadThread(); }
+    try { await this.loadThread(pinned); }
     finally { this.threadLoads--; }
   }
 
-  private async loadThread(): Promise<void> {
+  private async loadThread(pinned?: string): Promise<void> {
+    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.goalManaged && this.codexThreadId && !this.goalRun) {
       const goal = await this.getGoal();
@@ -1305,6 +1335,7 @@ export class CodexAppServerExecutor implements IExecutor {
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
     await this.client.start();
+    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     if (typeof this.speed === 'string') {
       const available = await (goalOwner ? this.goalDeadline(this.listSpeeds()) : this.listSpeeds());
@@ -1315,6 +1346,7 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     const speedOptions = await this.speedOptions();
+    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     const common: any = {
       ...(this.model ? { model: this.model } : {}),
@@ -1324,7 +1356,7 @@ export class CodexAppServerExecutor implements IExecutor {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
       } : {}),
-      ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || hasDelegationTools(this.delegation)),
+      ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || !!this.delegation),
     };
     // A saved active goal can dispatch during resume, before settings/update.
     if (goalOwner && this.effort) common.config = { ...common.config, model_reasoning_effort: this.effort };
@@ -1339,14 +1371,16 @@ export class CodexAppServerExecutor implements IExecutor {
       };
     }
 
-    if (this.codexThreadId) {
+    const resumeId = pinned ?? this.codexThreadId;
+    if (resumeId) {
       try {
         const response = await this.client.request('thread/resume', {
-          threadId: this.codexThreadId,
+          threadId: resumeId,
           excludeTurns: true,
           ...common,
-        });
-        if (response?.thread?.id !== this.codexThreadId) {
+        }, undefined, pinned !== undefined);
+        if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+        if (response?.thread?.id !== resumeId || this.codexThreadId !== resumeId) {
           throw new Error('Codex app-server resumed an unexpected thread');
         }
         if (goalOwner) this.assertGoalOwner(goalOwner);
@@ -1383,6 +1417,7 @@ export class CodexAppServerExecutor implements IExecutor {
       this.legacyFollowReady = this.speed === null && !Object.prototype.hasOwnProperty.call(common, 'serviceTier');
     }
     if (typeof this.speed === 'string') await this.assertReportedSpeed(this.speed);
+    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     this.threadReady = true;
   }

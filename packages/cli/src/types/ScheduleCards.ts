@@ -1,8 +1,10 @@
+import type { BackendKey } from './config';
+
 /** Additive scheduleCardsV1 protocol. Values identify immutable CLI-owned choices. */
 export interface ScheduleCardEntry {
   value: string;
   id: string;
-  backend: 'claude' | 'dsh' | 'agy';
+  backend: BackendKey;
   state: 'creating' | 'active' | 'running' | 'completed' | 'cancelled' | 'interrupted' | 'failed';
   rule: string;
   prompt: string;

@@ -88,6 +88,7 @@ export class DshExecutor extends AcpExecutor {
         } };
         const transport = options.clientFactory?.(wrapped, cwd)
           ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker, history?.patch || options.managedHistoryPatch);
+        let replacingMissingSession = false;
         return {
           ...(transport.createNativeSchedule ? { createNativeSchedule: transport.createNativeSchedule.bind(transport) } : {}),
           initialize: async () => {
@@ -96,15 +97,25 @@ export class DshExecutor extends AcpExecutor {
             state.usage = null;
             return result;
           },
-          newSession: (...args) => transport.newSession(...args),
+          newSession: async (...args) => {
+            const result = await transport.newSession(...args);
+            if (replacingMissingSession) state.recoveryNotice = true;
+            return result;
+          },
           loadSession: async (...args) => {
-            try { return await transport.loadSession(...args); }
+            try {
+              const loaded = await transport.loadSession(...args);
+              if (loaded.sessionId !== undefined && loaded.sessionId !== args[0]) {
+                throw new Error('DSH resumed a different conversation. The original selection was retained.');
+              }
+              return loaded;
+            }
             catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               // Match only DSH's known permanent error, not provider text or arbitrary RPC failures.
               if (/^(?:ACP error -32602:\s*)?session is not resumable(?:\s*:|$)/i.test(message)) {
                 if (state.compacting) throw new Error(COMPACT_CONTEXT_UNAVAILABLE);
-                state.recoveryNotice = true;
+                replacingMissingSession = true;
                 throw new Error('Session not found: the saved DSH context cannot be resumed over ACP.');
               }
               if (/^(?:ACP error -32602:\s*)?session cwd does not match(?:\s*:|$)/i.test(message)) {
@@ -120,7 +131,7 @@ export class DshExecutor extends AcpExecutor {
           destroy: () => transport.destroy(),
           ...(transport.waitForExit ? { waitForExit: () => transport.waitForExit!() } : {}),
           ...(transport.waitForManagedProcessGroupExit ? { waitForManagedProcessGroupExit: () => transport.waitForManagedProcessGroupExit!() } : {}),
-          prompt: async (id, blocks) => {
+          prompt: async (id, blocks, assertCurrent) => {
             if (!state.images && blocks.some(block => block.type === 'image')) {
               throw new Error('This DSH ACP profile/model does not support image input. No part of this prompt was submitted.');
             }
@@ -129,8 +140,9 @@ export class DshExecutor extends AcpExecutor {
               state.recoveryNotice = false;
             }
             const handoff = state.handoff;
-            const result = await transport.prompt(id, handoff
-              ? [{ type: 'text', text: seedPromptWithHandoff(handoff.text, '') }, ...blocks] : blocks);
+            const content = handoff
+              ? [{ type: 'text' as const, text: seedPromptWithHandoff(handoff.text, '') }, ...blocks] : blocks;
+            const result = assertCurrent ? await transport.prompt(id, content, assertCurrent) : await transport.prompt(id, content);
             if (handoff && state.handoff === handoff && result.stopReason === 'end_turn') clearHandoff();
             return result;
           },
@@ -166,6 +178,16 @@ export class DshExecutor extends AcpExecutor {
     if (/^\s*\/[a-z][\w-]*(?:\s|$)/i.test(prompt)) return Promise.resolve({ success: false,
       error: 'DSH ACP does not expose interactive slash commands. Use remote-cli built-ins or describe the task in plain text.' });
     return super.execute(prompt, options);
+  }
+
+  checkHostScheduleSession(id: string): void {
+    this.assertHostScheduleSelection(id);
+  }
+
+  protected override assertHostScheduleSelection(id: string): void {
+    super.assertHostScheduleSelection(id);
+    if (this.state.compacting || this.state.handoff) throw new Error('DSH conversation reset is pending.');
+    this.scheduledSessionGuard.assertResume(id);
   }
 
   readonly nativeScheduleCleanup: NativeScheduleCleanup = {

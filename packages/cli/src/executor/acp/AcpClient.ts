@@ -62,11 +62,11 @@ export interface AcpTransport {
     onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void | Promise<void>, current?: () => boolean): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
   newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
-  loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
+  loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[], assertCurrent?: () => void): Promise<AcpSessionResult>;
   /** Optional initial-control transaction; ordinary transport signatures stay compatible. */
   newSessionWithSetup?(cwd: string, mcpServers: AcpMcpServer[] | undefined, setup: AcpSessionSetup): Promise<AcpSessionResult>;
   loadSessionWithSetup?(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] | undefined, setup: AcpSessionSetup): Promise<AcpSessionResult>;
-  prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }>;
+  prompt(sessionId: string, blocks: AcpContentBlock[], assertCurrent?: () => void): Promise<{ stopReason: string }>;
   setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult>;
   compactSession?(sessionId: string): Promise<{ stopReason: string }>;
   deleteSession(sessionId: string): Promise<void>;
@@ -93,6 +93,7 @@ export class AcpClient implements AcpTransport {
   private nextId = 1;
   private readonly sessionAdmissions = new Map<string, object | undefined>();
   private sessionEpoch: object = {};
+  private pinnedPromptSession?: string;
   private readonly sessionSetups = new Set<object>();
   private destroyed = false;
   private closed = false;
@@ -207,12 +208,16 @@ export class AcpClient implements AcpTransport {
     }
   }
 
-  async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
+  async prompt(sessionId: string, blocks: AcpContentBlock[], assertCurrent?: () => void): Promise<{ stopReason: string }> {
     if (this.sessionSetups.size) {
       this.sessionEpoch = {};
       throw new Error('ACP initial session setup is still pending.');
     }
-    return this.sendRequest('session/prompt', { sessionId, prompt: blocks }) as Promise<{ stopReason: string }>;
+    assertCurrent?.();
+    if (assertCurrent) this.pinnedPromptSession = sessionId;
+    try {
+      return await this.sendRequest('session/prompt', { sessionId, prompt: blocks }) as { stopReason: string };
+    } finally { if (assertCurrent) this.pinnedPromptSession = undefined; }
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult> {
@@ -350,7 +355,8 @@ export class AcpClient implements AcpTransport {
 
   protected handleNotification(message: AcpJsonRpcNotification): void {
     if (message.method !== 'session/update') return;
-    const params = message.params as { update?: Record<string, unknown> };
+    const params = message.params as { sessionId?: string; update?: Record<string, unknown> };
+    if (this.pinnedPromptSession && params.sessionId !== this.pinnedPromptSession) return;
     const update = params.update;
     if (!update) return;
     const type = update.sessionUpdate;
@@ -378,6 +384,10 @@ export class AcpClient implements AcpTransport {
   private handleServerRequest(message: AcpJsonRpcRequest): void {
     if (message.method !== 'session/request_permission') {
       this.sendErrorResponse(message.id, -32601, 'Method not found');
+      return;
+    }
+    if (this.pinnedPromptSession && (message.params as { sessionId?: string })?.sessionId !== this.pinnedPromptSession) {
+      this.sendResponse(message.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
     void this.handlePermissionRequest(message.id, message.params as {

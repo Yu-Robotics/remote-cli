@@ -20,29 +20,14 @@ describe('ScheduleToolScope', () => {
   ] as const)('never exposes an unexpected native action from list or its receipt: %j', async ({ backend, action }) => {
     const f = fixture(); let finish!: (value: []) => void;
     f.options.run.mockImplementation(() => new Promise<[]>(resolve => { finish = resolve; }));
-    const scope = f.operations.scope({ ...f.options, backend, nativeAction: () => action });
-    try {
-      await expect(scope.invoke('remote_cli_schedule_list', { requestId: 'read-only' })).rejects.toThrow('Read-only');
-      await expect(scope.invoke('remote_cli_schedule_operation', { requestId: 'read-only' })).rejects.toThrow('Read-only');
-      expect(scope.hasSideEffects).toBe(false);
-      expect(f.options.run).toHaveBeenCalledOnce();
-    } finally { finish([]); await scope.close(); }
-  });
-
-  it.each([
-    { backend: 'claude', action: { tool: 'CronList', input: {} } },
-    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'list' } } },
-  ] as const)('keeps $backend inventory actions correlated and read-only across receipt inspection', async ({ backend, action }) => {
-    const f = fixture(); let finish!: (value: []) => void;
-    f.options.run.mockImplementation(() => new Promise<[]>(resolve => { finish = resolve; }));
     const nativeAction = vi.fn(() => action);
     const scope = f.operations.scope({ ...f.options, backend, nativeAction });
     try {
       const first = await scope.invoke('remote_cli_schedule_list', { requestId: 'inventory' });
       const repeated = await scope.invoke('remote_cli_schedule_operation', { requestId: 'inventory' });
-      expect(first).toMatchObject({ status: 'pending', nativeAction: action });
+      expect(first).toEqual({ status: 'pending', requestId: 'inventory' });
       expect(repeated).toEqual(first);
-      expect(nativeAction.mock.calls[0]).toEqual(nativeAction.mock.calls[1]);
+      expect(nativeAction).not.toHaveBeenCalled();
       expect(scope.hasSideEffects).toBe(false);
       expect(f.options.run).toHaveBeenCalledOnce();
     } finally { finish([]); await scope.close(); }
@@ -113,15 +98,32 @@ describe('ScheduleToolScope', () => {
     expect(await f.scope.invoke('remote_cli_schedule_cleanup_delete', { requestId: 'unsupported', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] })).toMatchObject({ status: 'failed' });
   });
 
-  it('does not initialize scheduling for capabilities and returns current native capability separately', async () => {
+  it('reports host scheduling capabilities without initializing a provider', async () => {
     const f = fixture();
     expect(await f.scope.invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'claude', capability: { supported: true }, now: expect.any(String) });
     expect(f.options.run).not.toHaveBeenCalled();
     await expect(f.scope.invoke('remote_cli_schedule_capabilities', { backend: 'claude' })).rejects.toThrow('cannot be supplied');
     const other = f.operations.scope({ ...f.options, backend: 'codex' });
-    expect(await other.invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'codex', capability: { supported: false } });
+    expect(await other.invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'codex', capability: { supported: true } });
+    expect(f.options.run).not.toHaveBeenCalled();
   });
-  it('returns pending quickly and joins lost replies across a new scope without duplicating native creation', async () => {
+  it.each(['create', 'cancel'])('never exposes a native action for pending host %s, including later inspection', async kind => {
+    const f = fixture();
+    let finish!: () => void;
+    f.options.run.mockImplementation(() => new Promise(resolve => { finish = () => resolve([]); }));
+    const nativeAction = vi.fn(() => ({ tool: 'CronDelete', input: { id: 'native-sibling' } }));
+    const scope = f.operations.scope({ ...f.options, nativeAction });
+    try {
+      const input = kind === 'create' ? args : { requestId: args.requestId, scheduleId: 'host-task' };
+      const pending = await scope.invoke('remote_cli_schedule_' + kind, input);
+      expect(pending).toMatchObject({ status: 'pending' });
+      expect(pending).not.toHaveProperty('nativeAction');
+      expect(await scope.invoke('remote_cli_schedule_operation', { requestId: args.requestId })).toEqual(pending);
+      expect(nativeAction).not.toHaveBeenCalled();
+    } finally { finish(); await scope.close(); }
+  });
+
+  it('returns pending quickly and joins lost replies across a new scope without duplicating host creation', async () => {
     const f = fixture(); let finish!: () => void;
     f.options.run.mockImplementation(() => new Promise(resolve => { finish = () => resolve([]); }));
     const first: any = await f.scope.invoke('remote_cli_schedule_create', args);
@@ -203,7 +205,8 @@ describe('ScheduleToolScope', () => {
     expect(receipt.records[0].prompt).toHaveLength(240); expect(receipt.records[0].error).toHaveLength(240);
     for (const field of ['openId', 'threadId', 'generation', 'cwd', 'createdAt']) expect(receipt.records[0]).not.toHaveProperty(field);
     for (const options of [{ ...f.options, owner: { ...owner, openId: 'other' } },
-      { ...f.options, owner: { ...owner, generation: 'other' } }, { ...f.options, messageId: 'other' }]) {
+      { ...f.options, owner: { ...owner, generation: 'other' } }, { ...f.options, bindingEpoch: 'other-binding' },
+      { ...f.options, messageId: 'other' }]) {
       await expect(f.operations.scope(options).invoke('remote_cli_schedule_operation', { requestId: args.requestId })).rejects.toThrow('Unknown');
     }
     receipt.records[0].prompt = 'mutated';

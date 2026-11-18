@@ -365,6 +365,7 @@ export class WebSocketClient {
             ...(pendingOutputs && this.automaticFileEnrollment ? { pendingOutputFilesV1: true } : {}),
             taskRecovery: true,
             scheduleResultsV1: true,
+            hostSchedulesV1: true,
             scheduleCardsV1: true,
             scheduleToolCardsV1: true,
             approvalCards: true,

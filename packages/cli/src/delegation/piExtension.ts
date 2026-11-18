@@ -16,7 +16,7 @@ function errorMessage(value: unknown): string {
   if (value && typeof value === 'object' && 'error' in value && typeof value.error === 'string') {
     return value.error;
   }
-  return 'Delegation failed';
+  return 'Managed tool request failed';
 }
 
 /** Loaded explicitly by Pi; no project skill or global extension is installed. */

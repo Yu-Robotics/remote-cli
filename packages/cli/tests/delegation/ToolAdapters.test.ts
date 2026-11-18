@@ -138,5 +138,21 @@ describe('native delegation tool adapters', () => {
     expect(tools.map(tool => tool.name)).toEqual(SCHEDULE_TOOLS.map(tool => tool.name));
     const result = await tools[0].execute('capabilities', {});
     expect(JSON.parse(result.content[0].text)).toMatchObject({ name: 'remote_cli_schedule_capabilities' });
+    const run = vi.fn(async () => []);
+    const scope = new ScheduleToolOperations().scope({ owner: { threadId: 'original-thread', openId: 'owner', generation: 'current' },
+      messageId: 'foreground', backend: 'pi', current: () => true, run, present: async () => 'Delivered' });
+    retire = bridge.activate((name, args) => scope.invoke(name, args));
+    try {
+      const create = tools.find(tool => tool.name === 'remote_cli_schedule_create');
+      const cancel = tools.find(tool => tool.name === 'remote_cli_schedule_cancel');
+      const args = { requestId: 'daily-review', when: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' }, prompt: 'Review the open changes.' };
+      const created = await create.execute('tool-call', args);
+      expect(created.details).toMatchObject({ status: 'succeeded', scheduleId: expect.stringMatching(/^managed-/) });
+      expect(await create.execute('retried-call', args)).toEqual(created);
+      expect(run).toHaveBeenCalledOnce();
+      const cancelled = await cancel.execute('cancel-call', { requestId: 'cancel-review', scheduleId: created.details.scheduleId });
+      expect(cancelled.details).toMatchObject({ status: 'succeeded' });
+      expect(run.mock.calls).toHaveLength(2);
+    } finally { await scope.close(); }
   });
 });

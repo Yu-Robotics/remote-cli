@@ -53,13 +53,37 @@ describe('ScheduleDeliveryClient', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(['dsh', 'agy'] as const)('labels %s results with their captured backend and rejects unsupported metadata', async backend => {
-    delivery.schedule.backend = backend;
+  it('refuses a conflicting recipient under the same pending result ID', async () => {
+    const sent = client.deliver(delivery, 'Thread');
+    await expect(client.deliver({ ...delivery, schedule: { ...delivery.schedule, openId: 'other' } }, 'Thread')).rejects.toThrow(/route/);
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    ack(delivery.id); await sent;
+  });
+
+  it('checks authenticated ownership again before sending result bytes', async () => {
+    client.destroy();
+    let owner: string | undefined;
+    client = new ScheduleDeliveryClient(ws as unknown as WebSocketClient, record => record.openId === owner);
+    await expect(client.deliver(delivery, 'Thread')).rejects.toThrow(/owner/);
+    expect(ws.send).not.toHaveBeenCalled();
+    owner = delivery.schedule.openId;
+    ws.send.mockImplementation(() => { owner = 'replacement'; return true; });
+    await expect(client.deliver(delivery, 'Thread')).rejects.toThrow(/send failed/);
+    expect(ws.send.mock.calls.map(([frame]) => frame.type)).toEqual(['queue_started']);
+  });
+
+  it.each(['claude', 'dsh', 'agy', 'codex', 'kimi', 'opencode', 'pi', 'zcode'])('routes host %s results with the original epoch on both frames', async backend => {
+    Object.assign(delivery.schedule, { backend, engine: 'host', bindingEpoch: 'original-binding' });
     const pending = client.deliver(delivery, 'Original thread');
-    expect(ws.send.mock.calls.map(([frame]) => frame.queueStarted.backend)).toEqual([backend, backend]);
+    for (const [frame] of ws.send.mock.calls) {
+      expect(frame).toMatchObject({ openId: 'owner-1', threadId: 'original-thread', queueStarted: { backend, bindingEpoch: 'original-binding' } });
+    }
+    expect(ws.send).toHaveBeenCalledTimes(2);
     ack(delivery.id); await pending;
     ws.send.mockClear();
-    (delivery.schedule as { backend: string }).backend = 'codex';
+    delete delivery.schedule.bindingEpoch;
+    await expect(client.deliver(delivery, 'Original thread')).rejects.toThrow('routing metadata');
+    Object.assign(delivery.schedule, { backend: 'unknown', bindingEpoch: 'original-binding' });
     await expect(client.deliver(delivery, 'Original thread')).rejects.toThrow('routing metadata');
     expect(ws.send).not.toHaveBeenCalled();
   });

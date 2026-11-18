@@ -14,6 +14,7 @@ interface Job {
   adopt?: boolean;
   cron?: string;
   inventoryReceipt?: boolean;
+  inventoryEmpty?: boolean;
   reviewOnly?: true;
   reviewedInventory?: NativeCleanupDefinition[];
   expectedNativeId?: string;
@@ -67,12 +68,12 @@ export class ClaudeSessionSchedules {
   private seen = new Set<string>();
   private resultIds = new Set<string>();
   private foregroundId?: string;
-  private foregroundTurn?: Invocation & { expectedPrompt?: string; promptSubmitted?: boolean };
+  private foregroundTurn?: Invocation & { expectedPrompt?: string; promptSubmitted?: boolean; hostScheduleSessionId?: string };
   private foregroundStarted = false;
-  foregroundDispatched(id: string, management = false, prompt?: string): void {
+  foregroundDispatched(id: string, management = false, prompt?: string, hostScheduleSessionId?: string): void {
     this.endInvocation(this.foregroundTurn);
     if (this.batch) this.endInvocation(this.batch);
-    this.foregroundTurn = { expectedPrompt: this.resumedPrompts ? prompt : undefined };
+    this.foregroundTurn = { expectedPrompt: this.resumedPrompts ? prompt : undefined, hostScheduleSessionId };
     this.foregroundId = id; this.foregroundStarted = false; this.managementTurn = management;
     if (management && this.pending && !this.pending.scope?.inTurn) {
       this.pending.managementId = id;
@@ -220,7 +221,7 @@ export class ClaudeSessionSchedules {
   }
 
   /** Retained ownership authorizes deletion only, never restored wake admission. */
-  async cancelRetained(input: NativeScheduleInput, nativeId: string, current: () => boolean, timezone: string): Promise<void> {
+  async cancelRetained(input: NativeScheduleInput, nativeId: string, current: () => boolean, timezone: string): Promise<boolean> {
     if (this.closed || !this.capable || !this.scope || !current() || this.busy) {
       throw new Error('Native cancellation requires the current idle original session.');
     }
@@ -261,6 +262,7 @@ export class ClaudeSessionSchedules {
     if (!current()) throw new Error('Native cancellation owner changed.');
     if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) throw new Error('Native cancellation remains unconfirmed.');
     job.cancelled = true; job.retired = true;
+    return job.inventoryEmpty === true && !this.hasJobs && this.cleanupRetirementReady;
   }
 
   async create(input: NativeScheduleInput, emit: Job['emit'], current: () => boolean = () => true,
@@ -396,10 +398,14 @@ export class ClaudeSessionSchedules {
     }
     if (entry) job.nativeId = entry.id;
     job.inventoryReceipt = !!entry;
+    job.inventoryEmpty = entries.length === 0;
   }
   private request(job: Job, action: NativeScheduleAction, preserveOccurrences?: true): Promise<string> {
     if (this.closed || this.pending || job.retired) return Promise.reject(new Error('Native schedule operation is unavailable.'));
-    if (action.tool === 'CronList') job.inventoryReceipt = undefined;
+    if (action.tool === 'CronList') {
+      job.inventoryReceipt = undefined;
+      job.inventoryEmpty = undefined;
+    }
     const scope = this.scope;
     if (scope && (scope.ended || !scope.current())) return Promise.reject(new Error('Scheduling owner or native turn is no longer current.'));
     if (action.tool !== 'CronList') scope?.mutations.add(job.id);
@@ -595,7 +601,10 @@ export class ClaudeSessionSchedules {
   private hook(frame: Frame): void {
     const input = frame.request.input;
     let response: Frame = {};
-    if (input?.hook_event_name === 'PreToolUse') {
+    if (input?.hook_event_name === 'UserPromptSubmit' && this.foregroundTurn?.hostScheduleSessionId
+      && input.session_id !== this.foregroundTurn.hostScheduleSessionId) {
+      response = { decision: 'block', reason: 'The scheduled Claude conversation could not be verified.' };
+    } else if (input?.hook_event_name === 'PreToolUse') {
       const discovery = input.tool_name === 'ToolSearch' && this.pending
         && input.tool_input?.query === `select:${this.pending.action.tool}`
         && Object.keys(input.tool_input).every(key => key === 'query' || key === 'max_results')

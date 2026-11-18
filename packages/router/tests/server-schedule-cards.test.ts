@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RouterServer } from '../src/server';
 import type { ConfigManager } from '../src/config/ConfigManager';
-import type { JsonStore } from '../src/storage/JsonStore';
+import { JsonStore } from '../src/storage/JsonStore';
+import { BindingManager } from '../src/binding/BindingManager';
 import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 
 vi.mock('ws');
@@ -194,6 +195,64 @@ describe('Schedule card protocol integration', () => {
     expect(JSON.stringify(feishu.updateScheduleCard.mock.calls.at(-1)[1])).toContain('Status refreshed');
     const route = await (server as any).resolveCardThread('card', 'owner');
     expect(route?.threadId).toBe('original-thread');
+  });
+
+  it('negotiates the persisted device epoch on first binding and reconnect, and retires cards after same-user rebind', async () => {
+    const store = new JsonStore(path.join(directory, 'bindings.json'), 0);
+    await store.initialize();
+    const bindings = new BindingManager(store);
+    bindingLookup.mockImplementation((id: string) => bindings.getDeviceBinding(id));
+    vi.spyOn((server as any).bindingManager, 'getCardThreadEpoch').mockImplementation(
+      (owner: string, device: string) => bindings.getCardThreadEpoch(owner, device));
+    const offered = { ...toolCapabilities, hostSchedulesV1: true };
+    const unbound = connect(); await register(unbound, offered);
+    expect(replies(unbound).at(-1).data).not.toHaveProperty('scheduleBinding');
+    expect(replies(unbound).at(-1).data.capabilities).not.toHaveProperty('scheduleResultsV1');
+    await bindings.bindUser('owner', 'device-1', 'Fixture');
+    feishu.onDeviceBound('device-1');
+    expect(unbound.close).toHaveBeenCalledOnce();
+    const epoch = bindings.getCardThreadEpoch('owner', 'device-1');
+    const original = connect(); await register(original, offered);
+    const receipt = { deviceId: 'device-1', openId: 'owner', epoch };
+    expect(replies(original).at(-1).data.scheduleBinding).toEqual(receipt);
+    const reconnected = connect(); await register(reconnected, offered);
+    expect(replies(reconnected).at(-1).data.scheduleBinding).toEqual(receipt);
+    const refresh = buttons(await present(reconnected))[0].behaviors[0].value;
+    await bindings.unbindDevice('owner', 'device-1');
+    await bindings.bindUser('owner', 'device-1', 'Fixture');
+    await expect(feishu.scheduleCards.click('owner', 'card', refresh)).rejects.toThrow('expired');
+    expect(replies(reconnected).some(frame => frame.type === 'schedule_action')).toBe(false);
+    const rebound = connect(); await register(rebound, offered);
+    const nextEpoch = bindings.getCardThreadEpoch('owner', 'device-1');
+    expect(nextEpoch).not.toBe(epoch);
+    expect(replies(rebound).at(-1).data.scheduleBinding).toEqual({ ...receipt, epoch: nextEpoch });
+    await store.flush();
+  });
+
+  it.each([false, true])('gates expanded foreground and tool menus on the negotiated capability (%s)', async expanded => {
+    const socket = connect();
+    await register(socket, { ...toolCapabilities, hostSchedulesV1: expanded });
+    const value = menu(); value.entries[0].backend = 'kimi';
+    const elements = await present(socket, value);
+    expect(buttons(elements).length > 0).toBe(expanded);
+    await feishu.setOnStartStreaming.mock.calls[0][0]('foreground', 'owner', 'answer-card', 'device-1', 'original-thread');
+    feishu.createOutputCard.mockResolvedValue('management-card');
+    await receive(socket, toolCard({ menu: value }));
+    expect(replies(socket).at(-1)).toMatchObject({ type: 'schedule_tool_card_ack', success: expanded });
+    expect(feishu.createOutputCard).toHaveBeenCalledTimes(expanded ? 1 : 0);
+  });
+
+  it('expires actions and cached tool receipts after the original user rebinds the device', async () => {
+    const socket = connect(); await prepareForeground(socket);
+    const message = toolCard(); await receive(socket, message);
+    const elements = JSON.parse(feishu.createOutputCard.mock.calls[0][1]).body.elements;
+    const refresh = buttons(elements)[0].behaviors[0].value;
+    vi.spyOn((server as any).bindingManager, 'getCardThreadEpoch').mockReturnValue('replacement-epoch');
+    await expect(feishu.scheduleCards.click('owner', 'management-card', refresh)).rejects.toThrow('expired');
+    await receive(socket, message);
+    expect(replies(socket).at(-1)).toMatchObject({ type: 'schedule_tool_card_ack', success: false });
+    expect(feishu.createOutputCard).toHaveBeenCalledOnce();
+    expect(replies(socket).some(reply => reply.type === 'schedule_action')).toBe(false);
   });
 
   it('rejects cross-owner/card callbacks and discards controls from a replaced connection', async () => {

@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { captureHistoryTarget, piHistoryHeaders, historyIdentity, verifyHistoryDirectory, type HistoryEntry } from '../delegation/NativeHistoryFiles';
 import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import { DirectoryGuard } from '../security/DirectoryGuard';
+import { readBoundedHead } from '../session/SessionCatalog';
 import type { Attachment } from '../types';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import type {
@@ -49,6 +50,7 @@ export interface PiExecutorOptions {
 
 interface ActiveTurn {
   options: ExecuteOptions;
+  request: PiTransport['request'];
   resolve: (result: ExecuteResult) => void;
   output: string[];
   error?: string;
@@ -315,27 +317,44 @@ export class PiExecutor implements IExecutor {
     }
 
     const trimmed = prompt.trim();
-    if (trimmed === '/skills' || trimmed === '/skill') {
+    const pinned = options.hostScheduleSessionId;
+    const listSkills = trimmed === '/skills' || trimmed === '/skill';
+    if (listSkills && pinned === undefined) {
       return this.listSkills();
     }
+    let request = this.client.request.bind(this.client);
     const preparation = { cancelled: false };
     this.preparingTurn = preparation;
     try {
       // Each native Pi process caches a branch. Reload adopted history before
       // every remote turn; the user must keep other writers idle.
+      if (pinned !== undefined) this.checkHostScheduleSession(pinned);
       if (this.adopted) await this.recycleClient();
       if (preparation.cancelled || this.destroyed) return { success: false, error: 'Pi command cancelled before startup' };
-      const sessionId = await this.ensureClient();
-      prompt = options.resolvePrompt?.(sessionId) ?? prompt;
+      if (pinned === undefined) {
+        const sessionId = await this.ensureClient();
+        prompt = options.resolvePrompt?.(sessionId) ?? prompt;
+      } else {
+        request = await this.prepareScheduledProcess(pinned);
+      }
       if (preparation.cancelled || this.destroyed) {
         await this.recycleClient();
         return { success: false, error: 'Pi command cancelled before dispatch' };
       }
+      if (pinned !== undefined && listSkills) {
+        this.checkHostScheduleSession(pinned);
+        options.resolvePrompt?.(pinned);
+        return await this.listSkills(request);
+      }
       if (trimmed.startsWith('/')) {
-        const validationError = await this.validateSlashCommand(trimmed);
+        const validationError = await this.validateSlashCommand(trimmed, pinned === undefined ? undefined : request);
         if (validationError) return { success: false, error: validationError };
       }
       if (preparation.cancelled || this.destroyed) return { success: false, error: 'Pi command cancelled before dispatch' };
+      if (pinned !== undefined) {
+        prompt = options.resolvePrompt?.(pinned) ?? prompt;
+        this.checkHostScheduleSession(pinned);
+      }
     } catch (error) {
       return { success: false, error: this.friendlyError(error) };
     } finally {
@@ -345,6 +364,7 @@ export class PiExecutor implements IExecutor {
     return new Promise<ExecuteResult>((resolve) => {
       const active: ActiveTurn = {
         options,
+        request,
         resolve,
         output: [],
         sawAgentStart: false,
@@ -361,7 +381,7 @@ export class PiExecutor implements IExecutor {
       });
 
       const images = this.toImages(options.attachments);
-      void this.client.request({
+      void request({
         type: 'prompt',
         message: prompt,
         ...(images.length > 0 ? { images } : {}),
@@ -377,10 +397,10 @@ export class PiExecutor implements IExecutor {
         ]);
         if (this.activeTurn !== active) return;
         if (outcome === 'grace' && !active.sawAgentStart && !active.error) {
-          const streaming = await this.isSessionStreaming();
+          const streaming = await this.isSessionStreaming(request);
           if (this.activeTurn !== active) return;
           if (!streaming && !active.sawAgentStart) {
-            const text = active.output.join('') || await this.lastAssistantText();
+            const text = active.output.join('') || await this.lastAssistantText(request);
             this.completeActive({ success: true, output: text, sessionAbbr: this.sessionAbbr() });
             return;
           }
@@ -389,7 +409,7 @@ export class PiExecutor implements IExecutor {
         if (this.activeTurn !== active) return;
         let output = active.output.join('');
         if (!output && !active.error) {
-          output = await this.lastAssistantText();
+          output = await this.lastAssistantText(request);
         }
         if (!output && !active.error) {
           active.error = active.lastRetryError || 'Pi completed the turn without a text response';
@@ -498,10 +518,11 @@ export class PiExecutor implements IExecutor {
     // Pi settles its own aborted turn before answering the abort RPC, so claim
     // remote-cli's reason first.
     if (active) active.programError = 'Aborted';
+    const request = active?.request ?? this.client.request.bind(this.client);
     let cleanupError: unknown;
     const cleanup = (async () => {
       try {
-        await this.client.request({ type: 'clear_queue' });
+        await request({ type: 'clear_queue' });
       } catch {
         // Queue may already be empty.
       }
@@ -509,7 +530,7 @@ export class PiExecutor implements IExecutor {
       // the queue request is pending); its abort belongs to that turn.
       if (this.activeTurn !== active) return;
       try {
-        await this.client.request({ type: 'abort' });
+        await request({ type: 'abort' });
       } catch (error) {
         // Only a turn that still owns the session may recycle its transport; a
         // late failure must not stop the client of a turn starting or started
@@ -792,6 +813,50 @@ export class PiExecutor implements IExecutor {
     return this.sessionId;
   }
 
+  checkHostScheduleSession(id: string): void {
+    if (!id || id !== this.sessionId || !this.isForegroundSession() || this.destroyed
+      || this.nativeSessionMutation || this.preparingTurn?.cancelled || !this.sessionFile || !path.isAbsolute(this.sessionFile)) {
+      throw new Error('The original Pi scheduled conversation is unavailable.');
+    }
+    try {
+      const pointer: SessionPointer = JSON.parse(readBoundedHead(this.sessionFilePath) ?? '');
+      const header = JSON.parse(readBoundedHead(this.sessionFile)?.split('\n', 1)[0] ?? '');
+      if (pointer.id === id && pointer.sessionFile === this.sessionFile && (pointer.adopted === true) === this.adopted
+        && (pointer.cwd === undefined || pointer.cwd === this.currentWorkingDirectory)
+        && header.type === 'session' && header.id === id && typeof header.cwd === 'string' && path.isAbsolute(header.cwd)
+        && sameFilePath(header.cwd, this.currentWorkingDirectory)) return;
+    } catch { /* Unreadable or incomplete history cannot establish the selected session. */ }
+    throw new Error('The saved Pi session pointer or original history changed.');
+  }
+
+  private async prepareScheduledProcess(id: string): Promise<PiTransport['request']> {
+    const client = this.client;
+    const check = () => {
+      this.checkHostScheduleSession(id);
+      if (client !== this.client) throw new Error('The scheduled Pi transport changed.');
+    };
+    await Promise.all([...this.retiredClients].map(retired => this.stopRetiredClient(retired)));
+    check();
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
+    if (!client.bindRunningProcess) throw new Error('The Pi transport cannot verify scheduled prompts.');
+    if (!client.isRunning()) {
+      // Never pass --session-id here: Pi can create empty history under a missing ID.
+      client.updateLaunch?.({ ...this.buildLaunch(), sessionFile: this.sessionFile!, sessionId: undefined, sessionName: undefined });
+      await client.start(check);
+    }
+    try {
+      check();
+      const request = client.bindRunningProcess();
+      const mismatch = await this.checkAdoptedIdentity({ sessionId: id, sessionFile: this.sessionFile! }, request);
+      if (mismatch) throw new Error(mismatch);
+      check();
+      return request;
+    } catch (error) {
+      if (this.client === client) await client.stop();
+      throw error;
+    }
+  }
+
   getExecutionMetadata() {
     const data = configuredExecutionMetadata(this.model, this.effort);
     if (this.client.isRunning() && this.reportedModel) {
@@ -852,10 +917,10 @@ export class PiExecutor implements IExecutor {
     }
   }
 
-  private async listSkills(): Promise<ExecuteResult> {
+  private async listSkills(request?: PiTransport['request']): Promise<ExecuteResult> {
     try {
-      await this.ensureClient();
-      const response = await this.client.request({ type: 'get_commands' });
+      if (!request) await this.ensureClient();
+      const response = await (request ?? this.client.request.bind(this.client))({ type: 'get_commands' });
       if (!response.success) {
         return { success: false, error: response.error || 'Failed to list Pi commands' };
       }
@@ -871,10 +936,10 @@ export class PiExecutor implements IExecutor {
     }
   }
 
-  private async validateSlashCommand(prompt: string): Promise<string | undefined> {
+  private async validateSlashCommand(prompt: string, request?: PiTransport['request']): Promise<string | undefined> {
     try {
-      await this.ensureClient();
-      const response = await this.client.request({ type: 'get_commands' });
+      if (!request) await this.ensureClient();
+      const response = await (request ?? this.client.request.bind(this.client))({ type: 'get_commands' });
       if (!response.success) return response.error || 'Failed to query Pi commands';
       const commandName = prompt.slice(1).split(/\s+/, 1)[0];
       const commands = Array.isArray(response.data?.commands) ? response.data.commands : [];
@@ -1021,8 +1086,8 @@ export class PiExecutor implements IExecutor {
   }
 
   /** Returns an error description when Pi did not load exactly the expected session. */
-  private async checkAdoptedIdentity(expected: NativeSessionTarget): Promise<string | undefined> {
-    const response = await this.client.request({ type: 'get_state' });
+  private async checkAdoptedIdentity(expected: NativeSessionTarget, request = this.client.request.bind(this.client)): Promise<string | undefined> {
+    const response = await request({ type: 'get_state' });
     const data = response.success ? response.data : undefined;
     if (!data) return 'Pi did not report its session state.';
     if (data.sessionId !== expected.sessionId || typeof data.sessionFile !== 'string'
@@ -1329,18 +1394,18 @@ export class PiExecutor implements IExecutor {
     return parsed.modelId ? parsed : null;
   }
 
-  private async isSessionStreaming(): Promise<boolean> {
+  private async isSessionStreaming(request: PiTransport['request']): Promise<boolean> {
     try {
-      const response = await this.client.request({ type: 'get_state' });
+      const response = await request({ type: 'get_state' });
       return Boolean(response.data?.isStreaming);
     } catch {
       return false;
     }
   }
 
-  private async lastAssistantText(): Promise<string> {
+  private async lastAssistantText(request: PiTransport['request']): Promise<string> {
     try {
-      const response = await this.client.request({ type: 'get_last_assistant_text' });
+      const response = await request({ type: 'get_last_assistant_text' });
       return typeof response.data?.text === 'string' ? response.data.text : '';
     } catch {
       return '';
@@ -1541,7 +1606,7 @@ export class PiExecutor implements IExecutor {
     this.clearTurnTimers(active);
     let cleanupError: unknown;
     try {
-      await this.client.request({ type: 'abort' });
+      await active.request({ type: 'abort' });
     } catch {
       // Only the turn that still owns the session may recycle its transport; a
       // late failure from a settled turn must not stop the next turn's client.

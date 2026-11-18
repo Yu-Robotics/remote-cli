@@ -4,6 +4,8 @@ import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationIn
 import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
+  /** Pin a host-timed foreground turn to the session captured at creation. */
+  hostScheduleSessionId?: string;
   /** Resolve task text after native session restoration, immediately before dispatch.
    * Null means conversation identity is not yet known; callers must include full context. */
   resolvePrompt?: (sessionId: string | null) => string;
@@ -148,6 +150,8 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
+  /** Validate the original session without allocating one. May run inside its creating turn. */
+  checkHostScheduleSession?(sessionId: string): void;
   /** Exact retained cancellation only; never restores execution or starts a host. */
   nativeScheduleCleanup?: import('../scheduling/types').NativeScheduleCleanup;
   /** Native timing in the existing foreground conversation; never fork its history. */

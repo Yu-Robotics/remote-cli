@@ -5,14 +5,17 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { validateScheduleId, validateSchedulePrompt, validateScheduleRule } from './ScheduleCommand';
-import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
+import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider, ScheduleInput,
   ScheduleDelivery, ScheduleOwner, ScheduleRecord, ScheduleRule } from './types';
 import { NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from './types';
-import { assertNativeScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
+import { assertHostScheduleBackend, assertNativeScheduleBackend, isHostScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
+import { nextHostDue } from './host/HostScheduleRule';
 
 export const SCHEDULE_CATALOG_FILE = 'schedule-catalog.json';
+export const HOST_SCHEDULE_CATALOG_FILE = 'host-schedule-catalog.json';
 const OUTPUT_BYTES = 16 * 1024;
 const ERROR_BYTES = 4096;
+const HOST_BUSY_RETRY_MS = 1000;
 const LIVE = new Set<ScheduleRecord['state']>(['creating', 'active', 'running']);
 const STATES = new Set<ScheduleRecord['state']>([...LIVE, 'completed', 'cancelled', 'interrupted', 'failed']);
 const RESTART_REASON = 'Native schedule interrupted by service restart; not recreated or resumed.';
@@ -49,12 +52,18 @@ export interface SchedulePurgeResult {
 type PurgeOutcome = { status: 'removed' | 'alreadyRemoved'; forgottenCleanup?: true }
   | { status: 'pending'; reason: SchedulePurgeReason; detail: string };
 
+type HostResult = { success: boolean; output?: string; error?: string };
+
 export interface ScheduleServiceOptions {
   directory: string;
   provider: NativeScheduleProvider;
+  /** Reserve the original thread, then await admit() immediately before starting its turn. */
+  hostDispatch?(record: Readonly<ScheduleRecord>, occurrenceId: string, admit: () => Promise<boolean>):
+    Promise<HostResult | undefined>;
   /** Reject when disconnected or not delivered. Success is not an exactly-once receipt. */
   deliver: (delivery: ScheduleDelivery) => Promise<void>;
-  isOwnerCurrent: (owner: ScheduleOwner) => boolean;
+  /** For a host owner, false means a verified mismatch. Undefined defers until binding is known. */
+  isOwnerCurrent: (owner: ScheduleOwner) => boolean | undefined;
   /** Framework observation of late native mutations, never model-supplied proof. */
   isNativeMutationPending?: (owner: ScheduleOwner) => boolean;
   now?: () => number;
@@ -117,23 +126,27 @@ function text(value: unknown, max = 256): asserts value is string {
 }
 
 function ownerOf(record: ScheduleOwner): ScheduleOwner {
-  return { threadId: record.threadId, openId: record.openId, generation: record.generation };
+  return { threadId: record.threadId, openId: record.openId, generation: record.generation,
+    ...(record.bindingEpoch !== undefined && { bindingEpoch: record.bindingEpoch }) };
 }
 
 function validateOwner(owner: ScheduleOwner): void {
   if (!owner || typeof owner !== 'object') throw new Error('Invalid schedule owner.');
   text(owner.threadId); text(owner.openId); text(owner.generation);
+  if (owner.bindingEpoch !== undefined) text(owner.bindingEpoch);
 }
 
-function sameOwner(left: ScheduleOwner, right: ScheduleOwner): boolean {
-  return left.threadId === right.threadId && left.openId === right.openId && left.generation === right.generation;
+function sameOwner(left: ScheduleOwner & { engine?: 'host' }, right: ScheduleOwner): boolean {
+  return left.threadId === right.threadId && left.openId === right.openId && left.generation === right.generation
+    && (left.bindingEpoch === undefined ? left.engine !== 'host' : left.bindingEpoch === right.bindingEpoch);
 }
 
 /** Deletion-only obligations and receipts remain manageable by the same user in
  * the same thread after reset. Original provenance stays immutable; live records
  * and all execution admission continue to require exact generation ownership. */
 function sameCleanupOwner(left: ScheduleOwner, right: ScheduleOwner): boolean {
-  return left.threadId === right.threadId && left.openId === right.openId;
+  return left.threadId === right.threadId && left.openId === right.openId
+    && (left.bindingEpoch === undefined || sameOwner(left, right));
 }
 
 /** Unknown native mutation/queued reminders remain cleanup obligations after host loss. */
@@ -148,7 +161,7 @@ function deliveryId(scheduleId: string, occurrenceId: string): string {
 }
 
 /**
- * Single service instance per directory. Native processes, never this service, own timing.
+ * Single timing and catalog owner per directory.
  * Delivery is fenced immediately before invoking the callback; an external send already
  * in flight cannot be revoked. A crash between sending and persisting acknowledgement
  * can replay an outbox entry after explicit reconnect. Consumers receive a stable ID.
@@ -182,7 +195,19 @@ export class ScheduleService {
   private pendingCreates = 0;
   private fault?: Error;
   private catalogPath = '';
+  private hostCatalogPath = '';
+  private readonly hostCatalogIds = new Set<string>();
+  private readonly hostPurgeRequests = new Set<string>();
+  private readonly catalogDigests = new Map<string, string>();
+  private readonly unavailableLegacyIds = new Set<string>();
+  private legacyUnavailable = false;
+  get legacyCatalogUnavailable(): boolean { return this.legacyUnavailable; }
   private catalogGate?: KernelGate;
+  private hostTimer?: NodeJS.Timeout;
+  private hostTimerAt?: number;
+  private hostStartup = 0;
+  private readonly hostAttempts = new Set<string>();
+  private readonly hostRetryAt = new Map<string, number>();
 
   constructor(options: ScheduleServiceOptions) {
     this.options = { ...options };
@@ -204,15 +229,35 @@ export class ScheduleService {
       await fs.mkdir(this.options.directory, { recursive: true, mode: 0o700 });
       const directory = await fs.realpath(this.options.directory);
       this.catalogPath = path.join(directory, SCHEDULE_CATALOG_FILE);
+      this.hostCatalogPath = path.join(directory, HOST_SCHEDULE_CATALOG_FILE);
       this.catalogGate = kernelGate(`${this.catalogPath}.lock`);
       if (!this.catalogGate) throw new Error('Another client owns the schedule catalog.');
-      const data = await this.readCatalog();
-      if (data !== undefined) this.load(data);
+      const data = await this.readCatalog(this.catalogPath);
+      if (data !== undefined) {
+        try { this.load(data); }
+        catch (error) {
+          // Published pre-host formats can carry retired provider checkpoints.
+          // Preserve their bytes and replay fences without interpreting them as host work.
+          const legacy = data as { version?: number; records?: { id?: string }[]; purged?: { id?: string }[] };
+          if (!this.options.hostDispatch || ![1, 2, 3, 4, 5, 6].includes(legacy?.version ?? 0)
+            || !Array.isArray(legacy.records) || legacy.purged !== undefined && !Array.isArray(legacy.purged)
+            || legacy.records.some(row => row && ['engine', 'sessionId', 'bindingEpoch', 'nextDueAt', 'inFlightDueAt'].some(key => Object.hasOwn(row, key)))) throw error;
+          this.legacyUnavailable = true;
+          for (const row of [...legacy.records, ...(legacy.purged ?? [])]) {
+            if (typeof row?.id === 'string') this.unavailableLegacyIds.add(row.id);
+          }
+          console.warn('[Schedules] The legacy native catalog is incompatible and has been preserved. Only host schedules are available.');
+        }
+      }
+      const hostData = await this.readCatalog(this.hostCatalogPath);
+      if (hostData !== undefined) this.load(hostData, true);
       // Inspect the loaded outbox before ordinary startup pruning. Missing
       // delivery ownership must not turn a refused row into an absence claim.
       for (const record of [...this.records.values()]) await this.compactRefusedCreation(record);
       let changed = false;
+      this.hostStartup = this.now();
       for (const record of this.records.values()) {
+        if (record.engine === 'host') continue;
         if (record.recovery && record.recovery.status !== 'blocked') {
           record.recovery.status = 'blocked'; changed = true;
         }
@@ -222,10 +267,19 @@ export class ScheduleService {
       }
       for (const [id, delivery] of this.pending) {
         const record = this.records.get(delivery.scheduleId)!;
-        if (record.state === 'cancelled' && !delivery.afterCancellation || !this.current(record)) { this.pending.delete(id); changed = true; }
+        if (record.state === 'cancelled' && !delivery.afterCancellation || record.engine !== 'host' && !this.current(record)) {
+          this.pending.delete(id); changed = true;
+        }
+      }
+      if (this.retireStaleHosts()) changed = true;
+      const recoveryDeliveries: string[] = [];
+      for (const record of this.records.values()) {
+        if (record.engine === 'host' && this.reconcileHost(record, this.hostStartup, recoveryDeliveries)) changed = true;
       }
       if (changed || data === undefined || (data as { version?: number }).version !== 6) await this.persist();
       this.initialized = true;
+      this.armHostTimer();
+      if (recoveryDeliveries.length) this.track(this.attemptDeliveries(recoveryDeliveries));
     }).catch(error => { this.catalogGate?.close(); this.catalogGate = undefined; throw error; });
   }
 
@@ -239,7 +293,7 @@ export class ScheduleService {
     text(value.provider); text(value.identity, 8192);
   }
 
-  create(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
+  create(owner: ScheduleOwner, input: ScheduleInput): Promise<ScheduleRecord> {
     this.pendingCreates++;
     const creation = this.recordOperation(input.id, this.createSchedule(owner, input).finally(async () => {
       this.pendingCreates--;
@@ -261,48 +315,86 @@ export class ScheduleService {
     }));
   }
 
-  private async createSchedule(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
+  private async createSchedule(owner: ScheduleOwner, input: ScheduleInput): Promise<ScheduleRecord> {
     this.checkReady();
     const backend = input.backend === undefined ? 'claude' : input.backend;
     // The service accepts installed providers independently of the foreground
     // executor availability policy. MessageHandler keeps that admission gate.
-    if (!isNativeScheduleBackend(backend)) assertNativeScheduleBackend(backend);
+    if (input.engine === 'host') assertHostScheduleBackend(backend);
+    else {
+      assertNativeScheduleBackend(backend);
+      if (this.legacyUnavailable) throw new Error('Legacy native catalog is unavailable.');
+    }
     const createdAt = this.now();
     if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new Error('Invalid schedule clock.');
     validateOwner(owner);
     validateScheduleId(input.id);
     validateSchedulePrompt(input.prompt);
     validateScheduleRule(input.rule, createdAt);
+    if (input.engine !== undefined && input.engine !== 'host') throw new Error('Unknown schedule engine.');
+    if (input.engine === 'host' || input.sessionId !== undefined) {
+      if (input.engine !== 'host') throw new Error('Session binding requires host scheduling.');
+      text(input.sessionId);
+    }
+    const host = input.engine === 'host';
+    if (host) {
+      text(input.bindingEpoch);
+      if (owner.bindingEpoch !== undefined && owner.bindingEpoch !== input.bindingEpoch) throw new Error('Host schedule binding epoch changed.');
+    } else if (input.bindingEpoch !== undefined) throw new Error('Unexpected native schedule binding epoch.');
+    if (host && !this.options.hostDispatch) throw new Error('Host schedule dispatch is unavailable.');
+    const nextDueAt = host ? this.hostDue(input.rule, createdAt) : undefined;
     text(input.cwd, 4096);
     if (!path.isAbsolute(input.cwd)) throw new Error('Schedule working directory must be absolute.');
-    const originalOwner = ownerOf(owner);
-    const nativeInput = { ...structuredClone(input), backend, threadId: owner.threadId };
+    const originalOwner = ownerOf({ ...owner, bindingEpoch: host ? input.bindingEpoch : undefined });
+    const definition = { ...structuredClone(input), backend, threadId: owner.threadId };
+    const nativeInput: NativeScheduleInput | undefined = !host && isNativeScheduleBackend(backend)
+      ? { ...definition, backend } : undefined;
     // Never trust a caller-supplied provider checkpoint.
-    delete nativeInput.recovery;
+    if (nativeInput) delete nativeInput.recovery;
     for (const value of [input.command, input.model, input.effort]) if (value !== undefined) text(value, 4096);
-    const cleanup = this.options.provider.cleanupFor?.(nativeInput);
-    if (cleanup) {
+    const cleanup = nativeInput && this.options.provider.cleanupFor?.(nativeInput);
+    if (cleanup && nativeInput) {
       nativeInput.recovery = { version: 1, provider: cleanup.provider, strategy: cleanup.strategy,
         identity: cleanup.describe(structuredClone(nativeInput), originalOwner) };
       this.validateOwnershipMetadata(nativeInput.recovery);
     }
-    const runtime = this.newRuntime();
+    const runtime = host ? undefined : this.newRuntime();
     await this.serial(async () => {
       this.checkReady();
       if (!this.current(originalOwner)) throw new Error('Schedule owner is no longer current.');
-      if (this.records.has(nativeInput.id) || this.purged.has(nativeInput.id)) throw new Error('Schedule ID already exists or was purged.');
-      if (this.records.size >= this.maxRecords) throw new Error('Schedule catalog is full; history was not pruned.');
-      const liveCount = [...this.records.values()].filter(record => LIVE.has(record.state)
-        || this.hasRetainedCleanupRoute(record)
-        || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)).length;
-      if (liveCount >= this.maxLive) throw new Error('Live native schedule limit reached.');
-      this.records.set(nativeInput.id, { ...originalOwner, id: nativeInput.id, backend,
-        cwd: nativeInput.cwd, prompt: nativeInput.prompt, rule: structuredClone(nativeInput.rule),
-        createdAt, state: 'creating', execution: { command: input.command, model: input.model, effort: input.effort },
-        ...(nativeInput.recovery && { recovery: { ...nativeInput.recovery, status: 'blocked' } }) });
+      if (this.records.has(definition.id) || this.purged.has(definition.id) || this.unavailableLegacyIds.has(definition.id)) {
+        throw new Error('Schedule ID already exists or was purged.');
+      }
+      if (host && this.retireStaleHosts()) {
+        await this.persist();
+        if (!this.current(originalOwner)) throw new Error('Schedule owner changed during creation.');
+      }
+      const records = [...this.records.values()];
+      let stale: ScheduleRecord | undefined;
+      if (records.filter(record => this.hostCatalogIds.has(record.id) === host).length >= this.maxRecords) {
+        if (host) stale = records.find(record => this.hostCatalogIds.has(record.id) && record.state === 'interrupted'
+          && this.hostOwnerStatus(record) === false && !this.hostAttempts.has(record.id) && !this.delivering.has(record.id)
+          && !this.recordOperations.has(record.id) && !this.purges.has(record.id));
+        if (!stale || this.purgeFencesFull(stale.id)) throw new Error('Schedule catalog is full; history was not pruned.');
+      }
+      const liveCount = records.filter(record => (record.engine === 'host') === host && (LIVE.has(record.state)
+        || record.inFlightDueAt !== undefined || this.hasRetainedCleanupRoute(record)
+        || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped))).length;
+      if (liveCount >= this.maxLive) throw new Error(host ? 'Live host schedule limit reached.' : 'Live native schedule limit reached.');
+      if (stale) {
+        this.purged.set(stale.id, ownerOf(stale));
+        this.records.delete(stale.id);
+      }
+      if (host) this.hostCatalogIds.add(definition.id);
+      this.records.set(definition.id, { ...originalOwner, id: definition.id, backend,
+        cwd: definition.cwd, prompt: definition.prompt, rule: structuredClone(definition.rule),
+        createdAt, state: host ? 'active' : 'creating', execution: { command: definition.command, model: definition.model, effort: definition.effort },
+        ...(host && { engine: 'host', sessionId: definition.sessionId, nextDueAt }),
+        ...(nativeInput?.recovery && { recovery: { ...nativeInput.recovery, status: 'blocked' } }) });
       await this.persist();
-      this.runtimes.set(nativeInput.id, runtime);
+      if (runtime) this.runtimes.set(definition.id, runtime);
     });
+    if (!runtime || !nativeInput) return structuredClone(this.records.get(definition.id)!);
     try {
       const handle = await this.options.provider.create(structuredClone(nativeInput), event => {
         if (this.runtimes.get(nativeInput.id) !== runtime) {
@@ -359,6 +451,211 @@ export class ScheduleService {
     }
   }
 
+  private hostDue(rule: ScheduleRule, after: number): number {
+    const due = nextHostDue(rule, after);
+    if (due === undefined || !Number.isSafeInteger(due) || due <= after) throw new Error('Schedule has no future occurrence.');
+    return due;
+  }
+
+  private advanceHost(record: ScheduleRecord, after: number): void {
+    try {
+      record.nextDueAt = this.hostDue(record.rule, after);
+      record.state = 'active';
+    } catch (error) {
+      delete record.nextDueAt;
+      record.state = 'failed';
+      record.error = errorText(error);
+    }
+  }
+
+  /** All calls hold the catalog queue and have a reserved outbox slot. */
+  private finishHost(record: ScheduleRecord, due: number, result: HostResult): string {
+    const occurrenceId = `host-${due}`;
+    const id = deliveryId(record.id, occurrenceId);
+    delete record.inFlightDueAt;
+    delete record.nextDueAt;
+    // Host slots advance monotonically. The persisted next/in-flight slot
+    // fences replay even after an old diagnostic receipt leaves this window.
+    record.completedOccurrences = [...(record.completedOccurrences ?? []), occurrenceId].slice(-this.maxOccurrences);
+    this.pending.set(id, { id, scheduleId: record.id, occurrenceId, success: result.success,
+      ...(record.cancelRequested && { afterCancellation: true }),
+      ...(result.output !== undefined && { output: bounded(result.output, OUTPUT_BYTES) }),
+      ...(result.error !== undefined && { error: bounded(result.error, ERROR_BYTES) }) });
+    if (record.cancelRequested) record.state = 'cancelled';
+    else if (!result.success) {
+      record.state = 'failed';
+      record.error = bounded(result.error ?? 'Host schedule execution failed.', ERROR_BYTES);
+    } else if (record.rule.kind === 'once') record.state = 'completed';
+    else this.advanceHost(record, Math.max(due, this.now()));
+    return id;
+  }
+
+  private cancelHost(record: ScheduleRecord): void {
+    record.cancelRequested = true;
+    if (LIVE.has(record.state)) record.state = 'cancelled';
+    delete record.nextDueAt;
+    this.hostRetryAt.delete(record.id);
+    for (const delivery of this.pending.values()) if (delivery.scheduleId === record.id) delivery.afterCancellation = true;
+  }
+
+  private hostOwnerStatus(record: ScheduleRecord): boolean | undefined {
+    return record.bindingEpoch === undefined ? false : this.ownerStatus(record);
+  }
+
+  private retireHost(record: ScheduleRecord): boolean {
+    const reason = 'Host schedule owner is no longer current.';
+    const changed = record.state !== 'interrupted' || record.error !== reason;
+    record.state = 'interrupted';
+    record.error = reason;
+    delete record.nextDueAt;
+    delete record.inFlightDueAt;
+    this.hostRetryAt.delete(record.id);
+    const count = this.pending.size;
+    this.dropPending(record.id);
+    return changed || count !== this.pending.size;
+  }
+
+  private retireStaleHosts(): boolean {
+    let changed = false;
+    for (const record of this.records.values()) {
+      if (record.engine === 'host' && this.hostOwnerStatus(record) === false && this.retireHost(record)) changed = true;
+    }
+    return changed;
+  }
+
+  /** An unresolved admission is never executed again. If the outbox is full,
+   * its original disk receipt stays intact until an ACK releases capacity. */
+  private reconcileHost(record: ScheduleRecord, now: number, deliveries: string[]): boolean {
+    if (this.hostAttempts.has(record.id)) return false;
+    const due = record.inFlightDueAt ?? record.nextDueAt;
+    if (due === undefined) return false;
+    if (this.hostOwnerStatus(record) !== true) return false;
+    if (record.inFlightDueAt === undefined && record.cancelRequested) {
+      this.cancelHost(record);
+      return true;
+    }
+    const missed = due < this.hostStartup;
+    if (record.inFlightDueAt === undefined && record.rule.kind === 'cron' && (missed || now - due >= 60_000)) {
+      this.advanceHost(record, Math.max(now, this.hostStartup));
+      return true;
+    }
+    if (record.inFlightDueAt === undefined && !missed) return false;
+    if (this.outboxFull(record.id)) return false;
+    const error = record.inFlightDueAt !== undefined
+      ? 'Host schedule execution outcome is unknown after restart. The occurrence was not replayed.'
+      : 'One-shot schedule was missed while the service was offline.';
+    deliveries.push(this.finishHost(record, due, { success: false, error }));
+    return true;
+  }
+
+  private armHostTimer(): void {
+    let earliest = Infinity;
+    if (this.initialized && !this.closing && !this.fault) {
+      for (const record of this.records.values()) {
+        if (record.engine !== 'host' || this.hostAttempts.has(record.id) || this.outboxFull(record.id)
+          || this.hostOwnerStatus(record) === undefined) continue;
+        const due = record.inFlightDueAt !== undefined ? 0 : record.nextDueAt;
+        if (due !== undefined) earliest = Math.min(earliest, Math.max(due, this.hostRetryAt.get(record.id) ?? 0));
+      }
+    }
+    if (this.hostTimer && this.hostTimerAt === earliest) return;
+    clearTimeout(this.hostTimer);
+    this.hostTimer = undefined;
+    this.hostTimerAt = earliest;
+    if (earliest === Infinity) return;
+    // Node clamps overflowing timer delays to one millisecond.
+    const delay = Math.min(0x7fffffff, Math.max(0, earliest - this.now()));
+    this.hostTimer = setTimeout(() => {
+      this.hostTimer = undefined;
+      this.track(this.wakeHosts());
+    }, delay);
+    this.hostTimer.unref();
+  }
+
+  private outboxFull(id: string): boolean {
+    const host = this.hostCatalogIds.has(id);
+    const pending = [...this.pending.values()].filter(item => this.hostCatalogIds.has(item.scheduleId) === host);
+    const reservations = [...this.hostAttempts].filter(key => this.hostCatalogIds.has(key) === host && this.records.get(key)?.state !== 'interrupted');
+    return pending.length + reservations.length >= this.maxPending;
+  }
+
+  private async wakeHosts(): Promise<void> {
+    const deliveries: string[] = [];
+    const ready: { record: ScheduleRecord; due: number }[] = [];
+    await this.serial(async () => {
+      if (this.closing || this.fault) return;
+      let changed = this.retireStaleHosts();
+      const now = this.now();
+      for (const record of this.records.values()) {
+        if (record.engine !== 'host' || this.hostAttempts.has(record.id)) continue;
+        if (this.reconcileHost(record, now, deliveries)) changed = true;
+        const due = record.nextDueAt;
+        if (due === undefined || due > now || this.hostOwnerStatus(record) !== true || (this.hostRetryAt.get(record.id) ?? 0) > now
+          || this.outboxFull(record.id)) continue;
+        this.hostAttempts.add(record.id);
+        ready.push({ record, due });
+      }
+      if (changed) await this.persist();
+      else this.armHostTimer();
+    });
+    for (const { record, due } of ready) this.track(this.dispatchHost(record, due));
+    if (deliveries.length) await this.attemptDeliveries(deliveries);
+  }
+
+  private async dispatchHost(record: ScheduleRecord, due: number): Promise<void> {
+    const eligible = () => !this.closing && !this.fault && this.records.get(record.id) === record
+      && !record.cancelRequested && record.state === 'active' && record.nextDueAt === due && this.current(record);
+    let open = true;
+    const admit = () => this.serial(async () => {
+      if (!open || !eligible()) return false;
+      record.state = 'running';
+      record.inFlightDueAt = due;
+      delete record.nextDueAt;
+      await this.persist();
+      if (!open || this.closing) return false;
+      const status = this.hostOwnerStatus(record);
+      if (status === true) return true;
+      // No execution authority left this callback. Keep the original slot when
+      // registration changed while the admission receipt was being written.
+      if (status === false) this.retireHost(record);
+      else {
+        delete record.inFlightDueAt;
+        record.nextDueAt = due;
+        record.state = 'active';
+      }
+      await this.persist();
+      return false;
+    });
+    let result: HostResult | undefined;
+    try {
+      if (eligible()) {
+        if (!this.options.hostDispatch) throw new Error('Host schedule dispatch is unavailable.');
+        result = await this.options.hostDispatch(structuredClone(record), `host-${due}`, admit);
+        if (result?.success && record.inFlightDueAt !== due) throw new Error('Host dispatch completed without admission.');
+        if (!result && record.inFlightDueAt === due) throw new Error('Admitted host occurrence returned no result. Its outcome is unknown.');
+      }
+    } catch (error) { result = { success: false, error: errorText(error) }; }
+    finally { open = false; }
+    const delivery = await this.serial(async () => {
+      this.hostAttempts.delete(record.id);
+      this.hostRetryAt.delete(record.id);
+      if (this.closing || this.fault || this.records.get(record.id) !== record) return;
+      let id: string | undefined;
+      if (this.hostOwnerStatus(record) === false) {
+        this.retireHost(record);
+        await this.persist();
+      } else if (result && (record.inFlightDueAt === due || eligible())) {
+        id = this.finishHost(record, due, result);
+        await this.persist();
+      } else {
+        if (eligible()) this.hostRetryAt.set(record.id, this.now() + HOST_BUSY_RETRY_MS);
+        this.armHostTimer();
+      }
+      return id;
+    });
+    if (delivery) await this.attemptDeliveries([delivery]);
+  }
+
   /** Called under the catalog serial queue, never through output-erasing purge.
    * A refusal is proof about this fresh attempt, not historical native absence. */
   private async compactRefusedCreation(record: ScheduleRecord): Promise<void> {
@@ -372,7 +669,7 @@ export class ScheduleService {
       || this.options.isNativeMutationPending?.(ownerOf(record))
       || runtime && (!runtime.stopped || runtime.handle || runtime.observedOccurrence || runtime.running.size || runtime.completed.size
         || runtime.heldDeliveries.size || runtime.cancelling || runtime.cancelPromise || runtime.stopPromise)
-      || this.purged.size >= MAX_PURGED_IDS) return;
+      || this.purgeFencesFull(id)) return;
     this.purged.set(id, ownerOf(record));
     this.records.delete(id);
     try { await this.persist(); }
@@ -390,6 +687,11 @@ export class ScheduleService {
   async listCleanup(owner: ScheduleOwner): Promise<ScheduleCleanupRecord[]> {
     this.checkReady(); validateOwner(owner);
     return this.serial(async () => [...this.cleanup.values()].filter(record => sameCleanupOwner(record, owner)).map(record => structuredClone(record)));
+  }
+
+  private purgeFencesFull(id: string): boolean {
+    const host = this.hostCatalogIds.has(id);
+    return [...this.purged.keys()].filter(key => this.hostCatalogIds.has(key) === host).length >= MAX_PURGED_IDS;
   }
 
   /** Preserve the last known original-session route while deletion is unresolved. */
@@ -415,9 +717,12 @@ export class ScheduleService {
         if (previous.digest !== digest) throw new Error('Purge requestId was reused with a different selection.');
         return [...previous.ids];
       }
-      const references = [...this.purgeRequests.values()].reduce((count, receipt) => count + receipt.ids.length, 0);
-      if (this.purgeRequests.size >= MAX_PURGE_REQUESTS || references + ids.length > MAX_PURGE_SELECTION_IDS)
+      const host = ids.some(id => this.hostCatalogIds.has(id)) || this.legacyUnavailable;
+      const receipts = [...this.purgeRequests].filter(([key]) => this.hostPurgeRequests.has(key) === host);
+      const references = receipts.reduce((count, [, receipt]) => count + receipt.ids.length, 0);
+      if (receipts.length >= MAX_PURGE_REQUESTS || references + ids.length > MAX_PURGE_SELECTION_IDS)
         throw new Error('Durable purge request capacity reached (1000 requests / 20000 selected IDs); no retry selection was discarded.');
+      if (host) this.hostPurgeRequests.add(key);
       this.purgeRequests.set(key, { digest, ids });
       try { await this.persist(); } catch (error) { this.purgeRequests.delete(key); throw error; }
       return [...ids];
@@ -433,7 +738,7 @@ export class ScheduleService {
     const ids = value.all === true ? [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => record.id)
       .concat([...this.cleanup.values()].filter(record => sameCleanupOwner(record, owner)).map(record => record.id))
       : [...value.ids as string[]];
-    if (ids.length > this.maxRecords + MAX_CLEANUP_RECORDS || new Set(ids).size !== ids.length) throw new Error('Invalid schedule purge selection.');
+    if (ids.length > 2 * this.maxRecords + MAX_CLEANUP_RECORDS || new Set(ids).size !== ids.length) throw new Error('Invalid schedule purge selection.');
     ids.forEach(validateScheduleId);
     return ids;
   }
@@ -455,7 +760,8 @@ export class ScheduleService {
         const record = this.records.get(id);
         if (!record || !sameOwner(record, owner)) continue;
         if (forgetUnresolved) continue;
-        record.cancelRequested = true;
+        if (record.engine === 'host') this.cancelHost(record);
+        else record.cancelRequested = true;
         if (record.recovery) record.recovery.status = 'blocked';
         changed = true;
       }
@@ -538,6 +844,7 @@ export class ScheduleService {
 
   private async retryCleanup(owner: ScheduleOwner, id: string, isCurrent: () => boolean): Promise<PurgeOutcome> {
     const item = this.cleanup.get(id);
+    if (this.hostCatalogIds.has(id)) return { status: 'alreadyRemoved' };
     if (this.options.isNativeMutationPending?.(owner)) return { status: 'pending', reason: 'operation_pending', detail: 'A native mutation receipt is unsettled; retry after reconciliation.' };
     if (!item || !this.options.withPurgeVerification) return { status: 'alreadyRemoved' };
     const current = () => !this.closing && !this.fault && isCurrent() && this.current(owner) && this.cleanup.get(id) === item;
@@ -574,18 +881,21 @@ export class ScheduleService {
     const current = () => !this.closing && !this.fault && isCurrent() && this.current(owner)
       && this.records.get(id) === record && record.cancelRequested === true;
     const busy = (): PurgeOutcome | undefined => {
-      if (this.options.isNativeMutationPending?.(owner) || this.recordOperations.has(id) || this.refreshes || this.retainedCancellations.has(id)) {
+      if (record.inFlightDueAt !== undefined) return pending('occurrence_running', 'An admitted host occurrence is awaiting its result.');
+      if (this.hostAttempts.has(id)) return pending('operation_pending', 'Host dispatch is reserving the thread.');
+      if ((record.engine !== 'host' && this.options.isNativeMutationPending?.(owner)) || this.recordOperations.has(id)
+        || this.refreshes || this.retainedCancellations.has(id)) {
         return pending('operation_pending', 'Creation, inspection or cleanup is still pending. Retry these same IDs.');
       }
       if (this.delivering.has(id)) return pending('delivery_pending', 'An external delivery is already in flight; its outcome cannot be revoked.');
     };
     const active = busy(); if (active) return active;
-    if (this.purged.size >= MAX_PURGED_IDS) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
+    if (this.purgeFencesFull(id)) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
     const runtime = this.runtimes.get(id);
     // Do not interpret terminal state, an absent handle or a stopped process as
     // native definition absence. Existing cancelRetained owns its stronger proof.
     let retainedVerified = false;
-    const clean = !runtime && record.cleanupConfirmed === true;
+    const clean = record.engine === 'host' || !runtime && record.cleanupConfirmed === true;
     if (runtime?.handle && !runtime.stopped) {
       await this.cancel(owner, id);
     } else if (!runtime && !record.creationRefused && !clean && record.recovery && this.supportsRetainedCancellation(record)) {
@@ -609,7 +919,7 @@ export class ScheduleService {
       this.checkReady();
       if (!current() || evidence?.status === 'verified' && !evidence.isCurrent()) throw new Error('Schedule purge evidence expired before persistence.');
       const changed = busy(); if (changed) return changed;
-      if (this.purged.size >= MAX_PURGED_IDS) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
+      if (this.purgeFencesFull(id)) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
       if (this.runtimes.get(id) !== runtime || runtime?.running.size || runtime && !runtime.stopped
         || handleProof && runtime?.handle?.nativeDefinitionAbsent === false) {
         return pending('operation_pending', 'Native ownership changed before history removal.');
@@ -653,7 +963,7 @@ export class ScheduleService {
   /** Includes terminal jobs whose native process exit is still unconfirmed. */
   hasActiveSchedules(threadId?: string): boolean {
     return [...this.records.values()].some(record => (!threadId || record.threadId === threadId)
-      && (LIVE.has(record.state) || this.hasRetainedCleanupRoute(record) || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)));
+      && (LIVE.has(record.state) || record.inFlightDueAt !== undefined || this.hasRetainedCleanupRoute(record) || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)));
   }
 
   /** Read-only admission for purge of an owned runtime, including cancelled jobs. */
@@ -683,6 +993,7 @@ export class ScheduleService {
       if (!this.options.isOwnerCurrent(owner)) throw new Error('Cleanup catalog owner changed.');
       for (const id of ids) {
         const record = this.owned(owner, id);
+        if (record.engine === 'host') continue;
         delete record.cleanupConfirmed;
         record.cancelRequested = true;
         if (record.recovery) record.recovery.status = 'blocked';
@@ -707,6 +1018,7 @@ export class ScheduleService {
     this.checkReady(); validateOwner(owner); validateScheduleId(id);
     await this.serial(async () => {
       const record = this.owned(owner, id);
+      if (record.engine === 'host') return;
       if (this.runtimes.get(id)?.stopped) return;
       record.error = errorText(error);
       await this.persist();
@@ -772,6 +1084,13 @@ export class ScheduleService {
     let operation: Promise<ScheduleRecord> | undefined;
     await this.serial(async () => {
       const record = this.owned(owner, id);
+      if (record.engine === 'host') {
+        if (!this.current(owner)) throw new Error('Host schedule owner is no longer current.');
+        this.cancelHost(record);
+        await this.persist();
+        operation = Promise.resolve(structuredClone(record));
+        return;
+      }
       existing = this.retainedCancellations.get(id);
       if (existing) return;
       runtime = this.runtimes.get(id);
@@ -811,7 +1130,8 @@ export class ScheduleService {
   }
 
   private supportsRetainedCancellation(record: ScheduleRecord): boolean {
-    const cleanup = this.options.provider.cleanupFor?.({ ...record, ...record.execution });
+    if (record.engine === 'host' || !isNativeScheduleBackend(record.backend)) return false;
+    const cleanup = this.options.provider.cleanupFor?.({ ...record, backend: record.backend, ...record.execution });
     return !!record.recovery && !!cleanup?.cancelRetained && cleanup.provider === record.recovery.provider
       && cleanup.strategy === record.recovery.strategy;
   }
@@ -820,6 +1140,7 @@ export class ScheduleService {
     const current = () => !this.closing && !this.fault && this.current(record) && record.cancelRequested === true;
     try {
       const ownership = record.recovery;
+      if (record.engine === 'host' || !isNativeScheduleBackend(record.backend)) throw new Error('Native cleanup requires a legacy schedule.');
       const provider = this.options.provider.cleanupFor?.({ id: record.id, threadId: record.threadId,
         backend: record.backend, cwd: record.cwd, prompt: record.prompt, rule: record.rule,
         ...record.execution, recovery: ownership });
@@ -849,13 +1170,18 @@ export class ScheduleService {
   /** Explicit reconnect retry. No timer or periodic retry is installed. */
   async retryDeliveries(): Promise<void> {
     this.checkReady();
-    const ids = await this.serial(async () => [...this.pending.keys()]);
+    const ids = await this.serial(async () => {
+      if (this.retireStaleHosts()) await this.persist();
+      else this.armHostTimer();
+      return [...this.pending.keys()];
+    });
     await this.attemptDeliveries(ids);
   }
 
   /** Idle future definitions do not block updates. Active work and durable deliveries still do. */
   canRestartWithoutActiveWork(): boolean {
     return this.initialized && !this.closing && !this.fault && !this.operations.size
+      && !this.hostAttempts.size && ![...this.records.values()].some(record => record.inFlightDueAt !== undefined)
       && !this.pending.size && !this.delivering.size && [...this.runtimes].every(([id, runtime]) =>
         (!['cancelled', 'failed', 'completed', 'interrupted'].includes(this.records.get(id)?.state ?? '') || runtime.stopped) &&
         !runtime.running.size && !runtime.cancelling) && ![...this.records.values()].some(record => record.state === 'creating');
@@ -865,6 +1191,7 @@ export class ScheduleService {
   destroy(): Promise<void> {
     if (this.destruction) return this.destruction;
     this.closing = true;
+    clearTimeout(this.hostTimer);
     return this.destruction = (async () => {
       await this.initialization?.catch(() => {});
       // Complete only writes already in this process's serial filesystem queue.
@@ -976,7 +1303,7 @@ export class ScheduleService {
           runtime.running.delete(event.occurrenceId);
           runtime.completed.add(event.occurrenceId);
           record.completedOccurrences = [...runtime.completed];
-          if (this.pending.size >= this.maxPending) {
+          if (this.outboxFull(id)) {
             record.state = 'interrupted'; record.error = 'Delivery outbox is full; latest result could not be retained. Native schedule stopped.';
             cleanup = true;
           } else {
@@ -1015,7 +1342,12 @@ export class ScheduleService {
           if (!pending) return;
           if (this.purges.has(pending.scheduleId)) return;
           const record = this.records.get(pending.scheduleId)!;
-          if (!this.current(record) || record.state === 'cancelled' && !pending.afterCancellation) {
+          if (record.engine === 'host') {
+            const status = this.hostOwnerStatus(record);
+            if (status === undefined) return;
+            if (!status) { this.retireHost(record); await this.persist(); return; }
+          }
+          if (record.engine !== 'host' && !this.current(record) || record.state === 'cancelled' && !pending.afterCancellation) {
             this.pending.delete(id); await this.persist(); return;
           }
           const runtime = this.runtimes.get(record.id);
@@ -1039,6 +1371,7 @@ export class ScheduleService {
         catch { continue; } // Keep the persisted outbox; only explicit reconnect retries it.
         finally { this.delivering.delete(delivery.schedule.id); }
         await this.serial(async () => {
+          if (this.closing) return; // A successor retries the durably unacknowledged result.
           this.pending.delete(id);
           await this.persist();
         });
@@ -1129,8 +1462,12 @@ export class ScheduleService {
     });
   }
 
+  private ownerStatus(owner: ScheduleOwner): boolean | undefined {
+    try { return this.options.isOwnerCurrent(ownerOf(owner)); } catch { return undefined; }
+  }
+
   private current(owner: ScheduleOwner): boolean {
-    try { return this.options.isOwnerCurrent(ownerOf(owner)) === true; } catch { return false; }
+    return this.ownerStatus(owner) === true;
   }
 
   private owned(owner: ScheduleOwner, id: string): ScheduleRecord {
@@ -1154,12 +1491,12 @@ export class ScheduleService {
     return task;
   }
 
-  private async readCatalog(): Promise<unknown | undefined> {
+  private async readCatalog(filename: string): Promise<unknown | undefined> {
     let handle: fs.FileHandle;
     try {
-      const stat = await fs.lstat(this.catalogPath);
+      const stat = await fs.lstat(filename);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Schedule catalog must be a regular file, not a symlink.');
-      handle = await fs.open(this.catalogPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      handle = await fs.open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
@@ -1186,17 +1523,19 @@ export class ScheduleService {
     } finally { await handle.close(); }
   }
 
-  private load(data: unknown): void {
+  private load(data: unknown, hostCatalog = false): void {
     const catalog = object(data, ['version', 'records', 'pending', 'purged', 'cleanup', 'purgeRequests']);
-    if (![1, 2, 3, 4, 5, 6].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
+    if (!(hostCatalog ? [6, 7] : [1, 2, 3, 4, 5, 6]).includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
       || !Array.isArray(catalog.pending) || catalog.pending.length > this.maxPending) throw new Error('Invalid schedule catalog envelope.');
     const records = new Map<string, ScheduleRecord>();
     const pending = new Map<string, PendingDelivery>();
     for (const value of catalog.records) {
-      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'cleanupConfirmed', 'recovery', 'completedOccurrences', 'skippedOccurrences']);
+      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'cleanupConfirmed', 'recovery', 'completedOccurrences', 'skippedOccurrences',
+        'engine', 'sessionId', ...(catalog.version === 7 ? ['bindingEpoch'] : []), 'nextDueAt', 'inFlightDueAt']);
       validateScheduleId(record.id); validateOwner(record as unknown as ScheduleOwner); validateSchedulePrompt(record.prompt);
       text(record.cwd, 4096);
-      if (!path.isAbsolute(record.cwd) || !isNativeScheduleBackend(record.backend) || !STATES.has(record.state as ScheduleRecord['state'])
+      if (!path.isAbsolute(record.cwd) || !(record.engine === 'host' ? isHostScheduleBackend(record.backend) : isNativeScheduleBackend(record.backend))
+        || !STATES.has(record.state as ScheduleRecord['state'])
         || typeof record.createdAt !== 'number' || !Number.isSafeInteger(record.createdAt) || record.createdAt < 0
         || records.has(record.id)) throw new Error('Invalid schedule catalog record.');
       if (record.nativeId !== undefined) text(record.nativeId);
@@ -1233,6 +1572,23 @@ export class ScheduleService {
       if (rule.kind === 'once') object(rule, ['kind', 'at']);
       else object(rule, ['kind', 'expression', 'timezone']);
       validateScheduleRule(rule as unknown as ScheduleRule);
+      if (record.engine === 'host') {
+        if (Number(catalog.version) < 6 || record.nativeId !== undefined || record.recovery !== undefined
+          || record.cleanupConfirmed !== undefined || record.creationRefused !== undefined || record.skippedOccurrences !== undefined
+          || record.state === 'creating') throw new Error('Invalid host schedule identity.');
+        if (catalog.version === 7 && record.bindingEpoch === undefined && record.state !== 'interrupted') throw new Error('Missing host binding epoch.');
+        if (record.bindingEpoch !== undefined || record.sessionId !== undefined) text(record.sessionId);
+        const due = record.nextDueAt !== undefined ? record.nextDueAt : record.inFlightDueAt;
+        if ((record.nextDueAt !== undefined) !== (record.state === 'active')
+          || (record.state === 'running' && record.inFlightDueAt === undefined)
+          || record.inFlightDueAt !== undefined && !['running', 'cancelled'].includes(record.state as string)
+          || record.cancelRequested && LIVE.has(record.state as ScheduleRecord['state'])
+          || record.state === 'cancelled' && !record.cancelRequested) throw new Error('Invalid host schedule state.');
+        if (due !== undefined && (typeof due !== 'number' || !Number.isSafeInteger(due) || due <= record.createdAt
+          || nextHostDue(rule as unknown as ScheduleRule, due - 1) !== due
+          || Array.isArray(record.completedOccurrences) && record.completedOccurrences.includes(`host-${due}`))) throw new Error('Invalid host occurrence receipt.');
+      } else if (record.engine !== undefined || record.sessionId !== undefined || record.nextDueAt !== undefined
+        || record.inFlightDueAt !== undefined) throw new Error('Unexpected host schedule fields.');
       records.set(record.id, structuredClone(record) as unknown as ScheduleRecord);
     }
     for (const value of catalog.pending) {
@@ -1250,7 +1606,7 @@ export class ScheduleService {
     if (Number(catalog.version) >= 3) {
       if (!Array.isArray(catalog.purged) || catalog.purged.length > MAX_PURGED_IDS) throw new Error('Invalid purge fences.');
       for (const value of catalog.purged) {
-        const fence = object(value, ['id', 'threadId', 'openId', 'generation']);
+        const fence = object(value, ['id', 'threadId', 'openId', 'generation', ...(catalog.version === 7 ? ['bindingEpoch'] : [])]);
         validateScheduleId(fence.id); validateOwner(fence as unknown as ScheduleOwner);
         if (records.has(fence.id) || purged.has(fence.id)) throw new Error('Conflicting purge fence.');
         purged.set(fence.id, ownerOf(fence as unknown as ScheduleOwner));
@@ -1258,7 +1614,7 @@ export class ScheduleService {
     } else if (catalog.purged !== undefined) throw new Error('Purge fences require catalog version 3 or newer.');
     const cleanup = new Map<string, ScheduleCleanupRecord>();
     const purgeRequests = new Map<string, { digest: string; ids: string[] }>();
-    if (catalog.version === 5 || catalog.version === 6) {
+    if (Number(catalog.version) >= 5) {
       if (!Array.isArray(catalog.cleanup) || catalog.cleanup.length > MAX_CLEANUP_RECORDS) throw new Error('Invalid cleanup ledger.');
       for (const value of catalog.cleanup) {
         const entry = object(value, ['id', 'threadId', 'openId', 'generation', 'backend', 'cwd', 'nativeId', 'historyRemoved', 'reason', 'attribution']);
@@ -1294,32 +1650,68 @@ export class ScheduleService {
         }
       }
     } else if (catalog.cleanup !== undefined || catalog.purgeRequests !== undefined) throw new Error('Cleanup ledger requires catalog version 5 or newer.');
-    this.records = records; this.pending = pending; this.purged = purged; this.cleanup = cleanup; this.purgeRequests = purgeRequests;
+    if (hostCatalog) {
+      if (cleanup.size || [...records.values()].some(row => row.engine !== 'host')) {
+        throw new Error('Invalid host schedule catalog.');
+      }
+      for (const id of [...records.keys(), ...purged.keys()]) {
+        if (this.records.has(id) || this.purged.has(id) || this.unavailableLegacyIds.has(id)) throw new Error('Conflicting schedule catalog ID.');
+        this.hostCatalogIds.add(id);
+      }
+      for (const key of purgeRequests.keys()) {
+        if (this.purgeRequests.has(key)) throw new Error('Conflicting schedule purge request.');
+        this.hostPurgeRequests.add(key);
+      }
+    }
+    for (const [id, row] of records) this.records.set(id, row);
+    for (const [id, row] of pending) this.pending.set(id, row);
+    for (const [id, row] of purged) this.purged.set(id, row);
+    for (const [id, row] of cleanup) this.cleanup.set(id, row);
+    for (const [key, row] of purgeRequests) this.purgeRequests.set(key, row);
+    this.catalogDigests.set(hostCatalog ? this.hostCatalogPath : this.catalogPath,
+      createHash('sha256').update(JSON.stringify(data)).digest('hex'));
   }
 
   private async persist(): Promise<void> {
     if (!this.catalogGate) throw new Error('Schedule catalog ownership is unavailable.');
     this.catalogGate.verify();
     if (this.fault) throw this.fault;
-    const temporary = path.join(path.dirname(this.catalogPath), `.schedule-${randomUUID()}.tmp`);
     try {
-      try {
-        const stat = await fs.lstat(this.catalogPath);
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Schedule catalog is not a regular file.');
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      const handle = await fs.open(temporary, 'wx', 0o600);
-      try {
-        await handle.writeFile(JSON.stringify({ version: 6, records: [...this.records.values()], pending: [...this.pending.values()],
-          cleanup: [...this.cleanup.values()], purgeRequests: [...this.purgeRequests].map(([key, receipt]) => ({ key, ...receipt })),
-          purged: [...this.purged].map(([id, owner]) => ({ id, ...owner })) }), 'utf8');
-        await handle.sync();
-      } finally { await handle.close(); }
-      await fs.rename(temporary, this.catalogPath);
-      syncDirectory(path.dirname(this.catalogPath));
+      if (!this.legacyUnavailable) await this.persistCatalog(false);
+      if (this.hostCatalogIds.size || this.hostPurgeRequests.size) await this.persistCatalog(true);
+      this.armHostTimer();
     } catch (error) {
       this.fault = error instanceof Error ? error : new Error('Schedule catalog write failed.');
       for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});
       throw this.fault;
+    }
+  }
+
+  private async persistCatalog(host: boolean): Promise<void> {
+    const filename = host ? this.hostCatalogPath : this.catalogPath;
+    const belongs = (id: string) => this.hostCatalogIds.has(id) === host;
+    const snapshot = JSON.stringify({ version: host ? 7 : 6,
+      records: [...this.records.values()].filter(row => belongs(row.id)),
+      pending: [...this.pending.values()].filter(row => belongs(row.scheduleId)),
+      cleanup: host ? [] : [...this.cleanup.values()],
+      purgeRequests: [...this.purgeRequests].filter(([key]) => this.hostPurgeRequests.has(key) === host).map(([key, receipt]) => ({ key, ...receipt })),
+      purged: [...this.purged].filter(([id]) => belongs(id)).map(([id, owner]) => ({ id, ...owner })) });
+    const digest = createHash('sha256').update(snapshot).digest('hex');
+    if (this.catalogDigests.get(filename) === digest) return;
+    const temporary = path.join(path.dirname(filename), `.schedule-${randomUUID()}.tmp`);
+    try {
+      try {
+        const stat = await fs.lstat(filename);
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Schedule catalog is not a regular file.');
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      const handle = await fs.open(temporary, 'wx', 0o600);
+      try {
+        await handle.writeFile(snapshot, 'utf8');
+        await handle.sync();
+      } finally { await handle.close(); }
+      await fs.rename(temporary, filename);
+      syncDirectory(path.dirname(filename));
+      this.catalogDigests.set(filename, digest);
     } finally { await fs.unlink(temporary).catch(() => {}); }
   }
 }

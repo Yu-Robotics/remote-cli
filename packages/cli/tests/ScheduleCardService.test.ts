@@ -20,6 +20,17 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ScheduleCardService', () => {
+  it('shows a new host task ahead of a full legacy history and excludes other owners', () => {
+    const f = fixture();
+    const old = Array.from({ length: 100 }, (_, i) => ({ ...f.records[0], id: `old-${i}` }));
+    const fresh = { ...f.records[0], id: 'fresh', engine: 'host', backend: 'kimi', createdAt: 10 } as const;
+    const foreign = { ...fresh, id: 'foreign', openId: 'other', createdAt: 20 };
+    const menu = f.service.open(f.owner, [...old, fresh, foreign]);
+    expect(menu.entries).toHaveLength(100);
+    expect(menu.entries[0]).toMatchObject({ id: 'fresh', backend: 'kimi' });
+    expect(menu.entries.some(entry => entry.id === 'foreign')).toBe(false);
+  });
+
   it('captures opaque choices and refreshes using the original owner without creating schedules', async () => {
     const f = fixture();
     expect(f.menu.entries[0].value).not.toBe(f.records[0].id);

@@ -1,12 +1,17 @@
 import type { NativeScheduleBackend } from './ScheduleCapabilities';
+import type { BackendKey } from '../types/config';
 
-/** Backend-native timing; adapters must never substitute a local scheduler. */
 export type ScheduleRule =
   | { kind: 'once'; at: string }
   | { kind: 'cron'; expression: string; timezone: string };
 
 export interface NativeScheduleInput {
   id: string;
+  /** Framework-selected timing engine and original conversation binding. */
+  engine?: 'host';
+  sessionId?: string;
+  /** Original Router binding for host execution and result delivery. */
+  bindingEpoch?: string;
   /** Captured by the framework, never supplied by the model. */
   threadId?: string;
   /** Omitted by legacy callers to select the original Claude provider. */
@@ -20,6 +25,12 @@ export interface NativeScheduleInput {
   /** Framework-issued cleanup identity persisted before CREATE; legacy storage shape. */
   recovery?: ScheduleOwnershipMetadata;
 }
+
+export type HostScheduleInput = Omit<NativeScheduleInput, 'engine' | 'backend' | 'recovery'> & {
+  engine: 'host';
+  backend?: BackendKey;
+};
+export type ScheduleInput = NativeScheduleInput | HostScheduleInput;
 
 /** Legacy catalog shape retained for exact cleanup and diagnostics, never a resume capability. */
 export interface ScheduleOwnershipMetadata {
@@ -97,11 +108,19 @@ export interface ScheduleOwner {
   threadId: string;
   openId: string;
   generation: string;
+  /** Authenticated Router binding for host schedules. Legacy native ownership predates epochs. */
+  bindingEpoch?: string;
 }
 
 export interface ScheduleRecord extends ScheduleOwner {
   id: string;
-  backend: NativeScheduleBackend;
+  engine?: 'host';
+  sessionId?: string;
+  /** Host occurrence identity is derived from its scheduled UTC millisecond. */
+  nextDueAt?: number;
+  /** Admission was persisted before the native turn. Never replay this slot. */
+  inFlightDueAt?: number;
+  backend: BackendKey;
   cwd: string;
   prompt: string;
   rule: ScheduleRule;

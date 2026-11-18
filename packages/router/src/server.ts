@@ -1,4 +1,5 @@
 import { ScheduleCards } from './feishu/ScheduleCards';
+import { isScheduleBackend } from './types/ScheduleCards';
 import { parseAttachmentHints } from './output/Protocol';
 import { InlineFileCards, type HintStatus, type InlineIdentity, type InlineOwner } from './output/InlineFileCards';
 import { OutputTransfers } from './output/OutputTransfers';
@@ -125,8 +126,9 @@ export class RouterServer {
   private readonly workerContextConnections = new Map<string, () => boolean>();
   private readonly settingsCards: SettingsCards;
   private readonly scheduleCards: ScheduleCards;
-  private readonly scheduleToolDeliveries = new Map<string, { digest: string; done: Promise<boolean>; settled: boolean }>();
-  private readonly scheduleCardConnections = new Map<string, () => boolean>();
+  private readonly scheduleToolDeliveries = new Map<string, { digest: string; epoch: string; done: Promise<boolean>; settled: boolean }>();
+  private readonly scheduleCardConnections = new Map<string, (allBackends?: boolean) => boolean>();
+  private readonly awaitingScheduleBindings = new Set<string>();
   private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind | 'speed') => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly tips: TipService;
@@ -134,7 +136,7 @@ export class RouterServer {
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
   private streamingMessages = new Map<string, StreamingMessageState>();
-  private completedTasks = new Map<string, { deviceId: string; completedAt: number }>();
+  private completedTasks = new Map<string, { deviceId: string; completedAt: number; scheduleRoute?: string }>();
   private queueMessageOperations = new Map<string, Promise<void>>();
   private startedQueueMessages = new Map<string, number>();
   private readonly images = new ImageLifecycle();
@@ -270,6 +272,9 @@ export class RouterServer {
       ? this.outputTransfers.click(openId, cardId, payload) : Promise.resolve('File retrieval is disabled.');
     this.feishuLongConnHandler.onFileMessage = input => this.fileTransfers.receive(input);
     this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
+    this.feishuLongConnHandler.onDeviceBound = deviceId => {
+      if (this.awaitingScheduleBindings.delete(deviceId)) this.connectionHub.disconnectDevice(deviceId);
+    };
     this.feishuLongConnHandler.onDeviceEnrollmentBoundary = (deviceId, phase) => {
       if (phase === 'end') { this.deviceEnrollments.delete(deviceId); return; }
       // Exclude credentialless registrations before the pending marker reaches disk.
@@ -357,9 +362,13 @@ export class RouterServer {
     this.feishuLongConnHandler.settingsCards = this.settingsCards;
     this.scheduleCards = new ScheduleCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
-      available: deviceId => this.scheduleCardConnections.get(deviceId)?.() === true,
+      available: (deviceId, allBackends) => this.scheduleCardConnections.get(deviceId)?.(allBackends) === true,
+      captureOwnership: (openId, deviceId) => {
+        const { epoch } = this.selections.capture(openId, deviceId);
+        return () => this.selections.isOwnershipCurrent(openId, deviceId, epoch);
+      },
       send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
-      update: (cardId, elements) => this.feishuLongConnHandler.updateScheduleCard(cardId, elements),
+      update: (cardId, elements, current) => this.feishuLongConnHandler.updateScheduleCard(cardId, elements, current),
     });
     this.feishuLongConnHandler.scheduleCards = this.scheduleCards;
     this.maintenanceCards = new MaintenanceCards(new NoticeReceipts(path.join(
@@ -705,6 +714,9 @@ export class RouterServer {
       let socketClosed = false;
       let taskRecoveryEnabled = false;
       let scheduleResultsEnabled = false;
+      let scheduleBinding: { deviceId: string; openId: string; epoch: string } | undefined;
+      const scheduleBindingCurrent = (openId: string) => !scheduleBinding || (scheduleBinding.openId === openId
+        && this.bindingManager.getCardThreadEpoch(openId, scheduleBinding.deviceId, 'schedule') === scheduleBinding.epoch);
       let scheduleCardsEnabled = false;
       let scheduleToolCardsEnabled = false;
       let approvalCardsEnabled = false;
@@ -828,13 +840,14 @@ export class RouterServer {
 
           if (message.type === 'schedule_tool_card') {
             if (!scheduleToolCardsEnabled || !deviceId) return;
-            const current = () => !socketClosed && ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(deviceId!, ws);
+            const current = () => !socketClosed && ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(deviceId!, ws)
+              && scheduleBindingCurrent(message.openId);
             const success = await this.deliverScheduleToolCard(deviceId, message, current);
             if (current()) ws.send(JSON.stringify({ type: 'schedule_tool_card_ack', messageId: message.messageId, success, timestamp: Date.now() }));
             return;
           }
           if (message.type === 'schedule_action_result') {
-            if (scheduleCardsEnabled && deviceId) await this.scheduleCards.resolve(deviceId, message);
+            if (scheduleCardsEnabled && deviceId && scheduleBindingCurrent(message.openId)) await this.scheduleCards.resolve(deviceId, message);
             return;
           }
 
@@ -856,8 +869,9 @@ export class RouterServer {
           if ([MessageType.RESPONSE, MessageType.NOTIFICATION,
             'task_resume', 'stream', 'stream_context', 'queue_started'].includes(message.type)
             && !await this.authorizeRecipientOutput(message, imageDevice, imageCurrent)) return;
-          if (message.queueStarted?.source !== undefined
-            && (!scheduleResultsEnabled || !this.validScheduledResult(message))) return;
+          if ((message.queueStarted?.source !== undefined || message.queueStarted?.bindingEpoch !== undefined)
+            && (!scheduleResultsEnabled || !this.validScheduledResult(message, !!scheduleBinding)
+              || message.queueStarted.bindingEpoch !== scheduleBinding?.epoch || !scheduleBindingCurrent(message.openId))) return;
           // Establish routing before card creation awaits. Payload admission and
           // response closure must occur before waiting for earlier operations.
           if (imageDevice && taskRecoveryEnabled && message.type === 'task_resume') {
@@ -891,7 +905,8 @@ export class RouterServer {
             return;
           }
           if (message.type === 'queue_started') {
-            await this.handleQueueStarted(message, deviceId, imageCurrent);
+            await this.handleQueueStarted(message, deviceId, message.queueStarted?.source === 'schedule'
+              ? () => imageCurrent() && scheduleBindingCurrent(message.openId) : imageCurrent);
             return;
           }
           // Serialize queued output through card creation, asynchronous tool/image
@@ -940,6 +955,9 @@ export class RouterServer {
               if (typeof message.data?.deviceId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(message.data.deviceId)) {
                 authenticationPending = true;
                 const requestedId: string = message.data.deviceId;
+                const requested = message.data.capabilities;
+                const offersScheduleResults = requested?.taskRecovery === true && requested.queueStarted === true && requested.scheduleResultsV1 === true;
+                const offersHostSchedules = offersScheduleResults && requested.hostSchedulesV1 === true;
                 let authenticatedOwner: string | undefined;
                 try {
                   if (this.deviceEnrollments.has(requestedId)) {
@@ -1049,12 +1067,26 @@ export class RouterServer {
                 this.fileTransfers.disconnect(deviceId);
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
-                scheduleResultsEnabled = taskRecoveryEnabled && message.data.capabilities?.queueStarted === true
-                  && message.data.capabilities?.scheduleResultsV1 === true;
+                if (socketClosed || !this.connectionHub.isCurrentConnection(requestedId, ws)) break;
+                this.awaitingScheduleBindings.delete(requestedId);
+                if (offersHostSchedules) {
+                  this.awaitingScheduleBindings.add(requestedId);
+                  const owner = await this.bindingManager.getDeviceBinding(requestedId);
+                  if (socketClosed || !this.connectionHub.isCurrentConnection(requestedId, ws)) break;
+                  if (owner && (!authenticatedOwner || owner.openId === authenticatedOwner)) {
+                    const epoch = this.bindingManager.getCardThreadEpoch(owner.openId, requestedId, 'schedule');
+                    if (epoch) {
+                      scheduleBinding = { openId: owner.openId, deviceId: requestedId, epoch };
+                      this.awaitingScheduleBindings.delete(requestedId);
+                    }
+                  }
+                }
+                scheduleResultsEnabled = offersScheduleResults && (!offersHostSchedules || !!scheduleBinding);
                 scheduleCardsEnabled = scheduleResultsEnabled && message.data.capabilities?.scheduleCardsV1 === true;
                 scheduleToolCardsEnabled = scheduleCardsEnabled && message.data.capabilities?.scheduleToolCardsV1 === true;
                 if (scheduleCardsEnabled) this.scheduleCardConnections.set(deviceId,
-                  () => this.connectionHub.isCurrentConnection(deviceId!, ws) && ws.readyState === WebSocket.OPEN);
+                  allBackends => (!allBackends || !!scheduleBinding) && (!scheduleBinding || scheduleBindingCurrent(scheduleBinding.openId))
+                    && this.connectionHub.isCurrentConnection(deviceId!, ws) && ws.readyState === WebSocket.OPEN);
                 else this.scheduleCardConnections.delete(deviceId);
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 updateNoticeEnabled = message.data.capabilities?.updateNotice === true;
@@ -1091,6 +1123,7 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
+                    ...(scheduleBinding && { scheduleBinding }),
                     ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled || automaticEnrollmentEnabled || message.data.capabilities?.outputAttachmentHintsV1 === true) ? { capabilities: {
                       ...(automaticEnrollmentEnabled ? { automaticFileEnrollmentV1: true } : {}),
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
@@ -1103,6 +1136,7 @@ export class RouterServer {
                       ...(outputsEnabled ? { outputFilesV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(scheduleResultsEnabled ? { scheduleResultsV1: true } : {}),
+                      ...(scheduleBinding ? { hostSchedulesV1: true } : {}),
                       ...(scheduleCardsEnabled ? { scheduleCardsV1: true } : {}),
                       ...(scheduleToolCardsEnabled ? { scheduleToolCardsV1: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
@@ -1137,14 +1171,34 @@ export class RouterServer {
             case MessageType.RESPONSE:
               deliveryEvent('task_result_received', { task: taskCorrelation(message.messageId), connectionEpoch });
               const scheduledSession = this.streamingMessages.get(message.messageId);
-              if (scheduledSession?.queueStarted?.source === 'schedule') {
-                if (!scheduleResultsEnabled || message.threadId !== scheduledSession.threadId
-                  || message.cwd !== scheduledSession.cwd || message.queueConfirmation || message.data?.queueConfirmation
-                  || (message.queueStarted && (message.queueStarted.scheduleId !== scheduledSession.queueStarted.scheduleId
-                    || message.queueStarted.backend !== scheduledSession.queueStarted.backend))) break;
-              } else if (message.queueStarted?.source === 'schedule'
-                && !(deviceId && this.isCompletedTask(message.messageId, deviceId))) {
-                // A rejected/missing start must not fall through to an unthreaded plain response.
+              const completed = deviceId && this.isCompletedTask(message.messageId, deviceId);
+              if (message.queueStarted?.source === 'schedule' || scheduledSession?.queueStarted?.source === 'schedule'
+                || (completed && this.completedTasks.get(message.messageId)?.scheduleRoute)) {
+                if (!deviceId || message.queueStarted?.source !== 'schedule' || typeof message.success !== 'boolean'
+                  || message.queueConfirmation || message.data?.queueConfirmation) break;
+                const { openId, threadId, cwd, queueStarted, messageId } = message;
+                const epoch = queueStarted.bindingEpoch ?? scheduledSession?.selectionFence?.epoch ?? this.selections.capture(openId, deviceId).epoch;
+                const route = JSON.stringify([openId, threadId, cwd, epoch, queueStarted.scheduleId, queueStarted.backend, queueStarted.bindingEpoch]);
+                const owned = this.scheduleOwnerCheck(openId, deviceId, epoch, imageCurrent, !!queueStarted.bindingEpoch);
+                if (!await owned()) break;
+                if (completed) {
+                  if (this.completedTasks.get(messageId)?.scheduleRoute !== route) break;
+                } else {
+                  if (!scheduledSession || this.streamingMessages.get(messageId) !== scheduledSession
+                    || scheduledSession.deviceId !== deviceId || scheduledSession.openId !== openId
+                    || scheduledSession.threadId !== threadId || scheduledSession.cwd !== cwd
+                    || scheduledSession.queueStarted?.source !== 'schedule'
+                    || scheduledSession.queueStarted.scheduleId !== queueStarted.scheduleId
+                    || scheduledSession.queueStarted.bindingEpoch !== queueStarted.bindingEpoch
+                    || (!queueStarted.bindingEpoch && scheduledSession.selectionFence?.epoch !== epoch)
+                    || scheduledSession.queueStarted.backend !== queueStarted.backend) break;
+                  const delivered = await this.finalizeStreamingMessage(messageId, message.success, message.output,
+                    message.error, undefined, cwd, undefined, undefined, undefined, undefined, owned);
+                  if (!delivered || !await owned()) break;
+                  this.rememberCompletedTask(messageId, deviceId, route);
+                }
+                ws.send(JSON.stringify({ type: 'task_result_ack', messageId, timestamp: Date.now() }));
+                deliveryEvent('result_ack_send', { task: taskCorrelation(messageId), connectionEpoch, acceptedLocally: true, duplicate: Boolean(completed) });
                 break;
               }
               if (taskRecoveryEnabled && deviceId && this.isCompletedTask(message.messageId, deviceId)) {
@@ -1173,10 +1227,16 @@ export class RouterServer {
                 || (candidateSettingsMenu?.kind === 'directory' && !directoryCardsEnabled) ? undefined : candidateSettingsMenu;
 
               const responseSession = responseMessageId ? this.streamingMessages.get(responseMessageId) : undefined;
+              const requestedMenu = message.scheduleMenu ?? message.data?.scheduleMenu;
+              if (requestedMenu && (!responseSession || responseSession.threadId !== responseThreadId
+                || !scheduleBindingCurrent(responseOpenId))) break;
               const scheduleMenu = scheduleCardsEnabled && !queueConfirmation && !responseSession?.queueStarted
                 && responseSession?.threadId === (message.scheduleMenu ?? message.data?.scheduleMenu)?.threadId
                 ? (message.scheduleMenu ?? message.data?.scheduleMenu) : undefined;
               const responseSuccess = message.success ?? message.data?.success;
+              const menuOwned = requestedMenu && responseSession?.selectionFence
+                ? this.scheduleOwnerCheck(responseOpenId, responseSession.deviceId, responseSession.selectionFence.epoch, imageCurrent)
+                : undefined;
               let selectionWarning: string | undefined;
               if (responseSession) {
                 if (responseThreadId) {
@@ -1223,6 +1283,8 @@ export class RouterServer {
                 await this.inlineFileCards.hints(deviceId!, { ...hints, messageId: responseMessageId, threadId: responseThreadId }, this.attachmentHintStatus.get(deviceId!)!).catch(() => {});
               }
               if (responseMessageId && responseOpenId) {
+                if (requestedMenu && (!menuOwned || !await menuOwned()
+                  || this.streamingMessages.get(responseMessageId) !== responseSession)) break;
                 // Check if this was a streaming message (stream chunks were sent)
                 if (this.streamingMessages.has(responseMessageId)) {
                   const delivered = await this.finalizeStreamingMessage(
@@ -1236,8 +1298,9 @@ export class RouterServer {
                     executionMetadata,
                     settingsMenu,
                     scheduleMenu,
+                    menuOwned,
                   );
-                  if (scheduledSession?.queueStarted?.source === 'schedule' && !delivered) break;
+                  if (menuOwned && (!delivered || !await menuOwned())) break;
                 } else {
                   // No streaming session found - session should have been created when command was sent
                   // This might happen if there was an error. Just send the result as plain text.
@@ -1386,6 +1449,7 @@ export class RouterServer {
           this.settingsCards.disconnect(deviceId);
           this.scheduleCards.disconnect(deviceId);
           this.scheduleCardConnections.delete(deviceId);
+          this.awaitingScheduleBindings.delete(deviceId);
           this.settingsConnections.delete(deviceId);
           this.maintenanceConnections.delete(deviceId);
           this.workerContextConnections.delete(deviceId);
@@ -2286,8 +2350,8 @@ export class RouterServer {
     if (route.reply.failed) this.noteImageFailure(messageId, stream);
   }
 
-  private rememberCompletedTask(messageId: string, deviceId: string): void {
-    this.completedTasks.set(messageId, { deviceId, completedAt: Date.now() });
+  private rememberCompletedTask(messageId: string, deviceId: string, scheduleRoute?: string): void {
+    this.completedTasks.set(messageId, { deviceId, completedAt: Date.now(), scheduleRoute });
     for (const [id, receipt] of this.completedTasks) {
       if (Date.now() - receipt.completedAt > 24 * 60 * 60 * 1000 || this.completedTasks.size > 1000) {
         this.completedTasks.delete(id);
@@ -2426,14 +2490,14 @@ export class RouterServer {
   }
 
   /** Validate the additive scheduled-result envelope without changing ordinary queue metadata. */
-  private validScheduledResult(message: any): boolean {
+  private validScheduledResult(message: any, allBackends: boolean): boolean {
     const info = message.queueStarted;
     const bounded = (value: unknown, maximum: number, empty = false) => typeof value === 'string'
       && (empty || value.length > 0) && value.length <= maximum;
     return (message.type === 'queue_started' || message.type === MessageType.RESPONSE)
       && info?.source === 'schedule' && bounded(info.scheduleId, 256)
       && bounded(message.messageId, 256) && bounded(message.openId, 256) && bounded(message.threadId, 256)
-      && (info.backend === 'claude' || info.backend === 'dsh' || info.backend === 'agy') && bounded(info.threadName, 100, true) && bounded(info.cwd, 4096)
+      && isScheduleBackend(info.backend, allBackends) && bounded(info.threadName, 100, true) && bounded(info.cwd, 4096)
       && bounded(info.preview, 240, true) && info.remainingCount === 0
       && message.cwd === info.cwd;
   }
@@ -2449,9 +2513,15 @@ export class RouterServer {
       || !Number.isInteger(info.remainingCount) || info.remainingCount < 0) return;
     if (info.source === 'schedule' && this.isCompletedTask(messageId, deviceId)) return;
     const selectionFence = this.selections.capture(openId, deviceId);
+    if (info.bindingEpoch !== undefined && info.source === 'schedule'
+      && info.bindingEpoch !== this.bindingManager.getCardThreadEpoch(openId, deviceId, 'schedule')) return;
     const previous = this.streamingMessages.get(messageId);
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return;
+    if (previous && (info.source === 'schedule' || previous.queueStarted?.source === 'schedule')
+      && (previous.queueStarted?.source !== info.source || previous.queueStarted?.scheduleId !== info.scheduleId
+        || previous.queueStarted?.backend !== info.backend || previous.cwd !== info.cwd
+        || previous.selectionFence?.epoch !== selectionFence.epoch)) return;
     const pending = this.queueMessageOperations.get(messageId);
     if (pending) return pending;
     // Disconnect cleanup removes unfinished sessions. A persisted schedule outbox
@@ -2473,12 +2543,16 @@ export class RouterServer {
 <font color='grey'>${escape(info.threadName)} · ${escape(info.backend)}
 Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
       let cardId: string | null = null;
+      const current = () => isCurrent() && this.selections.isOwnershipCurrent(openId, deviceId, selectionFence.epoch);
+      const owned = this.scheduleOwnerCheck(openId, deviceId, info.bindingEpoch ?? selectionFence.epoch, isCurrent, !!info.bindingEpoch);
+      if (info.source === 'schedule' && !await owned()) return;
       try {
         cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd, messageId);
         if (cardId) this.feishuLongConnHandler.bindDiagnosticTask?.(cardId, messageId);
       } catch (error) {
         deliveryEvent('queued_card_create_failed', { task: taskCorrelation(messageId), ...safeCardError(error) });
       }
+      if (info.source === 'schedule' && !await owned()) return;
       if (!isCurrent() || (imageRoute && this.imageReplies.get(messageId) !== imageRoute)) return;
       const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
       if (previous && this.streamingMessages.get(messageId) === previous) {
@@ -2508,7 +2582,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
       if (cardId || fallbackCardId) {
         await this.registerCardThread((cardId || fallbackCardId)!, {
           threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
-        }, isCurrent);
+        }, current);
       }
       if (cardId) {
         const oldCards = new Set([previous?.queueCardId, previous?.feishuMessageId]);
@@ -2572,7 +2646,10 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     const key = `${deviceId}:${message.messageId}`;
     const digest = createHash('sha256').update(JSON.stringify(message)).digest('hex');
     const previous = this.scheduleToolDeliveries.get(key);
-    if (previous) return previous.digest === digest ? previous.done : false;
+    if (previous) {
+      const owned = this.scheduleOwnerCheck(message.openId, deviceId, previous.epoch, current);
+      return previous.digest === digest && await previous.done && await owned();
+    }
     if (this.scheduleToolDeliveries.size >= 500) {
       const stale = [...this.scheduleToolDeliveries].find(([, receipt]) => receipt.settled);
       if (!stale) return false;
@@ -2583,9 +2660,9 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     const parent = this.streamingMessages.get(message.parentMessageId);
     if (!parent || parent.deviceId !== deviceId || parent.openId !== message.openId || parent.threadId !== message.threadId) return false;
     const epoch = parent.selectionFence?.epoch ?? this.selections.capture(message.openId, deviceId).epoch;
-    const owned = () => current() && this.selections.isOwnershipCurrent(message.openId, deviceId, epoch);
+    const owned = this.scheduleOwnerCheck(message.openId, deviceId, epoch, current);
     const done = Promise.resolve().then(async () => {
-      if (!owned() || (await this.bindingManager.getDeviceBinding(deviceId))?.openId !== message.openId || !owned()) return false;
+      if (!await owned()) return false;
       const prepared = this.scheduleCards.present({ openId: message.openId, deviceId, menu: message.menu, expectedThreadId: message.threadId });
       if (!prepared) return false;
       try {
@@ -2593,14 +2670,14 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
         if (Buffer.byteLength(content) > 16 * 1024) throw new Error('Schedule card exceeds its budget.');
         const cardId = await this.feishuLongConnHandler.createOutputCard(message.openId, content,
           createHash('sha256').update(key).digest('hex').slice(0, 32));
-        if (!owned() || (await this.bindingManager.getDeviceBinding(deviceId))?.openId !== message.openId || !owned()) { prepared.discard(); return false; }
+        if (!await owned()) { prepared.discard(); return false; }
         await this.registerCardThread(cardId, { openId: message.openId, deviceId, threadId: message.threadId,
-          epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, owned);
-        if (!owned()) { prepared.discard(); return false; }
+          epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, current);
+        if (!await owned()) { prepared.discard(); return false; }
         prepared.deliver([cardId]); return true;
       } catch { prepared.discard(); return false; }
     });
-    const receipt = { digest, done, settled: false };
+    const receipt = { digest, epoch, done, settled: false };
     this.scheduleToolDeliveries.set(key, receipt);
     void done.then(() => { receipt.settled = true; }, () => { receipt.settled = true; });
     return done;
@@ -2624,7 +2701,15 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     }
   }
 
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown, scheduleMenu?: unknown): Promise<boolean> {
+  private scheduleOwnerCheck(openId: string, deviceId: string, epoch: string, connectionCurrent: () => boolean,
+    hostResult = false): () => Promise<boolean> {
+    const current = () => connectionCurrent() && (hostResult
+      ? this.bindingManager.getCardThreadEpoch(openId, deviceId, 'schedule') === epoch
+      : this.selections.isOwnershipCurrent(openId, deviceId, epoch));
+    return async () => current() && (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId && current();
+  }
+
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown, scheduleMenu?: unknown, deliveryCurrent?: () => Promise<boolean>): Promise<boolean> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return false;
     const task = taskCorrelation(messageId);
@@ -2648,6 +2733,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
       if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
 
       await this.admitInlineParent(messageId).catch(() => {});
+      if (deliveryCurrent && !await deliveryCurrent()) return false;
       const { feishuMessageId, openId } = streamData;
 
       if (feishuMessageId) {
@@ -2690,14 +2776,16 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             undefined,
             undefined,
             true,
-            { bare: true, onDelivered: async cardIds => {
-              prepared.deliver(cardIds);
+            { bare: true, current: deliveryCurrent, onDelivered: async cardIds => {
+              if (deliveryCurrent && !await deliveryCurrent()) { prepared.discard(); return; }
               if (scheduleMenu) await this.registerDeliveredThreadCards(messageId, streamData, cardIds);
+              if (deliveryCurrent && !await deliveryCurrent()) { prepared.discard(); return; }
+              prepared.deliver(cardIds);
             } }
           );
           if (!finalized) {
             prepared.discard();
-            if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
+            if (!await this.canDispatchStreamOutput(messageId, streamData) || (deliveryCurrent && !await deliveryCurrent())) return false;
             const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
             if (delivered === false) throw new Error('Failed to deliver settings result');
           }
@@ -2714,7 +2802,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             queueConfirmation,
             executionMetadata,
             true,
-            { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+            { current: deliveryCurrent, onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
           );
           if (finalized === false) throw new Error('Failed to finalize task card');
         } else {
@@ -2736,7 +2824,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             queueConfirmation,
             executionMetadata,
             false,
-            { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+            { current: deliveryCurrent, onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
           );
           if (finalized === false) throw new Error('Failed to finalize task card');
         }
@@ -2883,6 +2971,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     this.scheduleCards.destroy();
     this.scheduleToolDeliveries.clear();
     this.scheduleCardConnections.clear();
+    this.awaitingScheduleBindings.clear();
     this.settingsConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();

@@ -107,6 +107,97 @@ describe('PiClient process lifecycle', () => {
     vi.unstubAllEnvs();
   });
 
+  it.each(['restart', 'adopted', 'missing-history', 'wrong-header', 'wrong-pointer', 'during-start',
+    'during-state', 'native-substitution', 'before-prompt', 'process-exit'])(
+    'pins a scheduled occurrence to the saved Pi history and verified RPC process (%s)', async scenario => {
+      const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-host-schedule-')));
+      vi.spyOn(os, 'homedir').mockReturnValue(home);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      const cwd = path.join(home, 'project');
+      fs.mkdirSync(cwd);
+      const base = path.join(home, 'pointers');
+      const store = path.join(base, 'store');
+      fs.mkdirSync(store, { recursive: true });
+      const pointerFile = path.join(base, 'thread.json');
+      const sessionFile = path.join(scenario === 'adopted' ? home : store, 'history.jsonl');
+      const id = 'synthetic-original';
+      const pointer = { sessionFile, id, ...(scenario === 'adopted' && { cwd, adopted: true }) };
+      const savePointer = (nextId: string) => fs.writeFileSync(pointerFile, JSON.stringify({ ...pointer, id: nextId }));
+      savePointer(id);
+      fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', id, cwd }) + '\n');
+      const commands: string[] = [];
+      const proc = Object.assign(new EventEmitter(), {
+        exitCode: null as number | null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter(),
+        stdin: { on: vi.fn(), end: vi.fn(), writable: true, destroyed: false, write: vi.fn((line: string) => {
+          const command = JSON.parse(line);
+          commands.push(command.type);
+          queueMicrotask(() => {
+            if (command.type === 'get_state' && scenario === 'during-state') savePointer('changed');
+            const emit = (event: object) => proc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
+            emit({ type: 'response', id: command.id, command: command.type, success: true,
+              data: { sessionId: scenario === 'native-substitution' ? 'changed' : id, sessionFile } });
+            if (command.type === 'prompt') {
+              emit({ type: 'agent_start' });
+              emit({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Scheduled result' }] });
+              emit({ type: 'agent_settled' });
+            }
+          });
+          return true;
+        }) },
+        kill: () => { proc.exitCode = 0; proc.emit('exit', 0); proc.emit('close', 0); return true; },
+      });
+      vi.mocked(spawn).mockReturnValue(proc as any);
+      const open = () => new PiExecutor(new DirectoryGuard([home]), { threadId: 'thread', initialWorkingDirectory: cwd,
+        sessionBaseDir: base, clientFactory: launch => {
+          const client = new PiClient(launch);
+          if (scenario === 'during-start') {
+            const start = client.start.bind(client);
+            vi.spyOn(client, 'start').mockImplementationOnce(async beforeStart => {
+              await Promise.resolve(); savePointer('changed'); await start(beforeStart);
+            });
+          }
+          return client;
+        } });
+      const previous = open();
+      let executor: PiExecutor | undefined;
+      try {
+        previous.checkHostScheduleSession(id);
+        await previous.destroy();
+        executor = open();
+        executor.checkHostScheduleSession(id);
+        expect(spawn).not.toHaveBeenCalled();
+        if (scenario === 'wrong-pointer') savePointer('changed');
+        if (scenario === 'missing-history') fs.unlinkSync(sessionFile);
+        if (scenario === 'wrong-header') fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', cwd, id: 'changed' }));
+        const result = await executor.execute('Scheduled prompt', { hostScheduleSessionId: id, resolvePrompt: actual => {
+          expect(actual).toBe(id);
+          if (scenario === 'before-prompt') savePointer('changed');
+          if (scenario === 'process-exit') proc.kill();
+          return 'Scheduled prompt';
+        } });
+        if (scenario === 'restart' || scenario === 'adopted') {
+          expect(result).toMatchObject({ success: true, output: 'Scheduled result' });
+          expect(commands).toEqual(['get_state', 'prompt']);
+        } else {
+          expect(result.success).toBe(false);
+          expect(commands).toEqual(['wrong-pointer', 'missing-history', 'wrong-header', 'during-start'].includes(scenario) ? [] : ['get_state']);
+        }
+        if (commands.length) {
+          expect(spawn).toHaveBeenCalledTimes(1);
+          const argv = vi.mocked(spawn).mock.calls[0][1] as string[];
+          expect(argv[argv.indexOf('--session') + 1]).toBe(sessionFile);
+          expect(argv).not.toContain('--session-id');
+        } else expect(spawn).not.toHaveBeenCalled();
+        const pointerChanged = ['wrong-pointer', 'during-state', 'during-start', 'before-prompt'].includes(scenario);
+        expect(JSON.parse(fs.readFileSync(pointerFile, 'utf8'))).toEqual({ ...pointer, id: pointerChanged ? 'changed' : id });
+      } finally {
+        await executor?.destroy();
+        await previous.destroy();
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
   it.each(['destroy', 'abort'] as const)('awaits native connection rollback on %s without restarting Pi for identity or abort RPCs', async action => {
     const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-connect-stop-test-'));
     const sessionFile = path.join(project, 'native.jsonl');

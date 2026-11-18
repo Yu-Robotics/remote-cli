@@ -170,6 +170,7 @@ interface ClaudeOutputMessage {
  * Persistent Claude Executor options
  */
 export interface PersistentClaudeOptions {
+  hostScheduleSessionId?: string;
   /** Executor-internal queued management turn; never accepted from model tool input. */
   nativeScheduleManagement?: boolean;
   nativeScheduleCurrent?: () => boolean;
@@ -287,11 +288,25 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
   abortStatusMessage(): string | undefined { return this.lastAbortMessage; }
   hasPendingScheduleMutation(): boolean { return this.sessionSchedules?.cleanupMutationPending ?? false; }
+  checkHostScheduleSession(id: string): void {
+    if (!id || this.sessionId !== id || this.delegationWorker || this.isDestroyed || this.isStopping
+      || this.abortOperation || this.retainedAbort || this.modelChange || this.hasUncertainShutdown()
+      || this.scheduleCleanupHost || this.reviewedCleanupActive || this.currentScheduleManagement
+      || this.sessionSchedules?.hasJobs || this.sessionSchedules?.hasPendingMutation || this.sessionSchedules?.busy
+      || this.claudeProcess && (this.turnLedger.invalid || this.turnLedger.session && this.turnLedger.session !== id)
+      || this.scheduleHostOwnership().exists()) {
+      throw new Error('The original Claude conversation is unavailable or has unresolved native work.');
+    }
+    if (JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8')).id !== id) {
+      throw new Error('The saved Claude conversation changed.');
+    }
+  }
   hasPendingCancellation(): boolean { return !!this.retainedAbort; }
   private isStopping = false; // Flag to indicate intentional process stop
   private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
   private sessionResumeFailure = false;
   private currentObjectiveDispatched = false;
+  private currentHostScheduleSession?: string;
   private lastStderrOutput = ''; // Last process stderr, available in 'close' handler
   private commandQueue: Array<{
     prompt: string;
@@ -578,12 +593,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         const predecessorConfirmed = ownership.cancellationProof(identity.ownerToken);
         const timezone = await this.readNativeScheduleTimezone();
         if (!current()) throw new Error('Native cancellation host changed.');
-        await this.schedules().cancelRetained({ id: record.id, threadId: record.threadId, backend: 'claude',
+        const inventoryEmpty = await this.schedules().cancelRetained({ id: record.id, threadId: record.threadId, backend: 'claude',
           cwd: record.cwd, prompt: record.prompt, rule: record.rule, recovery: record.recovery }, record.nativeId, current, timezone);
         if (!current()) throw new Error('Native cancellation host changed after deletion.');
         if (!predecessorConfirmed || !ownership.cancellationProof(identity.ownerToken)) {
           throw new Error('Owned future definition is absent on the current host, but predecessor work remains unconfirmed in this boot. Cancellation intent is retained; do not recreate the job. Review predecessor ownership before claiming complete cleanup.');
         }
+        if (inventoryEmpty) ownership.retireAfterReboot();
       },
       describe: input => JSON.stringify({ marker: randomUUID(), sessionId: this.sessionId,
         cwd: input.cwd, threadId: this.threadId, model: this.model, effort: this.effort,
@@ -715,8 +731,17 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return this.ownedScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, canAdmitOccurrence), input);
   }
 
-  /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
-  private readNativeScheduleTimezone(): Promise<string> {
+  private async readNativeScheduleTimezone(): Promise<string> {
+    const timezone = await this.readScheduleHookPolicy() ?? this.nativeScheduleTimezone;
+    if (typeof timezone === 'string' && timezone.length <= 128 && timezone) {
+      try { return new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone; }
+      catch { /* Native Cron needs a valid timezone. */ }
+    }
+    throw new NativeScheduleNotAdmittedError('Native session timezone could not be verified. No schedule was created.');
+  }
+
+  /** Only native Cron callers need the optional timezone from this control reply. */
+  private readScheduleHookPolicy(): Promise<unknown> {
     const child = this.claudeProcess;
     if (!child?.stdin?.writable) return Promise.reject(new NativeScheduleNotAdmittedError('Native conversation is unavailable.'));
     const stdin = child.stdin;
@@ -732,13 +757,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           if (this.claudeProcess !== child || this.isDestroyed || this.isStopping) { failure(); return; }
           try {
             const response = value as { effective?: { env?: { TZ?: unknown }; disableAllHooks?: boolean; allowManagedHooksOnly?: boolean } };
-            if (!response?.effective || typeof response.effective !== 'object') { failure(); return; }
+            if (!response?.effective || typeof response.effective !== 'object' || Array.isArray(response.effective)) { failure(); return; }
             if (response.effective.disableAllHooks || response.effective.allowManagedHooksOnly) {
               reject(new NativeScheduleNotAdmittedError('Native scheduling requires active SDK callback hooks. Native hook policy was not changed.')); return;
             }
-            const timezone = response.effective.env?.TZ ?? this.nativeScheduleTimezone;
-            if (typeof timezone !== 'string' || !timezone || timezone.length > 128) { failure(); return; }
-            resolve(new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone);
+            resolve(response.effective.env?.TZ);
           } catch { failure(); }
         },
       });
@@ -845,9 +868,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // when the original CronCreate used durable:false. Scheduling hosts need
       // bootstrap admission hooks; every other launch disables the native Cron
       // feature itself rather than relying on a scheduler preference setting.
-      const managedScheduling = !this.delegationWorker && !restricted
-        && this.delegation?.groups?.includes('scheduling') === true;
-      this.scheduleGuardRequired = !this.delegationWorker && (!!this.sessionId || managedScheduling);
+      const scheduleTools = this.delegation?.groups?.includes('scheduling') === true;
+      const managedScheduling = !this.delegationWorker && !restricted && scheduleTools;
+      this.scheduleGuardRequired = !this.delegationWorker && (!!this.sessionId || scheduleTools);
       // Managed resumes install admission hooks in the initial handshake. Keep
       // Cron available for reviewed deletion without adopting predecessor jobs.
       const disableNativeSchedules = !managedScheduling;
@@ -1651,6 +1674,18 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     try {
       // Parse message first to check type
       const parsedMessage: ClaudeOutputMessage = JSON.parse(line);
+      const pinned = this.currentHostScheduleSession ?? (!this.isProcessing ? this.commandQueue[0]?.options.hostScheduleSessionId : undefined);
+      if (parsedMessage.type === 'system' && parsedMessage.subtype === 'init' && parsedMessage.session_id
+        && (this.isStopping || pinned !== undefined && parsedMessage.session_id !== pinned)) {
+        if (!this.isStopping) {
+          // The native host diverged before or during dispatch. Preserve the original pointer.
+          const error = 'Claude initialized a different conversation; scheduled dispatch was refused.';
+          void this.stopProcess().then(() => this.processQueue(), () => { this.shutdownUncertain = true; });
+          if (this.currentHostScheduleSession) this.completeCurrentCommand(false, error);
+          else this.commandQueue.shift()?.resolve({ success: false, error });
+        }
+        return;
+      }
       this.turnLedger.observe(parsedMessage);
       const cancellation = this.retainedAbort;
       if (cancellation?.requestId && parsedMessage.type === 'control_response'
@@ -2248,6 +2283,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.clearApprovals('Task is no longer active');
     this.currentOutputBuffer = [];
     this.currentObjectiveDispatched = false;
+    this.currentHostScheduleSession = undefined;
     this.textStreams.clear();
     this.currentStreamCallback = undefined;
     this.currentDisplayTextCallback = undefined;
@@ -2290,6 +2326,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       this.commandQueue.shift()!.resolve({ success: false, error: 'Native schedule management authorization expired before dispatch.' });
     }
     if (!this.commandQueue.length) return;
+    const pinned = this.commandQueue[0].options.hostScheduleSessionId;
+    if (pinned !== undefined) {
+      try { this.checkHostScheduleSession(pinned); }
+      catch (error) {
+        this.commandQueue.shift()!.resolve({ success: false, error: (error as Error).message });
+        void this.processQueue(); return;
+      }
+    }
     // Ensure process is running
     if (!this.claudeProcess) {
       try {
@@ -2317,11 +2361,18 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return;
     }
 
-    if (this.scheduleGuardRequired && !this.scheduleHooksReady && !this.delegationWorker) {
+    const verifyOrdinaryHost = pinned !== undefined && !this.scheduleGuardRequired;
+    if (!this.delegationWorker && (verifyOrdinaryHost || this.scheduleGuardRequired && !this.scheduleHooksReady)) {
       // Initialize callback hooks once per native process before its first model turn.
       this.isStarting = true;
-      try { await this.listModels(); }
-      catch {
+      try {
+        await this.listModels();
+        if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
+        if (verifyOrdinaryHost) {
+          await this.readScheduleHookPolicy();
+          this.scheduleGuardRequired = true;
+        }
+      } catch {
         if (epoch !== this.commandEpoch) return;
         const failed = this.commandQueue.shift();
         // A resumed native scheduler can fire before a later command. If hook
@@ -2343,7 +2394,15 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return;
     }
 
+    try {
+      if (command.options.hostScheduleSessionId !== undefined) this.checkHostScheduleSession(command.options.hostScheduleSessionId);
+      command.prompt = command.options.resolvePrompt?.(this.sessionId) ?? command.prompt;
+    } catch (error) {
+      command.resolve({ success: false, error: (error as Error).message });
+      void this.processQueue(); return;
+    }
     this.isProcessing = true;
+    this.currentHostScheduleSession = command.options.hostScheduleSessionId;
     this.currentScheduleManagement = command.options.nativeScheduleManagement === true;
     this.currentStreamCallback = command.options.onStream;
     this.currentAssistantTextSeen = false;
@@ -2403,7 +2462,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       }, command.options.timeout);
     }
 
-    command.prompt = command.options.resolvePrompt?.(this.sessionId) ?? command.prompt;
     let content: any = command.prompt;
     if (command.options.attachments && command.options.attachments.length > 0) {
       const blocks: any[] = [];
@@ -2442,7 +2500,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     inputMessage.uuid = randomUUID();
     this.turnLedger.dispatched(inputMessage.uuid);
     this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, command.options.nativeScheduleManagement,
-      typeof content === 'string' && !command.isSlashCommand ? content : undefined);
+      typeof content === 'string' && !command.isSlashCommand ? content : undefined, command.options.hostScheduleSessionId);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
 
@@ -2899,7 +2957,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
               this.reportedModel || this.acknowledgedModel || this.model,
             );
             if (scheduleHooks && this.scheduleGuardRequired) {
-              await this.readNativeScheduleTimezone();
+              await this.readScheduleHookPolicy();
             }
             if (scheduleHooks) { this.schedules(); this.scheduleHooksReady = true; }
             this.cachedRawEntries = rawEntries;

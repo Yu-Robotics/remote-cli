@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import path from 'path';
 import http from 'http';
+import { isDeepStrictEqual } from 'util';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { MAX_TRANSCRIPT, parseTranscript, type TranscriptRecord } from './transcript';
 import { openOutputFile } from '../../output/OutputSnapshots';
@@ -44,6 +45,16 @@ export class AgyHookRelay {
     await new Promise<void>(resolve => this.server.close(() => resolve()));
     await this.chain;
   }
+  /** After group exit, confirm the native transcript still matches the last authenticated hook. */
+  async confirmsTerminal(records: TranscriptRecord[]): Promise<boolean> {
+    await this.chain;
+    try {
+      return records.length > 0 && isDeepStrictEqual(await this.read(this.transcriptPath(), 'Stop'), records);
+    } catch { return false; }
+  }
+  private transcriptPath(): string {
+    return path.join(this.root, '.gemini', 'antigravity-cli', 'brain', this.session!, '.system_generated', 'logs', 'transcript_full.jsonl');
+  }
   private async receive(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const authorization = request.headers.authorization ?? '';
     const expected = `Bearer ${this.token}`;
@@ -71,7 +82,7 @@ export class AgyHookRelay {
     }
   }
   private async read(locator: unknown, event: string): Promise<TranscriptRecord[]> {
-    const expected = path.join(this.root, '.gemini', 'antigravity-cli', 'brain', this.session!, '.system_generated', 'logs', 'transcript_full.jsonl');
+    const expected = this.transcriptPath();
     if (typeof locator !== 'string' || path.resolve(locator) !== expected) throw new Error('AGY transcript locator mismatch.');
     // Check every component, not just the basename. Refuse shared/redirected brain
     // paths even if the caller supplied a plausible conversation name.

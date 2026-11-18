@@ -7,6 +7,7 @@ import { ZCodeClient } from '../../src/executor/zcode/ZCodeClient';
 
 const fixture = String.raw`
 const readline = require('readline');
+const fs = require('fs');
 const rl = readline.createInterface({ input: process.stdin });
 let sendParams = null;
 let permissionResponses = 0;
@@ -30,6 +31,7 @@ const finish = () => {
 };
 rl.on('line', (line) => {
   const message = JSON.parse(line);
+  if (message.method) fs.appendFileSync('methods.jsonl', JSON.stringify(message.method) + '\n');
   if (message.method === 'session/create') {
     write({ id: 900, method: 'session/requestRuntimePreferences', params: {} });
     write({ id: message.id, result: sessionResult });
@@ -142,5 +144,15 @@ describe('ZCodeClient', () => {
     await expect(client.setConfigOption('sess-1', 'thought', 'high')).resolves.toMatchObject({ sessionId: 'sess-1' });
     await expect(client.compactSession('sess-1')).resolves.toEqual({ stopReason: 'end_turn' });
     await expect(client.deleteSession('sess-1')).resolves.toBeUndefined();
+  });
+
+  it('checks the exact resume receipt and refuses late rebinding or submission during a pinned subscription', async () => {
+    const blocks = [{ type: 'text' as const, text: 'scheduled' }];
+    await expect(client.loadSession('different', temporaryDirectory, undefined, () => {})).rejects.toThrow(/different conversation/);
+    await expect(client.loadSession('sess-1', temporaryDirectory, undefined, () => {})).resolves.toMatchObject({ sessionId: 'sess-1' });
+    await expect(client.prompt('sess-1', blocks, () => {})).rejects.toThrow(/not active/i);
+    await expect(client.prompt('sess-1', blocks, () => { throw new Error('Selection changed'); })).rejects.toThrow('Selection changed');
+    const methods = (await fs.readFile(path.join(temporaryDirectory, 'methods.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(methods).toEqual(['session/resume', 'session/resume', 'session/subscribe', 'session/subscribe']);
   });
 });

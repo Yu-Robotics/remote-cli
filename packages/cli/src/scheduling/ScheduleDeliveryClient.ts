@@ -1,13 +1,14 @@
 import type { WebSocketClient } from '../client/WebSocketClient';
 import type { QueueStartedInfo } from '../types';
 import type { ScheduleDelivery } from './types';
-import { isNativeScheduleBackend } from './ScheduleCapabilities';
+import { isHostScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
 
 const ACK_TIMEOUT_MS = 15_000;
 const MAX_PENDING = 100;
 const MAX_RESULT_CHARACTERS = 64 * 1024;
 
 interface PendingDelivery {
+  route: string;
   promise: Promise<void>;
   resolve: () => void;
   reject: (error: Error) => void;
@@ -30,7 +31,8 @@ export class ScheduleDeliveryClient {
   private readonly unsubscribeClose: () => void;
   private destroyed = false;
 
-  constructor(private readonly wsClient: WebSocketClient) {
+  constructor(private readonly wsClient: WebSocketClient,
+    private readonly acceptsOwner?: (record: ScheduleDelivery['schedule']) => boolean) {
     this.unsubscribeAck = wsClient.onTaskResultAck(messageId => {
       const pending = this.pending.get(messageId);
       // A receipt during queue_started cannot acknowledge the response still to be sent.
@@ -45,24 +47,32 @@ export class ScheduleDeliveryClient {
   deliver(delivery: ScheduleDelivery, threadName: string): Promise<void> {
     if (this.destroyed) return Promise.reject(new Error('Scheduled result delivery is shut down'));
     if (!this.wsClient.isConnected()) return Promise.reject(new Error('Scheduled result delivery is disconnected'));
-    const existing = this.pending.get(delivery.id);
-    if (existing) return existing.promise;
-    if (this.pending.size >= MAX_PENDING) return Promise.reject(new Error('Too many pending scheduled results'));
     const schedule = delivery.schedule;
-    if ([delivery.id, schedule.id, schedule.openId, schedule.threadId].some(value => !value || value.length > 256)
-      || !schedule.cwd || schedule.cwd.length > 4096 || !isNativeScheduleBackend(schedule.backend)) {
+    const host = schedule.engine === 'host';
+    const validBackend = host ? isHostScheduleBackend(schedule.backend) : isNativeScheduleBackend(schedule.backend);
+    if ([delivery.id, schedule.id, schedule.openId, schedule.threadId].some(value =>
+      typeof value !== 'string' || !value.trim() || value.length > 256 || /[\x00-\x1f\x7f]/.test(value))
+      || !schedule.cwd || schedule.cwd.length > 4096 || !validBackend
+      || host && (!schedule.bindingEpoch || schedule.bindingEpoch.length > 256)) {
       return Promise.reject(new Error('Invalid scheduled result routing metadata'));
     }
+    if (this.acceptsOwner && !this.acceptsOwner(schedule)) return Promise.reject(new Error('Scheduled result owner is unavailable.'));
+    const route = JSON.stringify([schedule.id, delivery.occurrenceId, schedule.openId, schedule.threadId,
+      schedule.generation, schedule.bindingEpoch, schedule.backend, schedule.cwd]);
+    const existing = this.pending.get(delivery.id);
+    if (existing) return existing.route === route ? existing.promise : Promise.reject(new Error('Conflicting scheduled result route.'));
+    if (this.pending.size >= MAX_PENDING) return Promise.reject(new Error('Too many pending scheduled results'));
     let resolve!: () => void;
     let reject!: (error: Error) => void;
     const promise = new Promise<void>((accept, decline) => { resolve = accept; reject = decline; });
     const pending: PendingDelivery = {
-      promise, resolve, reject, responseStarted: false, sent: false, acknowledged: false,
+      route, promise, resolve, reject, responseStarted: false, sent: false, acknowledged: false,
       timer: setTimeout(() => this.finish(delivery.id, new Error('Scheduled result receipt timed out')), ACK_TIMEOUT_MS),
     };
     this.pending.set(delivery.id, pending);
     const queueStarted: QueueStartedInfo = {
       source: 'schedule', scheduleId: schedule.id, threadName: threadName.slice(0, 100), backend: schedule.backend,
+      ...(host && { bindingEpoch: schedule.bindingEpoch }),
       cwd: schedule.cwd, preview: schedule.prompt.replace(/\s+/g, ' ').slice(0, 240), remainingCount: 0,
     };
     const routing = { messageId: delivery.id, openId: schedule.openId, threadId: schedule.threadId,
@@ -72,6 +82,7 @@ export class ScheduleDeliveryClient {
         throw new Error('Scheduled result start was not sent');
       }
       if (this.pending.get(delivery.id) !== pending) return promise;
+      if (this.acceptsOwner && !this.acceptsOwner(schedule)) throw new Error('Scheduled result owner changed.');
       pending.responseStarted = true;
       if (!this.wsClient.send({ type: 'response', ...routing, timestamp: Date.now(), success: delivery.success,
         output: boundedResult(delivery.output), error: boundedResult(delivery.error) })) {

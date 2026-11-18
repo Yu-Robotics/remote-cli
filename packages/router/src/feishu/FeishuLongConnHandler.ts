@@ -194,6 +194,7 @@ export class FeishuLongConnHandler {
   onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined, newDeviceId: string) => void | Promise<void>;
   onApproveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>;
   onDeviceEnrollmentBoundary?: DeviceEnrollmentBoundary;
+  onDeviceBound?: (deviceId: string) => void;
   onRevokeDevice?: (deviceId: string) => Promise<void>;
   onFileMessage?: (input: FileInput) => Promise<void>;
   onResolveFile?: (openId: string, sourceOrCardId: string) => { id: string; deviceId: string; threadId: string } | undefined;
@@ -589,6 +590,7 @@ export class FeishuLongConnHandler {
         return;
       }
 
+      this.onDeviceBound?.(redemption.bindingCode.deviceId);
       const statusNote = redemption.isFirstDevice
         ? '\n\n📱 This is your first device and will be set as active.'
         : '\n\n📱 Use /device switch to activate this device.';
@@ -873,7 +875,7 @@ Backend and session commands (sent to active device):
 /skills - List available skills for the active backend
 /abort - Abort the currently executing command
 /queue - Inspect or manage confirmed messages for busy threads
-/schedule - Manage native scheduled tasks; /schedule help shows available actions
+/schedule - Manage one-shot and cron tasks in this thread. Use /schedule help for commands.
 /files [clear] - List staged attachments or remove unused local copies
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
@@ -1467,12 +1469,13 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>, rootId?: string, diagnosticIndex?: number): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>, rootId?: string, diagnosticIndex?: number, current?: () => Promise<boolean>): Promise<string | null> {
     let attempted = false;
     try {
       const content = JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements: limitCardTables(elements) } });
       attempted = true;
       const result = await this.sendCardRequest(content, async body => {
+        if (current && !await current()) throw new Error('Schedule delivery ownership changed.');
         const response = await this.client.im.message.create({
           params: { receive_id_type: 'open_id' },
           data: {
@@ -1544,8 +1547,11 @@ Examples:
     });
   }
 
-  private async patchAssistantCard(cardId: string, rootId: string, content: string): Promise<any> {
-    const send = (body: string) => this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+  private async patchAssistantCard(cardId: string, rootId: string, content: string, current?: () => Promise<boolean>): Promise<any> {
+    const send = async (body: string) => {
+      if (current && !await current()) throw new Error('Schedule delivery ownership changed.');
+      return this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+    };
     return this.inlineFiles ? this.inlineFiles.write(cardId, rootId, content, send) : send(content);
   }
   async patchInlineOutputCard(cardId: string, content: string): Promise<void> {
@@ -1632,10 +1638,11 @@ Examples:
     }
   }
 
-  async updateScheduleCard(cardId: string, elements: any[]): Promise<void> {
+  async updateScheduleCard(cardId: string, elements: any[], current: () => Promise<boolean>): Promise<void> {
     await this.withMessageLock(cardId, async () => {
       const content = JSON.stringify({ schema: '2.0', body: { elements } });
       if (Buffer.byteLength(content) > 16 * 1024) throw new Error('Schedule card exceeds its size budget.');
+      if (!await current()) return;
       const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content } });
       if (result.code) throw new Error('Schedule card update failed.');
     });
@@ -1702,7 +1709,7 @@ Examples:
     });
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false, diagnosticOperation: 'update' | 'finalize' = 'update'): Promise<boolean> {
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false, diagnosticOperation: 'update' | 'finalize' = 'update', current?: () => Promise<boolean>): Promise<boolean> {
     try {
       // Get or initialize message chain
       let chain = this.messageChains.get(messageId);
@@ -1736,7 +1743,7 @@ Examples:
         const fallback = fallbackCards.has(index);
         const content = JSON.stringify({ schema: '2.0', body: { elements: fallback ? plainTextCard(elements) : elements } });
         await this.sendCardRequest(content, async body => {
-          const result = await this.patchAssistantCard(cardId, messageId, body);
+          const result = await this.patchAssistantCard(cardId, messageId, body, current);
           if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
           return result;
         }, () => fallbackCards.add(index), !fallback, { operation: 'tail-clear', cardId, rootId: messageId, index });
@@ -1787,7 +1794,7 @@ Examples:
           return;
         }
         await this.sendCardRequest(payloads[index], async content => {
-          const result = await this.patchAssistantCard(chain[index], messageId, content);
+          const result = await this.patchAssistantCard(chain[index], messageId, content, current);
           if (!result?.code) this.workerContexts?.remember(chain[index], messageId, content);
           return result;
         }, () => usePlainText(index), !fallbackCards.has(index), { operation: diagnosticOperation, cardId: chain[index], rootId: messageId, index });
@@ -1818,7 +1825,7 @@ Examples:
             const chunkIndex = i + 1;
             const newMessageId = await this.createContinuationCard(openId,
               fallbackCards.has(chunkIndex) ? plainTextCard(chunks[chunkIndex]) : chunks[chunkIndex],
-              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex), undefined, messageId, chunkIndex);
+              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex), undefined, messageId, chunkIndex, current);
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
@@ -1851,11 +1858,11 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; current?: () => Promise<boolean>; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
     return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success, options));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; current?: () => Promise<boolean>; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
     try {
       const shell = this.activityShells.get(messageId);
       if (shell) shell.finishedAt = Date.now();
@@ -1905,8 +1912,8 @@ Examples:
       // Repack changed previews and clear obsolete tool copies without retracting messages.
       const trailingElements = !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
       const keepCompletionWithBody = !bare && !queueConfirmation;
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody, 'finalize');
-      if (!updated) {
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody, 'finalize', options?.current);
+      if (!updated || (options?.current && !await options.current())) {
         return false;
       }
 
