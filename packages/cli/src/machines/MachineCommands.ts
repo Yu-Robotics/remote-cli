@@ -9,6 +9,7 @@ import {
   ContainersArgsSchema,
   BackupsArgsSchema,
   MachineAddArgsSchema,
+  MachineConfigSchema,
 } from './types'
 import type { MachineConfig, BackupRecord, PendingReplace, ResolvedMachine } from './types'
 
@@ -45,9 +46,11 @@ export class MachineCommands {
       return { success: true, output: 'No machines configured. Use /machine add to add one.' }
     }
 
-    const lines = Object.entries(machines).map(([id, m]) => {
-      const host = id
-      return `${id} | ${host}:${m.port} | ${m.user}`
+    const lines = Object.keys(machines).map(id => {
+      const result = this.getResolvedMachine(id)
+      if ('error' in result) return result.error
+      const { host, port, user } = result.machine
+      return `${id} | ${host}${port ? ':' + port : ''} | ${user}`
     })
 
     return {
@@ -63,24 +66,17 @@ export class MachineCommands {
     id: string,
     user: string,
     password?: string,
-    port = 22
+    port?: number,
+    destination = id
   ): Promise<CommandResult> {
-    const parsed = MachineAddArgsSchema.safeParse({ id, user, password, port })
+    const parsed = MachineAddArgsSchema.safeParse({ id, user, password, port, destination })
     if (!parsed.success) {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machineConfig: MachineConfig = {
-      user: parsed.data.user,
-      port: parsed.data.port,
-      ...(parsed.data.password ? { password: parsed.data.password } : {}),
-    }
-
-    await this.config.set(`machines.${id}`, machineConfig)
-
-    const host = id
-
-    return { success: true, output: `Machine "${id}" added: ${user}@${host}:${port}` }
+    const { id: machineId, ...machine } = parsed.data
+    await this.config.updateMachine(machineId, machine)
+    return { success: true, output: `Machine "${id}" added: ${user}@${destination}${port ? ':' + port : ''}` }
   }
 
   /**
@@ -92,9 +88,7 @@ export class MachineCommands {
       return { success: false, error: `Machine "${id}" not found` }
     }
 
-    const machines = { ...(this.config.get('machines') as Record<string, MachineConfig>) }
-    delete machines[id]
-    await this.config.set('machines', machines)
+    await this.config.updateMachine(id, undefined)
 
     return { success: true, output: `Machine "${id}" removed` }
   }
@@ -103,22 +97,21 @@ export class MachineCommands {
    * Show a machine configuration (password masked)
    */
   showMachine(id: string): CommandResult {
-    const machine = this.getRawMachine(id)
-    if (!machine) {
-      return { success: false, error: `Machine "${id}" not found` }
-    }
-
-    const resolved = this.resolveMachine(id, machine)
+    const result = this.getResolvedMachine(id)
+    if ('error' in result) return result
+    const { machine } = result
     const lines = [
       `Machine: ${id}`,
-      `Host: ${resolved.host}`,
-      `Port: ${resolved.port}`,
-      `User: ${resolved.user}`,
+      `Host: ${machine.host}`,
+      `Port: ${machine.port ?? 'SSH default'}`,
+      `User: ${machine.user}`,
     ]
 
     if (machine.password) {
       lines.push(`Password: ${'*'.repeat(machine.password.length)}`)
     }
+
+    lines.push('Connection: SSH')
 
     return { success: true, output: lines.join('\n') }
   }
@@ -132,10 +125,9 @@ export class MachineCommands {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machine = this.getResolvedMachine(machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${machineId}" not found` }
-    }
+    const result = this.getResolvedMachine(machineId)
+    if ('error' in result) return result
+    const { machine } = result
 
     try {
       const output = await this.ssh.execRemote(machine, [
@@ -172,10 +164,9 @@ export class MachineCommands {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machine = this.getResolvedMachine(machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${machineId}" not found` }
-    }
+    const result = this.getResolvedMachine(machineId)
+    if ('error' in result) return result
+    const { machine } = result
 
     const findArgs = ['find', searchPath, '-maxdepth', '10', '-name', pattern]
 
@@ -218,10 +209,9 @@ export class MachineCommands {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machine = this.getResolvedMachine(machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${machineId}" not found` }
-    }
+    const result = this.getResolvedMachine(machineId)
+    if ('error' in result) return result
+    const { machine } = result
 
     try {
       const content = containerId
@@ -259,11 +249,8 @@ export class MachineCommands {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machine = this.getResolvedMachine(machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${machineId}" not found` }
-    }
-
+    const result = this.getResolvedMachine(machineId)
+    if ('error' in result) return result
     const pending: PendingReplace = {
       machineId,
       filePath,
@@ -290,10 +277,9 @@ export class MachineCommands {
     pending: PendingReplace,
     newContent: string
   ): Promise<CommandResult> {
-    const machine = this.getResolvedMachine(pending.machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${pending.machineId}" not found` }
-    }
+    const result = this.getResolvedMachine(pending.machineId)
+    if ('error' in result) return result
+    const { machine } = result
 
     const backupPath = BackupStore.generateBackupPath(pending.filePath)
 
@@ -386,10 +372,9 @@ export class MachineCommands {
       return { success: false, error: `Invalid arguments: ${parsed.error.issues[0].message}` }
     }
 
-    const machine = this.getResolvedMachine(machineId)
-    if (!machine) {
-      return { success: false, error: `Machine "${machineId}" not found` }
-    }
+    const result = this.getResolvedMachine(machineId)
+    if ('error' in result) return result
+    const { machine } = result
 
     try {
       if (containerId) {
@@ -412,31 +397,20 @@ export class MachineCommands {
     }
   }
 
-  /**
-   */
-  private getRawMachine(id: string): MachineConfig | undefined {
-    return this.config.get(`machines.${id}`) as MachineConfig | undefined
+  private getRawMachine(id: string): unknown {
+    const machines = this.config.get('machines')
+    return machines && Object.hasOwn(machines, id) ? machines[id] : undefined
   }
 
-  /**
-   */
-  private resolveMachine(id: string, machine: MachineConfig): ResolvedMachine {
-    const host = id
-
-    return {
-      host,
-      user: machine.user,
-      password: machine.password,
-      port: machine.port,
+  private getResolvedMachine(id: string): { machine: ResolvedMachine } | { success: false; error: string } {
+    const raw = this.getRawMachine(id)
+    if (raw === undefined) return { success: false, error: `Machine "${id}" not found` }
+    const parsed = MachineConfigSchema.safeParse(raw)
+    if (!parsed.success) {
+      return { success: false, error: `Machine "${id}" needs a direct SSH destination. Use /machine add ${id} <user> --destination <hostname-or-alias>.` }
     }
-  }
-
-  /**
-   */
-  private getResolvedMachine(id: string): ResolvedMachine | undefined {
-    const machine = this.getRawMachine(id)
-    if (!machine) return undefined
-    return this.resolveMachine(id, machine)
+    const { destination, ...login } = parsed.data
+    return { machine: { host: destination, ...login } }
   }
 
   /**

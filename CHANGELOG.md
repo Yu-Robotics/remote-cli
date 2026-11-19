@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Add illustrated Tips for the command menu, recurring schedules in the originating thread, and direct replies after switching threads. Update the abort and clear illustrations to explain their effects on scheduled work.
+- Machine commands connect to an SSH host or SSH config alias. If an existing machine prompts for a destination, set it with `/machine add`.
 
 ## [1.6.272] - 2026-11-19
 

@@ -647,6 +647,11 @@ export class MessageHandler {
       && (!this.scheduleBinding || this.scheduleBinding.openId === message.openId));
     if (!sourceCurrent()) return;
     this.messageOpenIds.set(message.messageId, message.openId);
+    // Old peers may still send this retired command with credentials.
+    if (/^\/proxy(?:\s|$)/i.test(content)) {
+      this.sendResponse(message.messageId, threadId, { success: false, error: 'Machine proxy settings were removed. Use /machine add with a direct SSH destination.' }, true);
+      return;
+    }
     if (this.deletingThreads.has(threadId)) {
       this.sendResponse(message.messageId, threadId, { success: false, error: 'Thread deletion is in progress.' }, true);
       return;
@@ -1658,7 +1663,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 
 Remote Machine commands:
 - /machines - List configured machines
-- /machine add <id> <user> [password] [--port N] - Add a machine
+- /machine add <id> <user> [password] [--destination <host-or-alias>] [--port N] - Configure SSH (destination defaults to ID)
 - /machine remove <id> - Remove a machine
 - /machine show <id> - Show machine details
 - /containers <machineId> - List Docker containers
@@ -2359,17 +2364,20 @@ You can also use natural language commands to control Claude Code CLI.`,
       const subCmd = parts[0];
 
       if (subCmd === 'add') {
-        const flags = this.parseFlags(parts.slice(1));
+        const tokens = parts.slice(1);
+        const flags = this.parseFlags(tokens);
+        const invalidFlag = tokens.some((token, index) => token.startsWith('--') &&
+          (!['--port', '--destination'].includes(token) || !tokens[index + 1] || tokens[index + 1].startsWith('--')));
         const args = flags.positional;
-        if (args.length < 2) {
+        if (args.length < 2 || args.length > 3 || invalidFlag) {
           this.sendResponse(messageId, threadId, {
             success: false,
-            error: 'Usage: /machine add <id> <user> [password] [--port N]',
+            error: 'Usage: /machine add <id> <user> [password] [--destination <host-or-alias>] [--port N]',
           });
           return true;
         }
-        const port = flags.named.port ? parseInt(flags.named.port, 10) : 22;
-        const result = await this.machineCommands.addMachine(args[0], args[1], args[2], port);
+        const port = flags.named.port === undefined ? undefined : Number(flags.named.port);
+        const result = await this.machineCommands.addMachine(args[0], args[1], args[2], port, flags.named.destination);
         this.sendResponse(messageId, threadId, result);
         return true;
       }

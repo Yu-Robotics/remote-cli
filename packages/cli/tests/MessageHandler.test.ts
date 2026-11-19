@@ -159,6 +159,28 @@ describe('MessageHandler', () => {
     }));
   });
 
+  it('rejects retired machine commands before backend passthrough', async () => {
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'retired-command', isSlashCommand: true,
+      content: '/proxy set obsolete-argument' } as any);
+    expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'response', success: false, error: expect.stringContaining('direct SSH destination'),
+    }));
+    expect(JSON.stringify(ctx.mockWsClient.send.mock.calls)).not.toContain('obsolete-argument');
+    expect(ctx.mockThreadPool.getExecutor).not.toHaveBeenCalled();
+  });
+
+  it('registers the requested SSH destination and rejects an incomplete destination flag', async () => {
+    const update = vi.fn().mockResolvedValue(undefined);
+    (ctx.mockConfig as any).updateMachine = update;
+    const send = (content: string) => ctx.handler.handleMessage({ type: 'command', messageId: 'add-machine',
+      isSlashCommand: true, content } as any);
+    await send('/machine add build operator --port 2222 --destination build-alias');
+    expect(update).toHaveBeenCalledWith('build', { destination: 'build-alias', user: 'operator', port: 2222 });
+    await send('/machine add build operator --destination');
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('Usage: /machine add') }));
+  });
+
   it('resolves shared-link policy through ConfigManager only when managed admission asks for it', async () => {
     const resolve = vi.fn(() => []);
     (ctx.mockConfig as any).getSharedSymlinks = resolve;

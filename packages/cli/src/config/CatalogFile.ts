@@ -52,7 +52,8 @@ export async function writeCatalog(file: string, data: string): Promise<void> {
 }
 
 /** The caller holds the file lock. Only a content failure is eligible for recovery. */
-export async function readCatalog<T>(file: string, parse: (text: string) => T): Promise<T | undefined> {
+export async function readCatalog<T>(file: string, parse: (text: string) => T,
+  snapshotData = (_parsed: T, original: string) => original): Promise<T | undefined> {
   let id: string;
   try { id = await identity(file); }
   catch (error) {
@@ -79,7 +80,8 @@ export async function readCatalog<T>(file: string, parse: (text: string) => T): 
 
   if (parsed !== undefined) {
     if (id) {
-      const snapshot = JSON.stringify({ id, data: text, checksum: checksum(id, text) });
+      const data = snapshotData(parsed, text);
+      const snapshot = JSON.stringify({ id, data, checksum: checksum(id, data) });
       let saved: string | undefined;
       try { await identity(file + '.bak'); saved = await fs.readFile(file + '.bak', 'utf8'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -107,6 +109,6 @@ export async function readCatalog<T>(file: string, parse: (text: string) => T): 
     throw new Error('Catalog changed during recovery; retry startup.');
   }
   await replace(file + '.damaged-' + randomUUID(), original);
-  await writeCatalog(file, data);
+  await writeCatalog(file, snapshotData(recovered, data));
   return recovered;
 }

@@ -60,11 +60,7 @@ describe('SshExecutor', () => {
     port: 22,
   }
 
-  const keyMachine: ResolvedMachine = {
-    host: '192.0.2.11',
-    user: 'admin',
-    port: 22,
-  }
+  const keyMachine: ResolvedMachine = { host: 'build-alias', user: 'admin' }
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -95,8 +91,6 @@ describe('SshExecutor', () => {
       expect(result).toBe('hello world\n')
     })
 
-
-
     it('should use plain ssh for key-based auth', async () => {
       mockSpawn.mockReturnValue(createMockProcess(0, 'key output\n'))
 
@@ -104,7 +98,9 @@ describe('SshExecutor', () => {
 
       expect(mockSpawn.mock.calls[0][0]).toBe('ssh')
       const args = mockSpawn.mock.calls[0][1]
-      expect(args).toContain('admin@192.0.2.11')
+      expect(args).toContain('admin@build-alias')
+      expect(args).not.toContain('-p')
+      expect(args.find((a: string) => a.includes('ProxyCommand'))).toBeUndefined()
       expect(args[args.length - 1]).toBe('whoami')
     })
 

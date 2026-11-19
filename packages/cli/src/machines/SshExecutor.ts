@@ -4,25 +4,15 @@ import type { ResolvedMachine } from './types'
 const DEFAULT_TIMEOUT = 30_000
 const MAX_OUTPUT_SIZE = 1024 * 1024 // 1MB
 
-/**
- * SSH command executor
- * Supports direct key and password authentication:
- * - Password mode: sshpass -p <password> ssh user@host
- */
 export class SshExecutor {
-  /**
-   * Build SSH command and args for a machine
-   * Returns { command, args } where command is either 'ssh' or 'sshpass' (password)
-   */
   private buildSshCommand(machine: ResolvedMachine): { command: string; args: string[] } {
     const sshOptions = [
-      '-p', String(machine.port),
+      ...(machine.port === undefined ? [] : ['-p', String(machine.port)]),
       '-o', 'StrictHostKeyChecking=no',
       '-o', 'UserKnownHostsFile=/dev/null',
       '-o', 'LogLevel=ERROR',
       '-o', 'ConnectTimeout=10',
     ]
-
 
     if (machine.password) {
       // Password mode: use sshpass (no BatchMode, sshpass handles password)
@@ -32,7 +22,7 @@ export class SshExecutor {
       }
     }
 
-    // Key-based auth (no password)
+    // Key-based authentication
     sshOptions.push('-o', 'BatchMode=yes')
     return {
       command: 'ssh',

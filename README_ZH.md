@@ -2012,18 +2012,20 @@ Cards remain bound to their original user, device, thread and settings revision,
 
 ### 远程机器管理（Machine）
 
-通过 `remote-cli` 代理控制远程服务器或 Docker。
+通过 CLI 设备上的 SSH 管理远程服务器和 Docker 容器。
 
 | 命令 | 说明 |
 |---------|-------------|
 | `/machines` | 列出已配置的所有远程机器 |
-| `/machine add` | 添加远程机器 (SSH) |
+| `/machine add <id> <user> [password] [--destination <host-or-alias>] [--port N]` | 添加或更新 SSH 目标 |
 | `/containers <ID>`| 列出指定机器上的 Docker 容器 |
 | `/search <ID> <路径>`| 在远程机器/容器中搜索文件 |
 | `/view <ID> <路径>` | 查看远程文件内容 |
 | `/replace <ID> <路径>`| 替换远程文件（自动备份） |
 | `/backups <ID>` | 查看文件备份记录 |
 | `/restore <ID>` | 从备份恢复文件 |
+
+连接目标默认为机器 ID。使用 SSH 配置别名时，沿用 SSH 配置中的端口，也可通过 `--port` 指定端口。用 `/machine show <id>` 查看配置，用 `/machine remove <id>` 删除。如果旧记录提示需要指定目标，请先核实主机或别名，再用相同 ID 重新执行 `/machine add`。
 
 ### AI CLI 命令透传
 

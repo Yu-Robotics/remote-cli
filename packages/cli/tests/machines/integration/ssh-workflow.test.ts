@@ -41,30 +41,30 @@ describe('Integration: SSH Workflow', () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('should support full workflow: add machine → search → view → replace → backup → restore', async () => {
-    // Step 2: Add a machine (just id + user, host auto-derived)
+  it('manages a direct SSH alias through the complete host workflow', async () => {
     const addResult = await commands.addMachine('test-node', 'operator')
     expect(addResult.success).toBe(true)
-    expect(addResult.output).toContain('test-node')
+    expect(addResult.output).toContain('operator@test-node')
 
     // Verify machine persisted by reloading config
     const freshConfig = await ConfigManager.initialize()
     const machine = freshConfig.get('machines.test-node') as MachineConfig
     expect(machine).toBeDefined()
     expect(machine.user).toBe('operator')
-    expect(machine.port).toBe(22)
+    expect(machine.destination).toBe('test-node')
+    expect(machine.port).toBeUndefined()
 
     // Step 3: List machines
     const listResult = await commands.listMachines()
     expect(listResult.success).toBe(true)
     expect(listResult.output).toContain('test-node')
-    expect(listResult.output).toContain('test-node')
 
-    // Step 4: Show machine
+    // Inspect the direct SSH destination.
     const showResult = commands.showMachine('test-node')
     expect(showResult.success).toBe(true)
-    expect(showResult.output).toContain('test-node')
+    expect(showResult.output).toContain('Host: test-node')
     expect(showResult.output).toContain('operator')
+    expect(showResult.output).toContain('Connection: SSH')
 
     // Step 5: List containers
     mockSsh.execRemote.mockResolvedValueOnce(

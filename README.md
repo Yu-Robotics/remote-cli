@@ -2053,18 +2053,20 @@ Cards remain bound to their original user, device, thread and settings revision,
 
 ### Remote Machine Management
 
-Control remote servers or Docker through `remote-cli` proxies.
+Control remote servers and Docker containers using SSH from the CLI device.
 
 | Command | Description |
 |---------|-------------|
 | `/machines` | List all configured remote machines |
-| `/machine add` | Add a new remote machine (SSH) |
+| `/machine add <id> <user> [password] [--destination <host-or-alias>] [--port N]` | Register or update an SSH destination |
 | `/containers <ID>`| List Docker containers on a specific machine |
 | `/search <ID> <path>`| Search files on a remote machine/container |
 | `/view <ID> <path>` | View remote file content |
 | `/replace <ID> <path>`| Replace a remote file (with automatic backup) |
 | `/backups <ID>` | View file backup history |
 | `/restore <ID>` | Restore a file from backup |
+
+The destination defaults to the machine ID. An SSH config alias uses the port from your SSH configuration unless you specify `--port`. Use `/machine show <id>` to check a machine or `/machine remove <id>` to remove it. If an older record needs a destination, confirm the intended host or alias and run `/machine add` again with the same ID.
 
 ### AI CLI Commands Passthrough
 

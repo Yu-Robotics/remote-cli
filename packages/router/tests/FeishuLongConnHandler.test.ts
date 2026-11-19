@@ -2448,6 +2448,19 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleMessageEvent', () => {
+    it('rejects retired machine commands before logging or forwarding their arguments', async () => {
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+      const route = vi.spyOn(handler as any, 'handleCommand');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (handler as any).handleMessageEvent({ sender: { sender_id: { open_id: 'owner' } },
+          message: { message_id: 'retired', message_type: 'text', content: JSON.stringify({ text: '/proxy set obsolete-argument' }) } });
+        expect(reply).toHaveBeenCalledWith('retired', expect.stringContaining('direct SSH destination'));
+        expect(route).not.toHaveBeenCalled();
+        expect(JSON.stringify(log.mock.calls)).not.toContain('obsolete-argument');
+      } finally { log.mockRestore(); }
+    });
+
     it('uploads generated images for card rendering', async () => {
       mockClient.im.image.create.mockResolvedValue({ image_key: 'img_generated_123' });
 

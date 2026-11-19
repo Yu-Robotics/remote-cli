@@ -41,6 +41,41 @@ describe('MachineCommands', () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
+  it.each([false, true])('requires an explicit destination for legacy machines (custom settings: %s)', async custom => {
+    const disk = config.getConfigFile()
+    const saved = JSON.parse(await fs.readFile(disk, 'utf8'))
+    saved.machines = { node: { user: 'operator', port: 22 } }
+    if (custom) {
+      saved.remote = { proxy: { auth: 'retired-fixture' }, hostSuffix: 'example.invalid' }
+      saved.machines.node.destination = 'ignored-by-older-client'
+    }
+    await fs.writeFile(disk, JSON.stringify(saved))
+    config = await ConfigManager.initialize()
+    commands = new MachineCommands(config, mockSsh, backupStore)
+    expect((await commands.listMachines()).output).toContain('/machine add node')
+    expect(commands.showMachine('node').success).toBe(false)
+    expect((await commands.listContainers('node')).error).toContain('--destination')
+    expect(commands.initiateReplace('node', 'notes.txt').success).toBe(false)
+    expect(mockSsh.execRemote).not.toHaveBeenCalled()
+    expect(config.get('remote')).toBeUndefined()
+    expect(await fs.readFile(disk + '.bak', 'utf8')).not.toContain('retired-fixture')
+    await config.set('service.running', false)
+    for (const file of [disk, disk + '.bak']) {
+      expect(await fs.readFile(file, 'utf8')).not.toContain('retired-fixture')
+    }
+    await commands.addMachine('node', 'operator', undefined, undefined, 'verified-alias')
+    expect((await commands.listContainers('node')).success).toBe(true)
+    expect(mockSsh.execRemote.mock.calls[0][0]).toEqual({ host: 'verified-alias', user: 'operator' })
+  })
+
+  it('preserves a machine whose old configuration explicitly selected direct SSH', async () => {
+    const saved = { ...config.getConfig(), remote: { hostSuffix: '' }, machines: { build: { user: 'operator', port: 2222 } } }
+    await config.importConfig(JSON.stringify(saved))
+    expect((await commands.listContainers('build')).success).toBe(true)
+    expect(mockSsh.execRemote.mock.calls[0][0]).toEqual({ host: 'build', user: 'operator', port: 2222 })
+    expect((await ConfigManager.initialize()).get('machines.build.destination')).toBe('build')
+  })
+
   describe('listMachines', () => {
     it('should return no machines message when empty', async () => {
       const result = await commands.listMachines()
@@ -48,18 +83,10 @@ describe('MachineCommands', () => {
       expect(result.output).toContain('No machines configured')
     })
 
-    it('should list configured machines with host', async () => {
-      await config.set('machines.test-node', {
-        user: 'operator', port: 22,
-      })
-
-      const result = await commands.listMachines()
-      expect(result.success).toBe(true)
-      expect(result.output).toContain('test-node')
-      expect(result.output).toContain('test-node')
-      expect(result.output).toContain('operator')
+    it('lists the configured destination and login', async () => {
+      await commands.addMachine('node', 'operator', undefined, 2222, 'build-alias')
+      expect((await commands.listMachines()).output).toContain('node | build-alias:2222 | operator')
     })
-
   })
 
   describe('addMachine', () => {
@@ -73,7 +100,8 @@ describe('MachineCommands', () => {
       const machine = freshConfig.get('machines.prod') as MachineConfig
       expect(machine.user).toBe('admin')
       expect(machine.password).toBe('pass123')
-      expect(machine.port).toBe(22)
+      expect(machine.port).toBeUndefined()
+      expect(machine.destination).toBe('prod')
     })
 
     it('should add machine without password (key-based auth)', async () => {
@@ -95,6 +123,16 @@ describe('MachineCommands', () => {
       expect(machine.port).toBe(2222)
     })
 
+    it('stores dotted IDs as literal keys and removes them independently', async () => {
+      await commands.addMachine('build.example', 'operator', undefined, undefined, 'builder')
+      await commands.addMachine('build', 'operator')
+      expect(await commands.listContainers('build.example')).toMatchObject({ success: true })
+      expect(mockSsh.execRemote.mock.calls[0][0]).toEqual({ host: 'builder', user: 'operator' })
+      expect((await commands.removeMachine('build.example')).success).toBe(true)
+      expect((await ConfigManager.initialize()).get('machines')).toEqual({
+        build: { destination: 'build', user: 'operator' },
+      })
+    })
 
     it('should reject invalid machine id', async () => {
       const result = await commands.addMachine('bad;id', 'admin', 'pass')
@@ -123,8 +161,9 @@ describe('MachineCommands', () => {
   })
 
   describe('showMachine', () => {
-    it('should show machine with masked password', async () => {
+    it('shows the direct destination and masks the password', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'secret', port: 22,
       })
 
@@ -133,8 +172,8 @@ describe('MachineCommands', () => {
       expect(result.output).toContain('admin')
       expect(result.output).toContain('******')
       expect(result.output).not.toContain('secret')
+      expect(result.output).toContain('Connection: SSH')
     })
-
 
     it('should return error for unknown machine', () => {
       const result = commands.showMachine('ghost')
@@ -145,6 +184,7 @@ describe('MachineCommands', () => {
   describe('listContainers', () => {
     it('should list containers from remote machine', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.execRemote.mockResolvedValue('abc123\tweb\tUp 2 hours\tnginx:latest\n')
@@ -161,6 +201,7 @@ describe('MachineCommands', () => {
 
     it('should handle no containers', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.execRemote.mockResolvedValue('')
@@ -179,6 +220,7 @@ describe('MachineCommands', () => {
   describe('searchFiles', () => {
     it('should search files on host', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.execRemote.mockResolvedValue('/app/main.py\n/app/utils.py\n')
@@ -191,6 +233,7 @@ describe('MachineCommands', () => {
 
     it('should search in container', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.execInContainer.mockResolvedValue('/app/test.py\n')
@@ -203,6 +246,7 @@ describe('MachineCommands', () => {
 
     it('should truncate results beyond 200', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       const manyFiles = Array.from({ length: 250 }, (_, i) => `/app/file${i}.py`).join('\n')
@@ -223,6 +267,7 @@ describe('MachineCommands', () => {
   describe('viewFile', () => {
     it('should view file on host', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.readRemoteFile.mockResolvedValue('print("hello")\n')
@@ -237,6 +282,7 @@ describe('MachineCommands', () => {
 
     it('should view file in container', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.readContainerFile.mockResolvedValue('config_value = 1\n')
@@ -251,6 +297,7 @@ describe('MachineCommands', () => {
 
     it('should respect custom line count', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
 
@@ -264,6 +311,7 @@ describe('MachineCommands', () => {
   describe('initiateReplace', () => {
     it('should return pending state for valid request', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
 
@@ -282,6 +330,7 @@ describe('MachineCommands', () => {
 
     it('should reject unsafe file paths', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', port: 22,
       })
       const result = commands.initiateReplace('prod', '/app/$(evil)')
@@ -292,6 +341,7 @@ describe('MachineCommands', () => {
   describe('executeReplace', () => {
     it('should backup and replace file on host', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
 
@@ -328,6 +378,7 @@ describe('MachineCommands', () => {
 
     it('should handle replace failure', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.writeRemoteFile.mockRejectedValue(new Error('Permission denied'))
@@ -393,6 +444,7 @@ describe('MachineCommands', () => {
   describe('restoreBackup', () => {
     it('should restore file on host', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
 
@@ -412,6 +464,7 @@ describe('MachineCommands', () => {
 
     it('should restore into container', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
 
@@ -432,6 +485,7 @@ describe('MachineCommands', () => {
 
     it('should handle restore failure', async () => {
       await config.set('machines.prod', {
+        destination: 'prod',
         user: 'admin', password: 'pass', port: 22,
       })
       mockSsh.execRemote.mockRejectedValue(new Error('File not found'))

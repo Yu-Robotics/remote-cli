@@ -207,8 +207,6 @@ export interface Config {
   sessionSharing?: SessionSharingConfig;
   /** Remote machine configurations */
   machines?: Record<string, any>;
-  /** Remote proxy/host configuration */
-  remote?: any;
 }
 
 /**

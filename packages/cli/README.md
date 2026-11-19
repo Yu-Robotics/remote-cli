@@ -701,6 +701,8 @@ existing thread-scoped `/delegation reset [backend]` command when idle.
 | `/search/view/replace` | Remote file operations |
 | `/backups/restore` | Manage remote file backups |
 
+Register a host or SSH config alias with `/machine add <id> <user> [password] [--destination <host-or-alias>] [--port N]`. The destination defaults to the ID and SSH chooses the port unless overridden. If an older record needs a destination, confirm the intended host or alias and re-add it with the same ID.
+
 ### AI CLI Commands Passthrough
 
 Backend-specific commands are forwarded only where the active backend supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends. On Pi, `/context` includes official RPC session totals and current context-window usage, and automatic provider retries are shown as progress without changing the final model response.

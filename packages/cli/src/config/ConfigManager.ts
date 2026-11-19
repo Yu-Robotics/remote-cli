@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { Config, DEFAULT_CONFIG } from '../types/config';
+import type { MachineConfig } from '../machines/types';
 import { DamagedCatalog, readCatalog, withCatalogLock, writeCatalog } from './CatalogFile';
 
 /**
@@ -37,15 +38,16 @@ export class ConfigManager {
     }
 
     return withCatalogLock(configFile, async () => {
-      const loaded = await readCatalog(configFile, ConfigManager.parse);
+      const loaded = await readCatalog(configFile, ConfigManager.parse,
+        (parsed, original) => parsed.changed ? JSON.stringify(parsed.config, null, 2) : original);
       const config = loaded?.config ?? structuredClone(DEFAULT_CONFIG);
       if (!loaded) await writeCatalog(configFile, JSON.stringify(config, null, 2));
       else if (loaded.changed) {
         try {
           await writeCatalog(configFile, JSON.stringify(config, null, 2));
           for (const warning of loaded.warnings) console.warn(warning);
-        } catch (error) {
-          console.warn('[Config] Failed to persist executor configuration migration:', error instanceof Error ? error.message : error);
+        } catch {
+          console.warn('[Config] Failed to persist configuration migration.');
         }
       }
       return new ConfigManager(config, configDir, configFile);
@@ -58,7 +60,26 @@ export class ConfigManager {
     const migration = ConfigManager.migrateDeprecatedExecutorConfig(raw);
     const config = ConfigManager.mergeWithDefaults(migration.config);
     if (!ConfigManager.isValidConfig(config)) throw new DamagedCatalog('Invalid configuration.');
-    return { ...migration, config };
+    const removed = ConfigManager.stripMachineRouting(config);
+    return { ...migration, config, changed: migration.changed || removed };
+  }
+
+  private static stripMachineRouting(config: Config): boolean {
+    const legacy = config as Config & { remote?: Record<string, unknown> };
+    const remote = legacy.remote;
+    if (!remote || typeof remote !== 'object') return false;
+    if (!Object.hasOwn(remote, 'proxy') && !Object.hasOwn(remote, 'hostSuffix')) return false;
+    // Only an explicit direct configuration established the ID itself as the old host.
+    const wasDirect = remote.hostSuffix === '' && !Object.hasOwn(remote, 'proxy');
+    for (const [id, machine] of Object.entries(config.machines ?? {})) {
+      if (!machine || typeof machine !== 'object' || typeof machine.user !== 'string') continue;
+      if (wasDirect) machine.destination = id;
+      else delete machine.destination;
+    }
+    delete remote.proxy;
+    delete remote.hostSuffix;
+    if (Object.keys(remote).length === 0) delete legacy.remote;
+    return true;
   }
 
   /** Migrate executor settings whose implementations have been removed. */
@@ -191,9 +212,11 @@ export class ConfigManager {
       try { current = ConfigManager.parse(content).config; }
       catch { throw new Error('Invalid configuration; shared-symlink policy was not overwritten.'); }
       const next = update(current);
+      ConfigManager.stripMachineRouting(next);
       await writeCatalog(this.configFile, JSON.stringify(next, null, 2));
       // An unrelated write must not hot-switch an active client's identity or policy.
       this.config = update(this.getConfig());
+      ConfigManager.stripMachineRouting(this.config);
     });
   }
 
@@ -373,5 +396,15 @@ export class ConfigManager {
    */
   getAll(): Config {
     return this.getConfig();
+  }
+
+  /** Machine IDs are literal keys, including dotted hostnames. */
+  async updateMachine(id: string, machine: MachineConfig | undefined): Promise<void> {
+    await this.saveConfig(config => {
+      const machines = { ...config.machines, [id]: machine };
+      if (machine === undefined) delete machines[id];
+      config.machines = machines;
+      return config;
+    });
   }
 }

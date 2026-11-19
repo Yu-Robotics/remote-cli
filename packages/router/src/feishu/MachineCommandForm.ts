@@ -11,7 +11,8 @@ const path = /^[A-Za-z0-9_./~-]+$/;
 const fields = {
   machine: { label: 'Machine ID', pattern: id },
   user: { label: 'SSH user' },
-  ssh_port: { label: 'SSH port (optional, default 22)', optional: true, max: 65535, flag: '--port' },
+  ssh_destination: { label: 'SSH destination (optional, defaults to machine ID)', optional: true, flag: '--destination' },
+  ssh_port: { label: 'SSH port (optional, uses SSH settings)', optional: true, max: 65535, flag: '--port' },
   search_path: { label: 'Search directory', pattern: path },
   pattern: { label: 'Filename pattern' },
   file: { label: 'File path', pattern: path },

@@ -20,6 +20,7 @@ describe('Machine command forms', () => {
   it.each([
     ['/machine add', { machine: 'dev', user: 'builder' }, '/machine add dev builder'],
     ['/machine add', { machine: 'dev', user: 'builder', ssh_port: '2222' }, '/machine add dev builder --port 2222'],
+    ['/machine add', { machine: 'dev', user: 'builder', ssh_destination: 'build-alias' }, '/machine add dev builder --destination build-alias'],
     ['/view', { machine: 'dev', file: 'notes.txt', lines: '', container: '' }, '/view dev notes.txt'],
     ['/view', { machine: 'dev', file: 'notes.txt', target: 'host', lines: '500' }, '/view dev notes.txt --host --lines 500'],
     ['/search', { machine: 'dev', search_path: '.', pattern: '*.ts', target: 'container', container: 'build' }, '/search dev . *.ts --container build'],
@@ -39,6 +40,7 @@ describe('Machine command forms', () => {
   it.each([
     ['/machine add', { machine: 'dev', user: 'builder hidden' }],
     ['/machine add', { machine: 'dev', user: 'builder', ssh_port: '65536' }],
+    ['/machine add', { machine: 'dev', user: 'builder', ssh_destination: '--host' }],
     ['/search', { machine: 'dev', search_path: '.', pattern: '*.ts --host' }],
     ['/view', { machine: 'dev', file: '--host' }],
     ['/view', { machine: 'dev', file: 'notes.txt', lines: '501' }],

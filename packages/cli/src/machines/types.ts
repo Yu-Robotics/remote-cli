@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { isIPv6 } from 'net'
 
 /**
  * Safe path pattern - rejects shell injection characters
@@ -12,33 +13,19 @@ const SafePathSchema = z.string().min(1).regex(safePathPattern, {
 const SafeIdSchema = z.string().min(1).regex(/^[a-zA-Z0-9_\-.]+$/, {
   message: 'ID must contain only alphanumeric, underscore, dash, or dot characters',
 })
+const DestinationSchema = z.string().refine(value =>
+  /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value) || isIPv6(value), 'Enter an SSH hostname, IP address or config alias')
+const UserSchema = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.@\\-]*\$?$/, 'Enter an SSH login name')
 
-/**
- * Machine configuration schema (per-machine, simple)
- */
 export const MachineConfigSchema = z.object({
-  user: z.string().min(1),
+  destination: DestinationSchema,
+  user: UserSchema,
   password: z.string().optional(),
-  port: z.number().int().min(1).max(65535).default(22),
+  port: z.number().int().min(1).max(65535).optional(),
 })
 
-/**
- * Machine configuration interface
- */
-export interface MachineConfig {
-  user: string
-  password?: string
-  port: number
-}
-
-/**
- */
-export interface ResolvedMachine {
-  host: string
-  user: string
-  password?: string
-  port: number
-}
+export type MachineConfig = z.infer<typeof MachineConfigSchema>
+export type ResolvedMachine = Omit<MachineConfig, 'destination'> & { host: string }
 
 /**
  * Backup record
@@ -67,12 +54,7 @@ export interface PendingReplace {
 /**
  * Command argument schemas for validation
  */
-export const MachineAddArgsSchema = z.object({
-  id: SafeIdSchema,
-  user: z.string().min(1),
-  password: z.string().optional(),
-  port: z.number().int().min(1).max(65535).default(22),
-})
+export const MachineAddArgsSchema = MachineConfigSchema.extend({ id: SafeIdSchema })
 
 export const SearchArgsSchema = z.object({
   machineId: SafeIdSchema,

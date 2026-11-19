@@ -142,10 +142,7 @@ describe('ConfigManager', () => {
       configManager = await ConfigManager.initialize();
 
       expect(configManager.getConfig().executor?.type).toBe('claude-persistent');
-      expect(warn).toHaveBeenCalledWith(
-        '[Config] Failed to persist executor configuration migration:',
-        'read only'
-      );
+      expect(warn).toHaveBeenCalledWith('[Config] Failed to persist configuration migration.');
       warn.mockRestore();
     });
 

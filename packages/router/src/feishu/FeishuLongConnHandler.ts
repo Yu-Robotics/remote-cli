@@ -292,7 +292,13 @@ export class FeishuLongConnHandler {
         return;
       }
       // Abort must remain responsive while file admission/download is pending.
-      if (this.parseMessageContent(message).trim() !== '/abort') await this.fileAdmissions.get(openId)?.catch(() => {});
+      const commandText = this.parseMessageContent(message).trim();
+      // Reject old client commands before preview logging or backend passthrough.
+      if (/^\/proxy(?:\s|$)/i.test(commandText)) {
+        await this.replyToMessage(messageId, 'Machine proxy settings were removed. Use /machine add with a direct SSH destination.');
+        return;
+      }
+      if (commandText !== '/abort') await this.fileAdmissions.get(openId)?.catch(() => {});
       // The file may have been admitted while this reply was waiting above.
       if (parentId) fileReference = this.onResolveFile?.(openId, parentId);
 

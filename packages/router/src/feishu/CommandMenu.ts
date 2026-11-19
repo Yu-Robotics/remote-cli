@@ -81,7 +81,7 @@ const groups = {
   ],
   Machines: [
     choice('/machines', 'Machines'), choice('/machine show', 'Machine details', ['machine']),
-    choice('/machine add', 'Add machine', ['machine', 'user', 'ssh_port']), choice('/machine remove', 'Remove machine', ['machine']),
+    choice('/machine add', 'Add machine', ['machine', 'user', 'ssh_destination', 'ssh_port']), choice('/machine remove', 'Remove machine', ['machine']),
     choice('/containers', 'Containers', ['machine']), choice('/search', 'Search files', ['machine', 'search_path', 'pattern', 'target', 'container']),
     choice('/view', 'View file', ['machine', 'file', 'target', 'container', 'lines']),
     choice('/replace', 'Replace file', ['machine', 'file', 'target', 'container']),
