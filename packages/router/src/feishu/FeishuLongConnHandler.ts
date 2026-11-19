@@ -107,7 +107,7 @@ export class FeishuLongConnHandler {
   private readonly TOOL_SEPARATOR_PATTERN = /─{20,}/;
   private readonly commandMenus = new Map<string, {
     openId: string; deviceId?: string; threadId?: string; threadName?: string; fence?: SelectionFence;
-    menu: CommandMenu; expires: number; topLevel: boolean;
+    menu: CommandMenu; expires: number; topLevel: boolean; deviceEpochs: Map<string, string>;
   }>();
 
   constructor(config: FeishuLongConnHandlerConfig) {
@@ -762,7 +762,7 @@ export class FeishuLongConnHandler {
    * Handle /device switch <device-id-or-index>
    * Also handles quick switch: /device <device-id-or-index>
    */
-  private async handleDeviceSwitch(openId: string, messageId: string, identifier: string, binding?: any): Promise<void> {
+  private async handleDeviceSwitch(openId: string, messageId: string, identifier: string, binding?: any, expectedEpoch?: string): Promise<void> {
     try {
       // Get binding if not provided
       const userBinding = binding || await this.bindingManager.getUserBinding(openId);
@@ -775,7 +775,8 @@ export class FeishuLongConnHandler {
       const oldDeviceId = userBinding.activeDeviceId;
 
       // Resolve identifier to device ID
-      const deviceId = this.resolveDeviceIdentifier(identifier, userBinding);
+      const deviceId = expectedEpoch !== undefined ? identifier
+        : this.resolveDeviceIdentifier(identifier, userBinding);
 
       if (!deviceId) {
         await this.replyToMessage(
@@ -785,8 +786,10 @@ export class FeishuLongConnHandler {
         return;
       }
 
-      this.onDeviceSwitchIntent?.(openId, deviceId);
-      const result = await this.bindingManager.switchActiveDevice(openId, deviceId);
+      const beginSwitch = () => this.onDeviceSwitchIntent?.(openId, deviceId);
+      if (expectedEpoch === undefined) beginSwitch();
+      const result = expectedEpoch === undefined ? await this.bindingManager.switchActiveDevice(openId, deviceId)
+        : await this.bindingManager.switchActiveDevice(openId, deviceId, expectedEpoch, beginSwitch);
 
       if (!result) {
         await this.replyToMessage(messageId, '❌ Device switch failed');
@@ -804,7 +807,8 @@ export class FeishuLongConnHandler {
 
       await this.replyToMessage(
         messageId,
-        `✅ Switched to device: **${device.deviceName}**\n\nDevice ID: \`${device.deviceId}\``
+        `✅ Switched to device: **${device.deviceName}**\n\nDevice ID: \`${device.deviceId}\`` +
+          (expectedEpoch === undefined ? '' : '\nOpen /skills for this device.')
       );
     } catch (error) {
       console.error('Error switching device:', error);
@@ -815,7 +819,7 @@ export class FeishuLongConnHandler {
   /**
    * Handle /device unbind <device-id-or-index>
    */
-  private async handleDeviceUnbind(openId: string, messageId: string, identifier: string, binding?: any): Promise<void> {
+  private async handleDeviceUnbind(openId: string, messageId: string, identifier: string, binding?: any, expectedEpoch?: string): Promise<void> {
     try {
       // Get binding if not provided
       const userBinding = binding || await this.bindingManager.getUserBinding(openId);
@@ -825,7 +829,8 @@ export class FeishuLongConnHandler {
       }
 
       // Resolve identifier to device ID
-      const deviceId = this.resolveDeviceIdentifier(identifier, userBinding);
+      const deviceId = expectedEpoch !== undefined ? identifier
+        : this.resolveDeviceIdentifier(identifier, userBinding);
 
       if (!deviceId) {
         await this.replyToMessage(
@@ -842,8 +847,9 @@ export class FeishuLongConnHandler {
       }
 
       const wasActive = device.isActive;
-      const result = await this.bindingManager.unbindDevice(openId, deviceId,
-        async id => { await this.onRevokeDevice?.(id); });
+      const revoke = async (id: string) => { await this.onRevokeDevice?.(id); };
+      const result = expectedEpoch === undefined ? await this.bindingManager.unbindDevice(openId, deviceId, revoke)
+        : await this.bindingManager.unbindDevice(openId, deviceId, revoke, expectedEpoch);
 
       if (!result) {
         await this.replyToMessage(messageId, '❌ Failed to unbind device');
@@ -851,6 +857,7 @@ export class FeishuLongConnHandler {
       }
 
       let responseMessage = `✅ Device **${device.deviceName}** has been unbound`;
+      if (expectedEpoch !== undefined) responseMessage += '\nOpen /skills for a fresh device menu.';
 
       // If we unbound the active device, inform about the new active device
       if (wasActive) {
@@ -875,8 +882,9 @@ export class FeishuLongConnHandler {
   private async openCommandMenu(openId: string, messageId?: string, threadId?: string, threadName?: string,
     sourceDeviceId?: string, topLevel = true, eventId?: string): Promise<void> {
     try {
+      const devices = await this.bindingManager.getUserDevices(openId);
       const device = sourceDeviceId
-        ? (await this.bindingManager.getUserDevices(openId)).find(candidate => candidate.deviceId === sourceDeviceId)
+        ? devices.find(candidate => candidate.deviceId === sourceDeviceId)
         : await this.bindingManager.getActiveDevice(openId);
       if (sourceDeviceId && !device) throw new Error('Device binding expired.');
       const deviceId = device?.deviceId;
@@ -886,7 +894,8 @@ export class FeishuLongConnHandler {
         threadId = selected?.threadId;
         threadName = selected?.threadName;
       }
-      const menu = new CommandMenu(device ? device.deviceName + ' / ' + (threadName || threadId || 'default') : 'No device bound');
+      const deviceEpochs = new Map(devices.map(item => [item.deviceId, this.bindingManager.getCardThreadEpoch(openId, item.deviceId)]));
+      const menu = new CommandMenu(device ? device.deviceName + ' / ' + (threadName || threadId || 'default') : 'No device bound', devices);
       const result = await this.client.im.message.create({ params: { receive_id_type: 'open_id' },
         data: { receive_id: openId, msg_type: 'interactive', uuid: eventId || messageId
           ? createHash('sha256').update(JSON.stringify([openId, eventId || messageId])).digest('hex').slice(0, 40) : uuidv4(),
@@ -895,7 +904,7 @@ export class FeishuLongConnHandler {
       if (result.code || !cardId) throw new Error('Menu delivery failed.');
       if (this.commandMenus.has(cardId)) return;
       if (this.commandMenus.size >= 1000) this.commandMenus.delete(this.commandMenus.keys().next().value!);
-      this.commandMenus.set(cardId, { openId, deviceId, threadId, threadName, fence, menu, topLevel, expires: Date.now() + 3_600_000 });
+      this.commandMenus.set(cardId, { openId, deviceId, threadId, threadName, fence, menu, topLevel, deviceEpochs, expires: Date.now() + 3_600_000 });
     } catch {
       const fallback = 'Could not open the command menu. Use /help for commands or /skills list for backend skills.';
       if (messageId) await this.replyToMessage(messageId, fallback);
@@ -912,8 +921,17 @@ export class FeishuLongConnHandler {
         data: { content: JSON.stringify({ schema: '2.0', header: commandMenuHeader, body: { elements } }) } });
       if (result.code) throw new Error('Menu update failed.');
     }, async content => {
-      const [command] = content.split(/\s+/);
+      const [command, operation, target] = content.split(/\s+/);
       if (state.fence && !this.onValidateSelection?.(state.fence)) throw new Error('Selection changed. Reopen /skills.');
+      if (command === '/device' && (operation === 'switch' || operation === 'unbind')) {
+        const binding = await this.bindingManager.getUserBinding(openId);
+        const epoch = state.deviceEpochs.get(target);
+        if (!binding || !epoch || this.bindingManager.getCardThreadEpoch(openId, target) !== epoch
+          || !binding.devices.some(device => device.deviceId === target)) throw new Error('Device binding changed. Reopen /skills.');
+        if (operation === 'switch') await this.handleDeviceSwitch(openId, cardId, target, binding, epoch);
+        else await this.handleDeviceUnbind(openId, cardId, target, binding, epoch);
+        return;
+      }
       if (['/bind', '/device', '/unbind', '/tips', '/help'].includes(command)) {
         await this.handleCommand(openId, cardId, content);
         return;

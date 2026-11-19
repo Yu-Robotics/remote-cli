@@ -33,6 +33,26 @@ describe('BindingManager', () => {
     }
   });
 
+  it('rejects queued card operations after the selected device is rebound to the same user', async () => {
+    await bindingManager.bindUser('owner', 'first', 'First');
+    await bindingManager.bindUser('owner', 'second', 'Second');
+    const epoch = bindingManager.getCardThreadEpoch('owner', 'second');
+    expect(epoch).toBeTruthy();
+    const revoke = vi.fn();
+    const beginSwitch = vi.fn();
+    const results = await Promise.all([
+      bindingManager.unbindDevice('owner', 'second'),
+      bindingManager.bindUser('owner', 'second', 'Rebound'),
+      bindingManager.switchActiveDevice('owner', 'second', epoch, beginSwitch),
+      bindingManager.unbindDevice('owner', 'second', revoke, epoch),
+    ]);
+    expect(results.slice(2)).toEqual([false, false]);
+    expect(revoke).not.toHaveBeenCalled();
+    expect(beginSwitch).not.toHaveBeenCalled();
+    expect((await bindingManager.getActiveDevice('owner'))?.deviceId).toBe('first');
+    expect(await bindingManager.getUserDevices('owner')).toHaveLength(2);
+  });
+
   describe('generateBindingCode', () => {
     it('should generate binding code in correct format', async () => {
       const deviceId = 'dev_test_123';

@@ -222,10 +222,12 @@ export class BindingManager {
     });
   }
 
-  async switchActiveDevice(openId: string, deviceId: string): Promise<boolean> {
+  async switchActiveDevice(openId: string, deviceId: string, expectedEpoch?: string, onAdmitted?: () => void): Promise<boolean> {
     return this.mutate(async () => {
+      if (expectedEpoch !== undefined && (!expectedEpoch || this.getCardThreadEpoch(openId, deviceId) !== expectedEpoch)) return false;
       const binding = this.store.getUserBinding(openId);
       if (!binding?.devices.some(device => device.deviceId === deviceId)) return false;
+      onAdmitted?.();
       binding.devices = binding.devices.map(device => ({ ...device, isActive: device.deviceId === deviceId }));
       binding.activeDeviceId = deviceId;
       binding.updatedAt = Date.now();
@@ -235,8 +237,9 @@ export class BindingManager {
   }
 
   async unbindDevice(openId: string, deviceId: string,
-    beforeUnbind?: (deviceId: string) => Promise<void>): Promise<boolean> {
+    beforeUnbind?: (deviceId: string) => Promise<void>, expectedEpoch?: string): Promise<boolean> {
     return this.mutate(async () => {
+      if (expectedEpoch !== undefined && (!expectedEpoch || this.getCardThreadEpoch(openId, deviceId) !== expectedEpoch)) return false;
       const binding = this.store.getUserBinding(openId);
       const deviceIndex = binding?.devices.findIndex(device => device.deviceId === deviceId) ?? -1;
       if (!binding || deviceIndex < 0) return false;

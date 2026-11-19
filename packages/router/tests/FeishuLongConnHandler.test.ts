@@ -62,7 +62,8 @@ describe('FeishuLongConnHandler', () => {
       bindUser: vi.fn(),
       getUserBinding: vi.fn(),
       unbindUser: vi.fn(),
-      getUserDevices: vi.fn(),
+      getUserDevices: vi.fn().mockResolvedValue([]),
+      getCardThreadEpoch: vi.fn().mockReturnValue('binding'),
       switchActiveDevice: vi.fn(),
       getActiveDevice: vi.fn(),
       unbindDevice: vi.fn(),
@@ -3082,7 +3083,7 @@ describe('FeishuLongConnHandler', () => {
       expect(await handler.handleCardAction(chooseGroup)).toMatchObject({ toast: { type: 'info' } });
       await open();
       expect(mockClient.im.message.create.mock.calls[0][0].data.uuid).toBe(mockClient.im.message.create.mock.calls[1][0].data.uuid);
-      expect(await handler.handleCardAction(chooseGroup)).toMatchObject({ toast: { type: 'error' } });
+      expect(await handler.handleCardAction(chooseGroup)).toMatchObject({ toast: { type: 'info', content: expect.stringContaining('refreshed') } });
     });
 
     it('opens /skills for the captured thread and routes a shortcut only for its original owner and card', async () => {

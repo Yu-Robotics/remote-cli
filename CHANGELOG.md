@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.269] - 2026-11-19
+
+### Changed
+- Browse subcommands inside the Feishu command menu. Schedule lists, forms, and nested cleanup actions are reachable from the same shortcut, and Back returns to the previous level.
+- Select bound devices by name and browse worker settings, saved-session controls, and tip subscriptions from the same card.
+- Keep list buttons usable across repeated reads and accept navigation while a previous command is responding. Refresh stale controls without repeating their action.
+
 ## [1.6.268] - 2026-11-19
 
 ### Added

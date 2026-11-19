@@ -533,7 +533,9 @@ Once connected, use these commands in Feishu:
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
 
-In Feishu, send `/skills` to open the command card. Quick access opens controls for directories, models, backends, queues, files, and schedules. Browse the groups for device management, thread controls, and forms for one-time and recurring tasks. Choose **Settings / Installed backend skills** or send `/skills list` for the backend skill list. The Slides entry requires a backend that provides a `/slides` extension.
+In Feishu, send `/skills` to open the command card. Quick access opens controls for directories, models, backends, queues, files, and schedules. Select `/schedule` and then `list` to view schedules, `cron` to fill out a recurring task, or `cleanup` then `review` to inspect legacy schedules. Parent buttons open submenus. Back returns one level. Device, thread, queue, and other multi-part commands follow the same pattern. Choose **Settings / Installed backend skills** or send `/skills list` for the backend skill list. The Slides entry requires a backend that provides a `/slides` extension.
+
+Choose **Devices / Your devices / Switch device** to pick a bound device by name. **Settings / Delegated workers** includes per-backend context reset, **Workspace / Saved sessions** includes browsing and confirmation, and **Help and tips** includes topics and subscription controls. Session operations use the tokens shown by the original session list or confirmation.
 
 A Feishu bot menu that sends `/skills` opens the same card. For an event-based menu, subscribe to `application.bot.menu_v6` and use the event key `skills`. Enable `card.action.trigger` for card controls.
 
