@@ -1309,17 +1309,6 @@ describe('MessageHandler', () => {
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
     });
-
-    it('should handle malformed messages gracefully', async () => {
-      const message = {
-        type: 'command',
-        // Missing messageId and content
-      };
-
-      await ctx.handler.handleMessage(message);
-
-      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
-    });
   });
 
   describe('command shortcuts', () => {
@@ -1330,13 +1319,13 @@ describe('MessageHandler', () => {
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('disabled') }));
     });
 
-    it('should expand /c to continue command', async () => {
+    it.each(['/c', '/continue'])('expands %s to the continuation prompt', async content => {
       ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
 
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/c', timestamp: Date.now() });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content, timestamp: Date.now() });
 
       expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
-        expect.stringContaining('continue'),
+        'Please continue from where we left off',
         expect.any(Object)
       );
     });
@@ -1347,17 +1336,6 @@ describe('MessageHandler', () => {
       expect(ctx.mockThreadPool.getExecutor).not.toHaveBeenCalled();
       expect(mockSpawn).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('disabled') }));
-    });
-
-    it('should expand /continue to full continue command', async () => {
-      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
-
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/continue', timestamp: Date.now() });
-
-      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
-        expect.stringContaining('continue'),
-        expect.any(Object)
-      );
     });
 
     it('should not expand /r in middle of text', async () => {
@@ -1557,14 +1535,6 @@ describe('MessageHandler', () => {
           success: false,
           error: expect.stringContaining('not allowed'),
         })
-      );
-    });
-
-    it('should handle /cd command without directory', async () => {
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/cd', timestamp: Date.now() });
-
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'response', messageId: 'msg-123', success: false })
       );
     });
   });
@@ -1796,7 +1766,7 @@ describe('MessageHandler', () => {
   describe('bare /model (native model catalogs with text fallback presentation)', () => {
     function useBackend(executorConfig: any, threadOverrides: any = {}) {
       ctx.mockConfig.get.mockImplementation((key: string) => key === 'executor' ? executorConfig : undefined);
-      const thread = { id: 'default-thread-id', name: 'default', workingDirectory: '/workspace/example-project',
+      const thread = { id: 'default-thread-id', name: 'default', workingDirectory: ctx.workingDirectory,
         sessionId: null, createdAt: 0, lastActiveAt: 0, ...threadOverrides };
       ctx.mockThreadManager.getThread.mockImplementation((id: string) => id === thread.id ? thread : undefined);
       ctx.mockThreadManager.getDefaultThread.mockReturnValue(thread);
@@ -1813,36 +1783,22 @@ describe('MessageHandler', () => {
       return response;
     }
 
-    it('uses a native Claude catalog and preserves the configured executable for slash passthrough', async () => {
-      useBackend({ type: 'auto', claude: { command: '/opt/example tools/claude' } });
-      const response = await list([{ id: 'sonnet', displayName: 'Sonnet' }]);
-      expect(response.output).toContain('sonnet');
-      const passthrough = vi.spyOn(ctx.handler as any, 'spawnPassthroughCommand').mockResolvedValue(undefined);
-      await (ctx.handler as any).executeSlashCommand('slash-fixture', 'default-thread-id', '/usage', ctx.mockExecutor);
-      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude',
-        ['/usage', '--print'], ctx.mockExecutor, 'claude', { CLAUDECODE: '' });
-      passthrough.mockRestore();
-    });
-
     it('shows the Claude per-backend selection without a model-generated listing', async () => {
-      useBackend(undefined, { models: { claude: 'opus' } });
+      useBackend({ type: 'auto', claude: { command: path.join(ctx.workingDirectory, 'example tools', 'claude') } },
+        { models: { claude: 'opus' } });
       const response = await list([{ id: 'sonnet', displayName: 'Sonnet' }, { id: 'opus', displayName: 'Opus' }]);
       expect(response.success).toBe(true);
-      expect(response.output).toContain('opus');
+      expect(response.output).toContain('Current model: opus');
       expect(response.output).toContain('sonnet');
     });
 
     it('shows AGY model IDs and readable names from the adapter catalog', async () => {
-      useBackend({ type: 'agy' }, { models: { agy: 'gemini-3.1-pro-high' } });
+      useBackend({ type: 'agy', agy: { command: path.join(ctx.workingDirectory, 'example tools', 'agy') } },
+        { models: { agy: 'gemini-3.1-pro-high' } });
       const response = await list([{ id: 'gemini-3.8-flash-high', displayName: 'Gemini Flash' },
         { id: 'gemini-3.1-pro-high', displayName: 'Gemini Pro' }]);
       expect(response.output).toContain('gemini-3.1-pro-high');
       expect(response.output).toContain('Gemini Flash');
-    });
-
-    it('delegates AGY listing to its configured adapter rather than spawning a second listing process', async () => {
-      useBackend({ type: 'agy', agy: { command: '/opt/example tools/agy' } });
-      expect((await list([{ id: 'fixture-model', displayName: 'Fixture model' }])).output).toContain('fixture-model');
     });
 
     it('shows structured Codex models and the saved current selection', async () => {
@@ -2018,27 +1974,6 @@ describe('MessageHandler', () => {
         { streamType: 'tool_use', toolUse: { id: 'fixture-tool' }, messageId: 'commentary-task' },
       ]);
       expect(responseSentBeforeCompletion).toBe(false);
-    });
-
-    it('should send streaming chunks', async () => {
-      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
-        options.onStream?.('chunk 1');
-        options.onStream?.('chunk 2');
-        options.onStream?.('chunk 3');
-        return { success: true, output: 'final output' };
-      });
-
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: 'test command', timestamp: Date.now() });
-
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg-123', chunk: 'chunk 1' })
-      );
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg-123', chunk: 'chunk 2' })
-      );
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg-123', chunk: 'chunk 3' })
-      );
     });
 
     it('should handle streaming errors gracefully', async () => {
@@ -2937,7 +2872,7 @@ describe('MessageHandler', () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-cd-noarg', content: '/cd', timestamp: Date.now() });
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
+        expect.objectContaining({ type: 'response', messageId: 'msg-cd-noarg', success: false, error: expect.stringContaining('Usage') })
       );
     });
   });
@@ -2963,22 +2898,24 @@ describe('MessageHandler', () => {
       return { child, done: p };
     }
 
-    it('should keep spawning claude --print on the default (Claude) backend', async () => {
-      useBackend(undefined);
-      const { child, done } = await runSlash('/doctor');
+    it.each(['default', 'configured'])('runs a Claude slash command using the %s executable', async mode => {
+      const bin = mode === 'default' ? 'claude' : path.join(ctx.workingDirectory, 'example tools', 'claude');
+      useBackend(mode === 'default' ? undefined : { type: 'auto', claude: { command: bin } });
+      const command = mode === 'default' ? '/doctor' : '/usage';
+      const { child, done } = await runSlash(command);
 
       expect(mockSpawn).toHaveBeenCalledWith(
-        'claude',
-        ['/doctor', '--print'],
-        expect.objectContaining({ cwd: ctx.workingDirectory })
+        bin,
+        [command, '--print'],
+        expect.objectContaining({ cwd: ctx.workingDirectory, env: expect.objectContaining({ CLAUDECODE: '' }) })
       );
 
-      child.stdout.emit('data', Buffer.from('doctor output'));
+      child.stdout.emit('data', Buffer.from('fixture output'));
       child.emit('exit', 0);
       await done;
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: true, output: 'doctor output' })
+        expect.objectContaining({ type: 'response', messageId: 'msg-slash', success: true, output: 'fixture output' })
       );
     });
 

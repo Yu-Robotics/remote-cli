@@ -312,6 +312,70 @@ describe('ClaudePersistentExecutor', () => {
       mockChildProcess.emit('close', 0, null);
     });
 
+    it('streams only visible text and reports each redaction in mixed native output', async () => {
+      const onStream = vi.fn();
+      const onRedactedThinking = vi.fn();
+      const onToolUse = vi.fn();
+      const turn = executor.execute('Inspect the file', { onStream, onRedactedThinking, onToolUse });
+      await advanceStartup();
+
+      for (const content of ['encrypted-one', 'encrypted-two']) {
+        emit({ type: 'redacted_thinking', content });
+      }
+      expect(onRedactedThinking).toHaveBeenCalledTimes(2);
+      expect(onStream).not.toHaveBeenCalled();
+      assistant('answer', [
+        { type: 'text', text: 'Reading.' },
+        { type: 'redacted_thinking', redacted_thinking: 'encrypted-block' },
+        { type: 'tool_use', id: 'read', name: 'Read', input: { file_path: 'sample.txt' } },
+        { type: 'redacted_thinking' },
+        { type: 'text', text: 'Finished.' },
+      ]);
+      emit({ type: 'result', subtype: 'success' });
+
+      await expect(turn).resolves.toMatchObject({ success: true });
+      expect(onRedactedThinking.mock.calls).toEqual([[], [], [], []]);
+      expect(onStream.mock.calls).toEqual([['Reading.'], ['Finished.']]);
+      expect(onToolUse.mock.calls).toEqual([[expect.objectContaining({ name: 'Read', input: { file_path: 'sample.txt' } })]]);
+    });
+
+    it('notifies only for redaction content in the turn that registered the callback', async () => {
+      const onRedactedThinking = vi.fn();
+      const first = executor.execute('First turn', { onRedactedThinking });
+      await advanceStartup();
+      emit({ type: 'redacted_thinking' });
+      expect(onRedactedThinking).not.toHaveBeenCalled();
+      emit({ type: 'redacted_thinking', content: 'first-turn' });
+      emit({ type: 'result', subtype: 'success' });
+      await expect(first).resolves.toMatchObject({ success: true });
+      expect(onRedactedThinking).toHaveBeenCalledTimes(1);
+
+      emit({ type: 'redacted_thinking', content: 'late-frame' });
+      const second = executor.execute('Next turn');
+      await vi.advanceTimersByTimeAsync(0);
+      emit({ type: 'redacted_thinking', content: 'second-turn' });
+      assistant('next', [{ type: 'redacted_thinking', redacted_thinking: 'second-block' }]);
+      emit({ type: 'result', subtype: 'success' });
+      await expect(second).resolves.toMatchObject({ success: true });
+      expect(onRedactedThinking).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { kind: 'session', stderr: 'Invalid session error', expected: /Session error occurred.*Invalid session error.*\/clear/s },
+      { kind: 'authentication', stderr: 'authentication failed', expected: /Authentication error.*claude auth login/s },
+      { kind: 'network', stderr: 'network failure', expected: /Network connection error.*internet connection/s },
+      { kind: 'empty stderr', stderr: '', expected: /exited unexpectedly \(code: 7\).*try again.*\/clear/s },
+      { kind: 'at the diagnostic limit', stderr: 'A'.repeat(500), expected: /exited with error \(code: 7\)\s+A{500}$/ },
+      { kind: 'above the diagnostic limit', stderr: 'A'.repeat(500) + 'Z', expected: /exited with error \(code: 7\)\s+A{500}\.\.\.\(truncated\)$/ },
+    ])('rejects a failed process with actionable $kind diagnostics', async ({ stderr, expected }) => {
+      const turn = executor.execute('Run task');
+      await advanceStartup();
+      if (stderr) mockChildProcess.stderr.emit('data', Buffer.from(stderr));
+      mockChildProcess.emit('exit', 7, null);
+      mockChildProcess.emit('close', 7, null);
+      await expect(turn).rejects.toThrow(expected);
+    });
+
     const modelDiagnostics = ['sdk', 'generate_session_title'].map(source => ({ source,
       diagnostic: `[claude-code:unrecognized_model] ${JSON.stringify({ model: 'custom-provider/model', query_source: source })}` }));
 
@@ -645,7 +709,7 @@ describe('ClaudePersistentExecutor', () => {
       mockErrorProcess.emit('close', 1, null);
 
       // The execution should be rejected with a user-friendly error about session not found
-      await expect(executePromise).rejects.toThrow(/Session not found.*start a fresh session/s);
+      await expect(executePromise).rejects.toThrow(/Session not found.*previous session may have expired.*start a fresh session.*\/clear/s);
 
       // Cleanup
       await testExecutor.destroy();

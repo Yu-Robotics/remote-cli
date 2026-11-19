@@ -149,21 +149,12 @@ describe('ThreadExecutorPool', () => {
       expect(mockExecutorFactory.mock.calls[0][6]).toEqual({ speed: null });
       expect(manager.getThread(thread.id)?.speeds?.codex).toBe('priority');
     });
-    it('does not create executor until getExecutor() is called', () => {
+    it('creates one executor on first use and reuses it for the same thread', () => {
+      const id = manager.getDefaultThread().id;
       expect(mockExecutorFactory).not.toHaveBeenCalled();
-    });
-
-    it('creates executor on first getExecutor() call', () => {
-      const defaultThread = manager.getDefaultThread();
-      pool.getExecutor(defaultThread.id);
+      const executor = pool.getExecutor(id);
       expect(mockExecutorFactory).toHaveBeenCalledTimes(1);
-    });
-
-    it('reuses executor on subsequent getExecutor() calls', () => {
-      const defaultThread = manager.getDefaultThread();
-      const e1 = pool.getExecutor(defaultThread.id);
-      const e2 = pool.getExecutor(defaultThread.id);
-      expect(e1).toBe(e2);
+      expect(pool.getExecutor(id)).toBe(executor);
       expect(mockExecutorFactory).toHaveBeenCalledTimes(1);
     });
 
@@ -269,16 +260,24 @@ describe('ThreadExecutorPool', () => {
       expect(executor.destroy).toHaveBeenCalled();
     });
 
-    it('calls deleteThreadData before destroy when executor supports it', async () => {
-      const deleteThreadData = vi.fn().mockResolvedValue(undefined);
-      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ deleteThreadData }));
+    it('awaits default session data deletion before destroying the executor', async () => {
+      let finishDeletion!: () => void;
+      const dataDeleted = new Promise<void>(resolve => { finishDeletion = resolve; });
+      const deleteThreadData = vi.fn(() => dataDeleted);
+      const executor = makeMockExecutor({ deleteThreadData });
+      mockExecutorFactory.mockReturnValueOnce(executor);
+      const thread = await manager.createThread('with-cleanup', tmpDir);
+      pool.getExecutor(thread.id);
 
-      const t = await manager.createThread('with-cleanup', tmpDir);
-      pool.getExecutor(t.id);
-
-      await pool.destroyThread(t.id);
-
-      expect(deleteThreadData).toHaveBeenCalledWith(t.id);
+      const retirement = pool.destroyThread(thread.id);
+      try {
+        await vi.waitFor(() => expect(deleteThreadData).toHaveBeenCalledWith(thread.id));
+        expect(executor.destroy).not.toHaveBeenCalled();
+      } finally {
+        finishDeletion();
+        await retirement;
+      }
+      expect(executor.destroy).toHaveBeenCalledOnce();
     });
 
     it('removes executor from pool after destroy', async () => {
@@ -437,18 +436,6 @@ describe('ThreadExecutorPool', () => {
       expect(manager.getThread(thread.id)?.backend).toBe('claude');
       expect(mockExecutorFactory).not.toHaveBeenCalled();
     });
-
-    it('destroyThread (thread delete) still deletes session data by default', async () => {
-      const deleteThreadData = vi.fn().mockResolvedValue(undefined);
-      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ deleteThreadData }));
-
-      const t = await manager.createThread('delete-keeps-deleting', tmpDir);
-      pool.getExecutor(t.id);
-
-      await pool.destroyThread(t.id);
-
-      expect(deleteThreadData).toHaveBeenCalledWith(t.id);
-    });
   });
 
   describe('error state transitions', () => {
@@ -511,16 +498,6 @@ describe('ThreadExecutorPool', () => {
   });
 
   describe('backend switch', () => {
-    it('destroys all existing executors when backend switches', async () => {
-      const defaultThread = manager.getDefaultThread();
-      const oldExecutor = pool.getExecutor(defaultThread.id);
-
-      const newConfig: ExecutorConfig = { type: 'codex' };
-      await pool.switchBackend(newConfig);
-
-      expect(oldExecutor.destroy).toHaveBeenCalled();
-    });
-
     it('uses new config for executors created after switch', async () => {
       const newConfig: ExecutorConfig = { type: 'agy' };
       await pool.switchBackend(newConfig);
@@ -610,38 +587,6 @@ describe('ThreadExecutorPool', () => {
       );
     });
 
-    it('passes thread.models.agy to the factory on the agy backend', async () => {
-      const t = await manager.createThread('agy-model', tmpDir);
-      await manager.updateThread(t.id, { model: 'opus', models: { agy: 'gemini-3.1-pro-high' } });
-
-      poolFor('agy').getExecutor(t.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'agy' }),
-        tmpDir,
-        t.id,
-        'gemini-3.1-pro-high',
-        undefined
-      );
-    });
-
-    it('passes thread.models.codex to the factory on the codex backend', async () => {
-      const t = await manager.createThread('codex-model', tmpDir);
-      await manager.updateThread(t.id, { models: { codex: 'gpt-5.2-codex' } });
-
-      poolFor('codex').getExecutor(t.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'codex' }),
-        tmpDir,
-        t.id,
-        'gpt-5.2-codex',
-        undefined
-      );
-    });
-
     it('prefers models.claude over the legacy model field', async () => {
       const t = await manager.createThread('claude-model', tmpDir);
       await manager.updateThread(t.id, { model: 'opus', models: { claude: 'sonnet' } });
@@ -658,82 +603,26 @@ describe('ThreadExecutorPool', () => {
       );
     });
 
-    it('passes thread.efforts.codex to the codex factory', async () => {
-      const codexThread = await manager.createThread('codex-effort', tmpDir);
-      await manager.updateThread(codexThread.id, { efforts: { codex: 'high' } });
-
-      poolFor('codex').getExecutor(codexThread.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'codex' }),
-        tmpDir,
-        codexThread.id,
-        undefined,
-        'high'
-      );
-    });
-
-    it('passes thread.efforts.agy to the AGY factory', async () => {
-      const agyThread = await manager.createThread('agy-effort', tmpDir);
-      await manager.updateThread(agyThread.id, { efforts: { agy: 'medium' } });
-
-      poolFor('agy').getExecutor(agyThread.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'agy' }),
-        tmpDir,
-        agyThread.id,
-        undefined,
-        'medium'
-      );
-    });
-
-    it('passes DSH model and effort overrides to the factory', async () => {
-      const thread = await manager.createThread('dsh-settings', tmpDir);
-      await manager.updateThread(thread.id, { models: { dsh: 'opaque-model' }, efforts: { dsh: 'high' } });
-      poolFor('dsh').getExecutor(thread.id);
-      expect(mockExecutorFactory).toHaveBeenCalledWith(expect.anything(),
-        expect.objectContaining({ type: 'dsh' }), tmpDir, thread.id, 'opaque-model', 'high');
-    });
-
-    it('passes Pi model and effort overrides to the factory', async () => {
-      const piThread = await manager.createThread('pi-settings', tmpDir);
-      await manager.updateThread(piThread.id, {
-        models: { pi: 'google/gemini-3-flash' },
-        efforts: { pi: 'high' },
+    it.each([
+      ['agy', 'agy-model', undefined],
+      ['codex', 'codex-model', undefined],
+      ['agy', undefined, 'medium'],
+      ['codex', undefined, 'high'],
+      ['dsh', 'dsh-model', 'high'],
+      ['pi', 'provider/pi-model', 'high'],
+      ['zcode', 'zcode-model', 'max'],
+      ['kimi', 'kimi-model', 'high'],
+      ['opencode', 'provider/opencode-model', 'high'],
+    ] as const)('routes %s settings (model %s, effort %s) without inheriting Claude overrides', async (backend, model, effort) => {
+      const thread = await manager.createThread('backend-settings', tmpDir);
+      await manager.updateThread(thread.id, {
+        model: 'legacy-claude-model',
+        models: { claude: 'claude-model', [backend]: model },
+        efforts: { claude: 'low', [backend]: effort },
       });
-
-      poolFor('pi').getExecutor(piThread.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'pi' }),
-        tmpDir,
-        piThread.id,
-        'google/gemini-3-flash',
-        'high'
-      );
-    });
-
-    it('passes ZCode model and effort overrides to the factory', async () => {
-      const zcodeThread = await manager.createThread('zcode-settings', tmpDir);
-      await manager.updateThread(zcodeThread.id, {
-        models: { zcode: 'GLM-5.3' },
-        efforts: { zcode: 'max' },
-      });
-
-      poolFor('zcode').getExecutor(zcodeThread.id);
-
-      expect(mockExecutorFactory).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ type: 'zcode' }),
-        tmpDir,
-        zcodeThread.id,
-        'GLM-5.3',
-        'max'
-      );
+      pool = poolFor(backend);
+      pool.getExecutor(thread.id);
+      expect(mockExecutorFactory).toHaveBeenCalledWith(directoryGuard, { type: backend }, tmpDir, thread.id, model, effort);
     });
   });
 });

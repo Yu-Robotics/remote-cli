@@ -986,53 +986,30 @@ describe('FeishuLongConnHandler', () => {
       });
     });
 
-    it('should split long content into multiple messages', async () => {
+    const finalElements = (count: number) => Array.from({ length: count }, (_, i) => ({
+      tag: 'markdown', content: `Fixture row ${i}: ${'a'.repeat(400)}`,
+    }));
+
+    it.each([[30, 0], [190, 1]])('delivers all %i final elements once and in order', async (count, continuations) => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_456' } });
+      const elements = finalElements(count);
 
-      // Create a long element list (simulating many tool uses/results)
-      const longElements = [];
-      for (let i = 0; i < 10; i++) {
-        longElements.push({ tag: 'markdown', content: 'a'.repeat(500) });
-      }
-
-      const result = await handler.finalizeStreamingMessage('msg_123', longElements, 'ABC123', 'ou_user_123');
-
-      expect(result).toBe(true);
-      // NOTE: Chunking logic for element-based streaming is not yet implemented
-      // For now, all elements are sent in one message
-      expect(mockClient.im.message.patch).toHaveBeenCalled();
-    });
-
-    it('should handle very long content with multiple chunks', async () => {
-      mockClient.im.message.patch.mockResolvedValue({});
-      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_456' } });
-
-      // Create a very long element list
-      const veryLongElements = [];
-      for (let i = 0; i < 30; i++) {
-        veryLongElements.push({ tag: 'markdown', content: 'a'.repeat(400) });
-      }
-
-      const result = await handler.finalizeStreamingMessage('msg_123', veryLongElements, undefined, 'ou_user_123');
-
-      expect(result).toBe(true);
-      // NOTE: Chunking logic not yet implemented
+      expect(await handler.finalizeStreamingMessage('msg_123', elements, 'ABC123', 'ou_user_123')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(continuations);
+      const requests = [...mockClient.im.message.patch.mock.calls, ...mockClient.im.message.create.mock.calls];
+      const delivered = requests.flatMap(([request]) => JSON.parse(request.data.content).body.elements);
+      expect(delivered.filter(element => element.content?.startsWith('Fixture row '))).toEqual(elements);
+      for (const [request] of mockClient.im.message.create.mock.calls) {
+        expect(request.data.receive_id).toBe('ou_user_123');
+      }
     });
 
-    it('should not create continuation message without openId', async () => {
+    it('does not send an overflow card without a recipient', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
-
-      const longElements = [];
-      for (let i = 0; i < 10; i++) {
-        longElements.push({ tag: 'markdown', content: 'a'.repeat(500) });
-      }
-
-      const result = await handler.finalizeStreamingMessage('msg_123', longElements);
-
-      expect(result).toBe(true);
-      expect(mockClient.im.message.patch).toHaveBeenCalled();
+      expect(await handler.finalizeStreamingMessage('msg_123', finalElements(190))).toBe(true);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
     });
 
@@ -1044,10 +1021,11 @@ describe('FeishuLongConnHandler', () => {
       expect(result).toBe(false);
     });
 
-    it('should return false if updated is false', async () => {
-      vi.spyOn(handler as any, '_updateStreamingMessage').mockResolvedValue(false);
-      const result = await handler.finalizeStreamingMessage('msg_123', [], 'ABC', 'ou_1');
-      expect(result).toBe(false);
+    it('reports incomplete finalization when the continuation has no message receipt', async () => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      mockClient.im.message.create.mockResolvedValue({ data: {} });
+      expect(await handler.finalizeStreamingMessage('msg_123', finalElements(190), 'ABC', 'ou_1')).toBe(false);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(1);
     });
   });
 

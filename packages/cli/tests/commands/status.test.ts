@@ -19,7 +19,7 @@ describe('status command', () => {
       has: vi.fn(() => true),
       getAll: vi.fn(() => ({
         deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
+        serverUrl: 'https://router.example.com',
         openId: 'ou_test_user_123',
         security: {
           allowedDirectories: ['~/projects', '~/work'],
@@ -50,7 +50,7 @@ describe('status command', () => {
       expect(result.success).toBe(true);
       expect(result.status).toBeDefined();
       expect(result.status.deviceId).toBe('dev_test_12345');
-      expect(result.status.serverUrl).toBe('https://test-server.com');
+      expect(result.status.serverUrl).toBe('https://router.example.com');
       expect(result.status.connected).toBe(true);
       expect(result.status.running).toBe(true);
       expect(result.status.bound).toBe(true);
@@ -64,7 +64,7 @@ describe('status command', () => {
     it('should detect unbound device', async () => {
       mockConfig.getAll.mockReturnValue({
         deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
+        serverUrl: 'https://router.example.com',
         security: {
           allowedDirectories: ['~/projects'],
         },
@@ -81,40 +81,19 @@ describe('status command', () => {
   });
 
   describe('service not running', () => {
-    it('should detect service stopped', async () => {
-      mockConfig.getAll.mockReturnValue({
-        deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
-        security: {
-          allowedDirectories: ['~/projects'],
-        },
-        service: {
-          running: false,
-        },
-      });
+    it('reports a stopped service as disconnected without probing the socket', async () => {
+      mockConfig.getAll.mockReturnValue({ ...mockConfig.getAll(), service: { running: false } });
 
       const result = await statusCommand();
 
-      expect(result.status.running).toBe(false);
+      expect(result).toMatchObject({ success: true, status: { running: false, connected: false } });
+      expect(WebSocketClient).not.toHaveBeenCalled();
     });
+  });
 
-    it('should show connection as disconnected when service stopped', async () => {
-      mockConfig.getAll.mockReturnValue({
-        deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
-        security: {
-          allowedDirectories: ['~/projects'],
-        },
-        service: {
-          running: false,
-        },
-      });
-      mockWsClient.isConnected.mockReturnValue(false);
-
-      const result = await statusCommand();
-
-      expect(result.status.connected).toBe(false);
-    });
+  it('preserves the running service status when connection inspection fails', async () => {
+    mockWsClient.isConnected.mockImplementation(() => { throw new Error('Socket unavailable'); });
+    expect(await statusCommand()).toMatchObject({ success: true, status: { running: true, connected: false } });
   });
 
   describe('not initialized', () => {

@@ -14,7 +14,6 @@ import { ConnectionHub } from '../../src/websocket/ConnectionHub';
 import { BindingManager } from '../../src/binding/BindingManager';
 import { JsonStore } from '../../src/storage/JsonStore';
 import { MessageType } from '../../src/types';
-import { WebSocket } from 'ws';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -31,7 +30,7 @@ describe('ConcurrentRouting - Integration Tests', () => {
 
   beforeEach(async () => {
     // Create temporary directory for test data
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'router-concurrent-test-'));
+    tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'router-concurrent-test-')));
     const storeFilePath = path.join(tempDir, 'bindings.json');
     store = new JsonStore(storeFilePath, 0);
     await store.initialize(); // Initialize the store
@@ -53,10 +52,7 @@ describe('ConcurrentRouting - Integration Tests', () => {
    */
   function createMockWebSocket(): any {
     return {
-      send: vi.fn((data: string) => {
-        // Simulate async send
-        return Promise.resolve();
-      }),
+      send: vi.fn(),
       close: vi.fn(),
       on: vi.fn(),
       readyState: 1, // OPEN
@@ -70,25 +66,18 @@ describe('ConcurrentRouting - Integration Tests', () => {
    */
   async function setupUserWithDevices(
     openId: string,
-    deviceIds: string[],
-    activeDeviceIndex: number = 0
+    deviceIds: string[]
   ): Promise<{ openId: string; deviceIds: string[]; activeDeviceId: string }> {
     // Bind all devices
     for (let i = 0; i < deviceIds.length; i++) {
       const deviceId = deviceIds[i];
-      const code = await bindingManager.generateBindingCode(deviceId, `Device-${i + 1}`);
       await bindingManager.bindUser(openId, deviceId, `Device-${i + 1}`);
-    }
-
-    // Set active device if not the first one
-    if (activeDeviceIndex > 0) {
-      await bindingManager.switchActiveDevice(openId, deviceIds[activeDeviceIndex]);
     }
 
     return {
       openId,
       deviceIds,
-      activeDeviceId: deviceIds[activeDeviceIndex],
+      activeDeviceId: deviceIds[0],
     };
   }
 
@@ -105,140 +94,31 @@ describe('ConcurrentRouting - Integration Tests', () => {
     return connections;
   }
 
-  describe('Multiple Users - Concurrent Commands', () => {
-    it('should route messages to correct users when multiple users send commands concurrently', async () => {
-      // Setup 3 users with 1 device each
-      const user1 = await setupUserWithDevices('user_001', ['dev_001']);
-      const user2 = await setupUserWithDevices('user_002', ['dev_002']);
-      const user3 = await setupUserWithDevices('user_003', ['dev_003']);
-
-      // Register all device connections
-      const connections = registerDeviceConnections([
-        user1.activeDeviceId,
-        user2.activeDeviceId,
-        user3.activeDeviceId,
-      ]);
-
-      // Send concurrent messages to all devices
-      const message1 = { type: MessageType.COMMAND, messageId: 'msg_001', content: 'cmd1', timestamp: Date.now() };
-      const message2 = { type: MessageType.COMMAND, messageId: 'msg_002', content: 'cmd2', timestamp: Date.now() };
-      const message3 = { type: MessageType.COMMAND, messageId: 'msg_003', content: 'cmd3', timestamp: Date.now() };
-
-      await Promise.all([
-        connectionHub.sendToDevice(user1.activeDeviceId, message1),
-        connectionHub.sendToDevice(user2.activeDeviceId, message2),
-        connectionHub.sendToDevice(user3.activeDeviceId, message3),
-      ]);
-
-      // Verify each device received the correct message
-      const ws1 = connections.get(user1.activeDeviceId);
-      const ws2 = connections.get(user2.activeDeviceId);
-      const ws3 = connections.get(user3.activeDeviceId);
-
-      expect(ws1.send).toHaveBeenCalledWith(JSON.stringify(message1));
-      expect(ws2.send).toHaveBeenCalledWith(JSON.stringify(message2));
-      expect(ws3.send).toHaveBeenCalledWith(JSON.stringify(message3));
-
-      // Verify no cross-contamination
-      expect(ws1.send).toHaveBeenCalledTimes(1);
-      expect(ws2.send).toHaveBeenCalledTimes(1);
-      expect(ws3.send).toHaveBeenCalledTimes(1);
-    });
-
-    it('should handle 10 concurrent users sending commands simultaneously', async () => {
-      const userCount = 10;
-      const users = [];
-      const deviceIds = [];
-
-      // Setup 10 users
-      for (let i = 0; i < userCount; i++) {
-        const userId = `user_${String(i).padStart(3, '0')}`;
-        const deviceId = `dev_${String(i).padStart(3, '0')}`;
-        const user = await setupUserWithDevices(userId, [deviceId]);
-        users.push(user);
-        deviceIds.push(deviceId);
-      }
-
-      // Register all connections
-      const connections = registerDeviceConnections(deviceIds);
-
-      // Send concurrent messages from all users
-      const sendPromises = users.map((user, index) => {
-        const message = {
-          type: MessageType.COMMAND,
-          messageId: `msg_${String(index).padStart(3, '0')}`,
-          content: `command_${index}`,
-          timestamp: Date.now(),
-        };
-        return connectionHub.sendToDevice(user.activeDeviceId, message);
-      });
-
-      const results = await Promise.all(sendPromises);
-
-      // All sends should succeed
-      expect(results.every(result => result === true)).toBe(true);
-
-      // Verify each device received exactly one message
-      for (const [deviceId, ws] of connections) {
-        expect(ws.send).toHaveBeenCalledTimes(1);
-      }
-    });
-  });
 
   describe('Multi-Device User - Concurrent Operations', () => {
     it('should handle concurrent device switching for the same user', async () => {
       // Setup user with 3 devices
       const user = await setupUserWithDevices('user_001', ['dev_001', 'dev_002', 'dev_003']);
 
-      // Register connections
-      registerDeviceConnections(user.deviceIds);
-
-      // Concurrently switch between devices
-      const switches = [
-        bindingManager.switchActiveDevice(user.openId, 'dev_002'),
-        bindingManager.switchActiveDevice(user.openId, 'dev_003'),
-        bindingManager.switchActiveDevice(user.openId, 'dev_001'),
-        bindingManager.switchActiveDevice(user.openId, 'dev_002'),
-      ];
-
-      const results = await Promise.all(switches);
-
-      // All switches should succeed (last one wins)
-      expect(results.every(r => r === true)).toBe(true);
-
-      // Verify final active device is consistent
-      const activeDevice = await bindingManager.getActiveDevice(user.openId);
-      expect(activeDevice).not.toBeNull();
-      expect(user.deviceIds).toContain(activeDevice!.deviceId);
+      const results = await Promise.all(['dev_002', 'dev_003', 'dev_001', 'dev_002'].map(deviceId =>
+        bindingManager.switchActiveDevice(user.openId, deviceId)
+      ));
+      expect(results).toEqual([true, true, true, true]);
+      const binding = await bindingManager.getUserBinding(user.openId);
+      const active = await bindingManager.getActiveDevice(user.openId);
+      expect(user.deviceIds).toContain(active?.deviceId);
+      expect(binding?.devices.filter(device => device.isActive)).toEqual([active]);
     });
 
-    it('should route message to correct device after concurrent switch', async () => {
-      // Setup user with 2 devices
+    it('routes the next command to the selected device after switching', async () => {
       const user = await setupUserWithDevices('user_001', ['dev_001', 'dev_002']);
       const connections = registerDeviceConnections(user.deviceIds);
-
-      // Perform concurrent device switch and message send
-      await Promise.all([
-        bindingManager.switchActiveDevice(user.openId, 'dev_002'),
-        new Promise(resolve => setTimeout(resolve, 5)), // Small delay
-      ]);
-
-      // Send message after switch
-      const activeDevice = await bindingManager.getActiveDevice(user.openId);
-      expect(activeDevice).not.toBeNull();
-
-      const message = {
-        type: MessageType.COMMAND,
-        messageId: 'msg_001',
-        content: 'test',
-        timestamp: Date.now(),
-      };
-
-      await connectionHub.sendToDevice(activeDevice!.deviceId, message);
-
-      // Verify message was sent to active device
-      const activeWs = connections.get(activeDevice!.deviceId);
-      expect(activeWs.send).toHaveBeenCalledWith(JSON.stringify(message));
+      expect(await bindingManager.switchActiveDevice(user.openId, 'dev_002')).toBe(true);
+      const active = await bindingManager.getActiveDevice(user.openId);
+      const message = { type: MessageType.COMMAND, messageId: 'msg_001', content: 'test', timestamp: Date.now() };
+      expect(await connectionHub.sendToDevice(active!.deviceId, message)).toBe(true);
+      expect(connections.get('dev_002').send.mock.calls).toEqual([[JSON.stringify(message)]]);
+      expect(connections.get('dev_001').send).not.toHaveBeenCalled();
     });
 
     it('should handle concurrent unbind and switch operations', async () => {
@@ -264,35 +144,19 @@ describe('ConcurrentRouting - Integration Tests', () => {
   });
 
   describe('Device Reconnection - Race Conditions', () => {
-    it('should handle device reconnection while message is being sent', async () => {
-      const deviceId = 'dev_001';
+    it('directs sends on either side of reconnection to their original sockets', async () => {
       const oldWs = createMockWebSocket();
-      const newWs = createMockWebSocket();
-
-      // Register initial connection
-      connectionHub.registerConnection(deviceId, oldWs);
-
-      // Simulate concurrent message send and reconnection
-      const message = {
-        type: MessageType.COMMAND,
-        messageId: 'msg_001',
-        content: 'test',
-        timestamp: Date.now(),
-      };
-
-      await Promise.all([
-        connectionHub.sendToDevice(deviceId, message),
-        new Promise(resolve => setTimeout(resolve, 1)), // Small delay
-        (async () => {
-          connectionHub.registerConnection(deviceId, newWs);
-        })(),
-      ]);
-
-      // Old connection should be closed
+      const replacement = createMockWebSocket();
+      connectionHub.registerConnection('device', oldWs);
+      const first = { type: MessageType.COMMAND, messageId: 'before', timestamp: Date.now() };
+      const second = { ...first, messageId: 'after' };
+      const pending = connectionHub.sendToDevice('device', first);
+      connectionHub.registerConnection('device', replacement);
+      expect(await pending).toBe(true);
+      expect(await connectionHub.sendToDevice('device', second)).toBe(true);
       expect(oldWs.close).toHaveBeenCalled();
-
-      // Device should still be online
-      expect(connectionHub.isDeviceOnline(deviceId)).toBe(true);
+      expect(oldWs.send.mock.calls).toEqual([[JSON.stringify(first)]]);
+      expect(replacement.send.mock.calls).toEqual([[JSON.stringify(second)]]);
     });
 
     it('should handle rapid reconnections (connection flapping)', async () => {
@@ -319,11 +183,26 @@ describe('ConcurrentRouting - Integration Tests', () => {
   });
 
   describe('Binding Operations - Concurrent Users', () => {
+    it('keeps forward and reverse bindings consistent across a concurrent bind, unbind and switch', async () => {
+      const user = 'user_001';
+      await Promise.all(['dev_001', 'dev_002', 'dev_003'].map(id => bindingManager.bindUser(user, id, id)));
+      const [, removed, switched] = await Promise.all([
+        bindingManager.bindUser(user, 'dev_004', 'Device-4'),
+        bindingManager.unbindDevice(user, 'dev_001'),
+        bindingManager.switchActiveDevice(user, 'dev_002'),
+      ]);
+      expect(removed).toBe(true);
+      expect(switched).toBe(true);
+      const binding = await bindingManager.getUserBinding(user);
+      expect(binding?.devices.map(device => device.deviceId).sort()).toEqual(['dev_002', 'dev_003', 'dev_004']);
+      expect(binding?.activeDeviceId).toBe('dev_002');
+      expect(binding?.devices.filter(device => device.isActive).map(device => device.deviceId)).toEqual(['dev_002']);
+      expect(await bindingManager.getDeviceBinding('dev_001')).toBeNull();
+      expect(await bindingManager.getDeviceBinding('dev_004')).toMatchObject({ openId: user });
+    });
+
     it('should prevent same device from being bound to multiple users simultaneously', async () => {
       const deviceId = 'dev_shared';
-
-      // Generate binding code
-      const code = await bindingManager.generateBindingCode(deviceId, 'Shared Device');
 
       // Bind to the first user (must succeed)
       await bindingManager.bindUser('user_001', deviceId, 'Device-1');
@@ -421,26 +300,23 @@ describe('ConcurrentRouting - Integration Tests', () => {
       const connections = registerDeviceConnections(users.map(u => u.activeDeviceId));
 
       // Send messages concurrently
-      const sendPromises = users.flatMap((user, userIndex) =>
-        Array.from({ length: messagesPerUser }, (_, msgIndex) => {
-          const message = {
-            type: MessageType.COMMAND,
-            messageId: `msg_${userIndex}_${msgIndex}`,
-            content: `command_${userIndex}_${msgIndex}`,
-            timestamp: Date.now(),
-          };
-          return connectionHub.sendToDevice(user.activeDeviceId, message);
-        })
-      );
-
-      const results = await Promise.all(sendPromises);
-
-      // All sends should succeed
-      expect(results.every(r => r === true)).toBe(true);
-
-      // Verify each device received exactly 10 messages
-      for (const [deviceId, ws] of connections) {
-        expect(ws.send).toHaveBeenCalledTimes(messagesPerUser);
+      const batches = users.map((user, userIndex) => ({
+        deviceId: user.activeDeviceId,
+        messages: Array.from({ length: messagesPerUser }, (_, index) => ({
+          type: MessageType.COMMAND,
+          messageId: `msg_${userIndex}_${index}`,
+          content: `command_${userIndex}_${index}`,
+          timestamp: Date.now(),
+        })),
+      }));
+      const delivered = await Promise.all(batches.flatMap(({ deviceId, messages }) =>
+        messages.map(message => connectionHub.sendToDevice(deviceId, message))
+      ));
+      expect(delivered.every(Boolean)).toBe(true);
+      for (const { deviceId, messages } of batches) {
+        const received = connections.get(deviceId).send.mock.calls.map(([body]: [string]) => JSON.parse(body));
+        expect(received).toHaveLength(messages.length);
+        expect(received).toEqual(expect.arrayContaining(messages));
       }
     });
 
@@ -538,26 +414,6 @@ describe('ConcurrentRouting - Integration Tests', () => {
     });
   });
 
-  describe('Device ID Collision Detection', () => {
-    it('should prevent same device ID from being bound to multiple users', async () => {
-      const sharedDeviceId = 'dev_shared_001';
-
-      // Bind device to first user successfully
-      await bindingManager.bindUser('user_001', sharedDeviceId, 'Device-1');
-
-      // Attempt to bind same device to a different user should throw
-      await expect(
-        bindingManager.bindUser('user_002', sharedDeviceId, 'Device-2')
-      ).rejects.toThrow('already bound to another user');
-
-      // Verify only the first user has the device
-      const binding1 = await bindingManager.getUserBinding('user_001');
-      const binding2 = await bindingManager.getUserBinding('user_002');
-
-      expect(binding1!.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
-      expect(binding2).toBeNull();
-    });
-  });
 
   describe('Active Device Selection Under Concurrent Load', () => {
     it('should maintain consistent active device when switching during message floods', async () => {

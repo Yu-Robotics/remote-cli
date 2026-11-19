@@ -48,8 +48,8 @@ describe('native delegation tool adapters', () => {
       stdio: 'pipe',
     });
     let buffer = '';
-    child.stdout.on('data', data => {
-      buffer += data.toString(); let newline: number;
+    child.stdout.setEncoding('utf8').on('data', data => {
+      buffer += data; let newline: number;
       while ((newline = buffer.indexOf('\n')) >= 0) {
         const message = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
         pending.get(message.id)?.(message.result); pending.delete(message.id);
@@ -82,9 +82,9 @@ describe('native delegation tool adapters', () => {
       expect(deleteCleanup).toHaveBeenCalledOnce(); expect(purge).toHaveBeenCalledOnce();
       await scope.close(); return;
     }
-    expect(tools.tools.map((tool: any) => tool.name)).toContain('remote_cli_delegate');
+    expect(tools.tools).toHaveLength(DELEGATION_TOOLS.length);
+    expect(tools.tools).toEqual(expect.arrayContaining([...DELEGATION_TOOLS]));
     const delegate = tools.tools.find((tool: any) => tool.name === 'remote_cli_delegate');
-    expect(delegate.description).toBe(DELEGATION_TOOLS.find(tool => tool.name === 'remote_cli_delegate')!.description);
     expect(delegate.description).toContain('including the coordinator backend');
     expect(delegate.description).toContain('independent sessions, never the coordinator conversation');
     expect(delegate.inputSchema.properties.mode.description).toContain('Sandboxed coordinators cannot launch managed workers');
@@ -113,19 +113,21 @@ describe('native delegation tool adapters', () => {
     vi.stubEnv('REMOTE_CLI_DELEGATION_TOKEN', connection.token);
     const tools: any[] = [];
     registerPiTools({ registerTool: (tool: unknown) => tools.push(tool) });
-    expect(tools).toHaveLength(5);
-    expect(tools.some(tool => tool.name === 'remote_cli_integrate')).toBe(true);
-    expect(tools.find(tool => tool.name === 'remote_cli_delegate').description)
-      .toBe(DELEGATION_TOOLS.find(tool => tool.name === 'remote_cli_delegate')!.description);
-    const result = await tools[0].execute('list', {});
-    expect(JSON.parse(result.content[0].text).marker).toBe('ok');
+    expect(tools).toHaveLength(DELEGATION_TOOLS.length);
+    for (const { name, description, inputSchema } of DELEGATION_TOOLS) {
+      expect(tools.find(tool => tool.name === name)).toMatchObject({ description, parameters: inputSchema });
+    }
+    expect(tools.map(tool => tool.name)).toContain('remote_cli_integrate');
+    const list = tools.find(tool => tool.name === 'remote_cli_list_backends');
+    const result = await list.execute('list', {});
+    expect(JSON.parse(result.content[0].text)).toEqual({ name: 'remote_cli_list_backends', args: {}, marker: 'ok' });
     const controller = new AbortController(); controller.abort();
-    await expect(tools[0].execute('cancelled', {}, controller.signal)).rejects.toThrow();
+    await expect(list.execute('cancelled', {}, controller.signal)).rejects.toThrow();
     const launch = buildPiRpcArgs({ delegation: connection });
     expect(launch.args).toContain('--extension');
     expect(launch.args).not.toContain('--no-builtin-tools');
     retire();
-    await expect(tools[0].execute('expired', {})).rejects.toThrow('No active');
+    await expect(list.execute('expired', {})).rejects.toThrow('No active');
   });
 
   it('registers only scheduling on Pi when delegation is disabled', async () => {
@@ -136,7 +138,8 @@ describe('native delegation tool adapters', () => {
     const tools: any[] = [];
     registerPiTools({ registerTool: tool => tools.push(tool) });
     expect(tools.map(tool => tool.name)).toEqual(SCHEDULE_TOOLS.map(tool => tool.name));
-    const result = await tools[0].execute('capabilities', {});
+    const capabilities = tools.find(tool => tool.name === 'remote_cli_schedule_capabilities');
+    const result = await capabilities.execute('capabilities', {});
     expect(JSON.parse(result.content[0].text)).toMatchObject({ name: 'remote_cli_schedule_capabilities' });
     const run = vi.fn(async () => []);
     const scope = new ScheduleToolOperations().scope({ owner: { threadId: 'original-thread', openId: 'owner', generation: 'current' },

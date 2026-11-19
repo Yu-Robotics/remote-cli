@@ -181,14 +181,6 @@ describe('ConnectionHub', () => {
   });
 
   describe('isDeviceOnline', () => {
-    it('should return true for online device', () => {
-      const deviceId = 'dev_test_001';
-
-      hub.registerConnection(deviceId, mockWs);
-
-      expect(hub.isDeviceOnline(deviceId)).toBe(true);
-    });
-
     it('should return false for offline device', () => {
       expect(hub.isDeviceOnline('offline_device')).toBe(false);
     });

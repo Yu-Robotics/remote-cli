@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
@@ -8,8 +7,6 @@ import { IncomingMessage } from '../../src/types';
 import os from 'os';
 import path from 'path';
 import { promises as fs } from 'fs';
-
-vi.mock('../../src/client/WebSocketClient');
 
 describe('Integration: Message Flow', () => {
   let home: string;
@@ -44,7 +41,6 @@ describe('Integration: Message Flow', () => {
       on: vi.fn(),
       isConnected: vi.fn(() => true),
     };
-    (WebSocketClient as any).mockImplementation(() => wsClient);
 
     executor = {
       execute: vi.fn(),
@@ -167,13 +163,10 @@ describe('Integration: Message Flow', () => {
       expect(await fs.readFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'utf8')).toBe('synthetic unknown owner');
     });
 
-    it('should handle command with streaming progress', async () => {
+    it('delivers each text chunk in order before the terminal response for the same command and thread', async () => {
+      const chunks = ['Starting code analysis...', 'Fixing errors...', 'Running tests...'];
       executor.execute.mockImplementationOnce(async (_content: string, options: any) => {
-        options.onStream?.('Starting code analysis...');
-        await new Promise((r) => setTimeout(r, 10));
-        options.onStream?.('Fixing errors...');
-        await new Promise((r) => setTimeout(r, 10));
-        options.onStream?.('Running tests...');
+        for (const chunk of chunks) options.onStream(chunk);
         return { success: true, output: 'All tests passed' };
       });
 
@@ -187,18 +180,13 @@ describe('Integration: Message Flow', () => {
 
       await handler.handleMessage(message);
 
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Starting code analysis...' })
-      );
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Fixing errors...' })
-      );
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Running tests...' })
-      );
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'response', messageId: 'msg_003', success: true })
-      );
+      const frames = wsClient.send.mock.calls.map(([frame]) => frame)
+        .filter(frame => frame.type === 'response' || frame.streamType === 'text');
+      const route = { messageId: message.messageId, threadId: 'default-id' };
+      expect(frames).toMatchObject([
+        ...chunks.map(chunk => ({ ...route, type: 'stream', streamType: 'text', chunk })),
+        { ...route, type: 'response', success: true },
+      ]);
     });
 
     it('should handle command execution error', async () => {
@@ -433,7 +421,7 @@ describe('Integration: Message Flow', () => {
 
       expect(executor.execute).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: false, error: expect.stringContaining('Invalid') })
+        expect.objectContaining({ type: 'response', messageId: 'unknown', success: false, error: 'Invalid message format' })
       );
     });
 

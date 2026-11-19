@@ -179,17 +179,18 @@ describe('ThreadManager', () => {
       await expect(manager.createThread('overflow', tmpDir)).rejects.toThrow(/Maximum.*threads/);
     });
 
-    it('validates name format — rejects invalid names', async () => {
-      await expect(manager.createThread('', tmpDir)).rejects.toThrow();
-      await expect(manager.createThread('has space', tmpDir)).rejects.toThrow();
-      await expect(manager.createThread('-starts-dash', tmpDir)).rejects.toThrow();
-      await expect(manager.createThread('ends-dash-', tmpDir)).rejects.toThrow();
+    it('rejects invalid names without registering a thread', async () => {
+      for (const name of ['', 'has space', '-', '-bad', 'bad-', 'a-', 'a'.repeat(31)]) {
+        await expect(manager.createThread(name, tmpDir)).rejects.toThrow(/Invalid thread name/);
+        expect(manager.getThreadByName(name)).toBeUndefined();
+      }
     });
 
-    it('accepts valid name formats', async () => {
-      await expect(manager.createThread('a', tmpDir)).resolves.toBeDefined();
-      await expect(manager.createThread('my-feature-1', tmpDir)).resolves.toBeDefined();
-      await expect(manager.createThread('ABC123', tmpDir)).resolves.toBeDefined();
+    it('registers valid names verbatim through the 30-character limit', async () => {
+      for (const name of ['a', 'ab', 'my-feature-1', 'ABC123', 'a'.repeat(30)]) {
+        const thread = await manager.createThread(name, tmpDir);
+        expect(manager.getThreadByName(name)).toMatchObject({ id: thread.id, name });
+      }
     });
   });
 
@@ -681,30 +682,6 @@ describe('ThreadManager', () => {
       await manager.assertThreadDeletionAllowed(thread.id);
       await manager.deleteThread(thread.id);
       expect((await ThreadManager.initialize(tmpDir)).getThread(thread.id)).toBeUndefined();
-    });
-  });
-
-  describe('createThread name validation boundaries', () => {
-    it('accepts a single-character name', async () => {
-      await expect(manager.createThread('a', tmpDir)).resolves.toBeDefined();
-    });
-
-    it('accepts a 30-character name (max length)', async () => {
-      const name = 'a' + 'b'.repeat(28) + 'c'; // 30 chars
-      await expect(manager.createThread(name, tmpDir)).resolves.toBeDefined();
-    });
-
-    it('rejects names with only hyphens or leading/trailing hyphens', async () => {
-      await expect(manager.createThread('-bad', tmpDir)).rejects.toThrow();
-      await expect(manager.createThread('bad-', tmpDir)).rejects.toThrow();
-    });
-
-    it('accepts two-character alphanumeric name', async () => {
-      await expect(manager.createThread('ab', tmpDir)).resolves.toBeDefined();
-    });
-
-    it('rejects two-character name with trailing hyphen', async () => {
-      await expect(manager.createThread('a-', tmpDir)).rejects.toThrow();
     });
   });
 
