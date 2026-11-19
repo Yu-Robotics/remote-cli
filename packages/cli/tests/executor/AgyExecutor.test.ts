@@ -47,7 +47,7 @@ const last = () => fixture.runtimes.at(-1);
 const pointer = () => path.join(fixture.home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
 const make = (extra: object = {}) => new AgyExecutor(new DirectoryGuard([fixture.home]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, ...extra });
 function prepareFixture() {
-  fixture.home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-acp-executor-')));
+  fixture.home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-acp-executor-')));
   vi.stubEnv('HOME', fixture.home); vi.stubEnv('USERPROFILE', fixture.home);
   cwd = path.join(fixture.home, 'workspace'); fs.mkdirSync(cwd);
   fixture.runtimes = []; fixture.startup = false; fixture.close = false; fixture.wait = undefined; fixture.promptWait = undefined; fixture.saved = undefined;
@@ -253,7 +253,7 @@ describe('AGY recovery through Feishu commands', () => {
   it('fences a failed backend switch until same-thread clear confirms exit and admits one fresh prompt', async () => {
     const config = await ConfigManager.initialize();
     await config.set('executor', { type: 'agy' });
-    const manager = await ThreadManager.initialize(config.getConfigDir());
+    const manager = await ThreadManager.initialize(fixture.home);
     const threadId = (await manager.createThread('recovery', cwd, 'agy')).id;
     await manager.updateThread(threadId, { delegation: false });
     const guard = new DirectoryGuard([cwd]);

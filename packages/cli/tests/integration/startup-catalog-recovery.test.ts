@@ -21,12 +21,12 @@ const deviceId = 'fixture-bound-device';
 const openId = 'fixture-owner';
 const mobileThread = 'mobile-recovery';
 
-// Recovery may quarantine the original bytes elsewhere inside this fixture.
-async function containsOriginal(directory: string, original: Buffer): Promise<boolean> {
+async function retainsCatalogBytes(file: string, original: Buffer): Promise<boolean> {
+  const directory = path.dirname(file);
+  const name = path.basename(file);
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    const file = path.join(directory, entry.name);
-    if (entry.isDirectory() && await containsOriginal(file, original)) return true;
-    if (entry.isFile() && (await fs.readFile(file)).equals(original)) return true;
+    if (entry.isFile() && (entry.name === name || entry.name.startsWith(name + '.damaged-'))
+      && (await fs.readFile(path.join(directory, entry.name))).equals(original)) return true;
   }
   return false;
 }
@@ -119,7 +119,6 @@ function useDevice() {
     initialize, stop, createFromMobile, command,
     get catalog() { return catalog; }, get config() { return config; }, get home() { return home; },
     get connected() { return !!socket; },
-    retains: (original: Buffer) => containsOriginal(directory, original),
     verifyPointer: async () => expect(await fs.readFile(pointer)).toEqual(originalPointer),
   };
 }
@@ -138,7 +137,7 @@ describe('startup with a damaged thread catalog', () => {
   });
 
   it('preserves the damaged catalog bytes and the existing native session pointer', async () => {
-    expect(await device.retains(damaged)).toBe(true);
+    expect(await retainsCatalogBytes(device.catalog, damaged)).toBe(true);
     await device.verifyPointer();
   });
   it('lets the bound Feishu user create and list a fresh thread', () => {
@@ -237,7 +236,7 @@ describe('startup with damaged device configuration', () => {
     expect(result.success).toBe(false);
     expect(device.connected).toBe(false);
     expect(await fs.readFile(device.catalog)).toEqual(catalog);
-    preserved = await device.retains(damaged);
+    preserved = await retainsCatalogBytes(device.config, damaged);
   });
 
   it('leaves the existing native session untouched without a verified device configuration', () => device.verifyPointer());
@@ -258,7 +257,7 @@ describe('startup with a verified device configuration backup', () => {
     await device.createFromMobile();
     const saved = JSON.parse(await fs.readFile(device.config, 'utf8'));
     expect(saved).toMatchObject({ deviceId, serverUrl: config.get('serverUrl'), security: { allowedDirectories: [device.home] } });
-    expect(await device.retains(damaged)).toBe(true);
+    expect(await retainsCatalogBytes(device.config, damaged)).toBe(true);
     await device.verifyPointer();
   });
 });
