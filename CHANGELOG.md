@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.271] - 2026-11-19
+
+### Fixed
+- AGY main conversations can continue CLI-managed schedules after a verified background command finishes in the same session. A pending command defers prompt admission.
+
+## [1.6.270] - 2026-11-19
+
+### Fixed
+- Deleting an idle thread with archived main AGY ACP selections releases its name and thread slot. The CLI tracks deferred native history cleanup by the original thread ID across restarts.
+
 ## [1.6.269] - 2026-11-19
 
 ### Changed

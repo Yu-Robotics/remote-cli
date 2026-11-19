@@ -5,6 +5,7 @@ import { AgyAcpRuntime } from '../../src/executor/agy/AgyAcpRuntime';
 import type { AcpSessionSetup } from '../../src/executor/acp/AcpClient';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
 import type { HookPayload } from '../../src/scheduling/agy/AgySessionSchedules';
 import type { NativeScheduleEvent } from '../../src/scheduling/types';
@@ -20,6 +21,8 @@ const native = vi.hoisted(() => ({
   restore: vi.fn(async () => {}), configure: vi.fn(async () => {}), bind: vi.fn(),
   settingFailure: false, settingWait: undefined as Promise<void> | undefined, sessionId: 'synthetic-session',
   realHooks: false, nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
+  loadedRows: undefined as TranscriptRecord[] | undefined,
+  confirmTranscript: vi.fn(async (_records: TranscriptRecord[]) => true),
 }));
 vi.mock('os', async importOriginal => {
   const actual = await importOriginal<typeof import('os')>();
@@ -37,7 +40,7 @@ vi.mock('../../src/scheduling/agy/AgyHookRelay', () => ({
     constructor(_home: string, accept: any, fault: any) { native.accept = accept; native.fault = fault; }
     async start() { return { url: 'http://127.0.0.1:1/hook', token: 'synthetic-token' }; }
     bindSession = native.bind;
-    async confirmsTerminal() { return true; }
+    confirmsTerminal = native.confirmTranscript;
     async close() {}
   },
 }));
@@ -74,6 +77,10 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   }
   async loadSession() { throw new Error('Unqualified saved ACP resume is forbidden'); }
   async loadSessionWithSetup(id: string, _cwd: string, _servers: unknown, setup: AcpSessionSetup) {
+    if (native.loadedRows) {
+      this.rows = structuredClone(native.loadedRows);
+      this.cursor = Math.max(...this.rows.map(row => row.step_index)) + 1;
+    }
     this.session = id; this.token = undefined; const state = this.state(); await setup(state, (key, value) => this.configure(key, value)); return state;
   }
   async setConfigOption(_id: string, key: string, value: string) { this.token = undefined; return this.configure(key, value); }
@@ -166,6 +173,8 @@ beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
   native.home = home; vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
   native.realHooks = false; native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
+  native.loadedRows = undefined;
+  native.confirmTranscript.mockReset().mockResolvedValue(true);
   native.settingFailure = false; native.settingWait = undefined; native.sessionId = 'synthetic-session';
   native.restore.mockClear(); native.configure.mockClear(); native.bind.mockClear();
   executor = make();
@@ -203,6 +212,104 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(creating).resolves.toMatchObject({ success: true });
     return { id, db };
   }
+  function yieldCommand(client: ReturnType<typeof last>, tool = 'run_command') {
+    const step = client.cursor++;
+    client.hook('PreToolUse', { stepIdx: step, toolCall: { id: `call-${step}`, name: tool, args: {} } });
+    const id = client.session + '/task-' + step;
+    const log = pathToFileURL(path.join(client.launch.env.HOME, '.gemini', 'antigravity-cli', 'brain', client.session,
+      '.system_generated', 'tasks', `task-${step}.log`)).href;
+    client.row('GENERIC', `Created At: synthetic\nTool is running as a background task with task id: ${id}\nTask Description: First line\nSecond line\nTask logs are available at: ${log}\nAdditional native instructions\ncontinued`, 'MODEL', 'RUNNING', step);
+    client.hook('PostToolUse');
+    return { id, log, step };
+  }
+  function completion(client: ReturnType<typeof last>, task: { id: string; log: string }) {
+    const result = `Task id "${task.id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\nFirst line\r\nSecond line\r\n\nLog: ${task.log}`;
+    client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + `[Message] timestamp=2026-01-01T00:00:00Z sender=${task.id} priority=MESSAGE_PRIORITY_HIGH content=${result}\n</SYSTEM_MESSAGE>`, 'SYSTEM');
+  }
+  it('denies another tool during an idle command notification', async () => {
+    const { id } = await captureTimedSession();
+    const running = executor.execute('hold', { hostScheduleSessionId: id });
+    await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+    const client = last();
+    const { step } = yieldCommand(client);
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    expect((await running).success).toBe(true);
+    const original = { id: `call-${step}`, name: 'run_command', args: {} };
+    client.hook('PostToolUse', { stepIdx: step, toolCall: original });
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(true);
+    expect(client.hook('PreToolUse', { stepIdx: client.cursor, toolCall: original })).toMatchObject({ decision: 'deny' });
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+  });
+  it.each(['foreground', 'idle'])('recovers multiple commands after matched %s completion without replay', async timing => {
+    const { id } = await captureTimedSession();
+    const running = executor.execute('hold', { hostScheduleSessionId: id });
+    await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+    const client = last();
+    const first = yieldCommand(client), second = yieldCommand(client);
+    completion(client, second);
+    client.hook('PostToolUse');
+    if (timing === 'foreground') completion(client, first);
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(running).resolves.toMatchObject({ success: true });
+    if (timing === 'idle') {
+      expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(true);
+      expect(executor.isHostScheduleWaitingForCommand(id, home)).toBe(false);
+      expect(executor.isHostScheduleWaitingForCommand('another-session', cwd)).toBe(false);
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+      const original = await fs.readFile(pointer, 'utf8');
+      await fs.writeFile(pointer, JSON.stringify({ ...JSON.parse(original), hostGeneration: 'changed' }));
+      expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(false);
+      await fs.writeFile(pointer, original);
+      completion(client, first);
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(true);
+      client.finish();
+    }
+    expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(false);
+    executor.checkHostScheduleSession(id);
+    expect(client.prompts).toEqual(['hold', 'hold']);
+    native.loadedRows = structuredClone(client.rows);
+    await executor.destroy();
+    expect(native.confirmTranscript).toHaveBeenCalledWith(client.rows);
+    executor = make();
+    executor.checkHostScheduleSession(id);
+    await expect(executor.execute('next slot', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['next slot']);
+  });
+  it.each(['changed receipt', 'wrong log', 'denied tool', 'unknown idle hook', 'different tool', 'failed foreground'])(
+    'withholds transient admission after %s', async failure => {
+      const { id } = await captureTimedSession();
+      const running = executor.execute('hold');
+      await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+      const client = last();
+      const task = yieldCommand(client, failure === 'different tool' ? 'other' : 'run_command');
+      if (failure === 'changed receipt') client.rows.at(-1).content += 'changed';
+      if (failure === 'wrong log') completion(client, { ...task, log: task.log + '.other' });
+      if (failure === 'denied tool') client.hook('PreToolUse', { stepIdx: client.cursor++, toolCall: { id: 'denied', name: 'schedule', args: {} } });
+      client.finish(); client.release({ stopReason: failure === 'failed foreground' ? 'cancelled' : 'end_turn' });
+      await running.catch(() => {});
+      if (failure === 'unknown idle hook') client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(false);
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      await executor.destroy();
+      expect(() => make().checkHostScheduleSession(id)).toThrow();
+    });
+  it.each(['outstanding', 'unconfirmed transcript'])('withholds a clean checkpoint on close with %s', async failure => {
+    const { id } = await captureTimedSession();
+    const running = executor.execute('hold');
+    await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+    const client = last(), task = yieldCommand(client);
+    if (failure === 'unconfirmed transcript') {
+      completion(client, task);
+      native.confirmTranscript.mockResolvedValue(false);
+    }
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(running).resolves.toMatchObject({ success: true });
+    await executor.destroy();
+    expect(() => make().checkHostScheduleSession(id)).toThrow();
+  });
   it('can schedule after a clean restart even when the first chat had no tools or timer', async () => {
     const { id } = await captureTimedSession(false);
     await executor.destroy();

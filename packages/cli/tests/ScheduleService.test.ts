@@ -149,6 +149,8 @@ describe('ScheduleService', () => {
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       await expect(service.clearHostContext(owner.threadId, () => owner, false)).rejects.toThrow(/delivery/);
+      expect(service.hasPendingResults(owner.threadId)).toBe(true);
+      expect(service.hasPendingResults('unrelated-thread')).toBe(false);
       expect((await read()).purged).toEqual([]);
       release.resolve();
       await vi.waitFor(async () => expect(await service.clearHostContext(owner.threadId, () => owner, false)).toBe(1));

@@ -119,6 +119,8 @@ export class AgyExecutor implements IExecutor {
   private resumeCurrent = false;
   private allocationUnconfirmed = false;
   private hostGeneration?: string;
+  private ownedPointer?: fs.BigIntStats;
+  private retiringSelection = false;
   private unpromptedReconnect?: { sessionId: string; generation: string; history: string };
 
   constructor(private readonly directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
@@ -153,6 +155,7 @@ export class AgyExecutor implements IExecutor {
     const fd = fs.openSync(temporary, 'wx', 0o600);
     try { fs.writeFileSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temporary, file); syncDirectory(path.dirname(file));
+    if (file === this.sessionFilePath) this.ownedPointer = fs.lstatSync(file, { bigint: true });
   }
   private hostSelection(id: string) {
     assertAgySelectionResettable(this.sessionFilePath);
@@ -178,15 +181,26 @@ export class AgyExecutor implements IExecutor {
     return pointer;
   }
   checkHostScheduleSession(id: string): void {
-    if (!id || id !== this.conversationId || this.isDestroyed || this.shutdownUncertain || this.transitioning
-      || this.delegationWorker || this.legacy || this.allocationUnconfirmed || this.scheduleOwner) {
-      throw new Error('The original AGY scheduled conversation is unavailable.');
-    }
+    this.assertHostScheduleOwner(id);
     if (!this.acp) { this.cleanHostSelection(id); return; }
     if (!this.acp.hostScheduleAvailable || this.acp.sessionId !== id || !this.hostGeneration
       || this.hostSelection(id).hostGeneration !== this.hostGeneration) {
       throw new Error('AGY host timing requires a verified foreground conversation with no uncertain native work.');
     }
+  }
+  private assertHostScheduleOwner(id: string): void {
+    if (!id || id !== this.conversationId || this.isDestroyed || this.shutdownUncertain || this.transitioning
+      || this.delegationWorker || this.legacy || this.allocationUnconfirmed || this.scheduleOwner) {
+      throw new Error('The original AGY scheduled conversation is unavailable.');
+    }
+  }
+  isHostScheduleWaitingForCommand(sessionId: string, cwd: string): boolean {
+    try {
+      this.assertHostScheduleOwner(sessionId);
+      return this.currentWorkingDirectory === cwd && this.acp?.waitingForCommand === true
+        && this.acp.sessionId === sessionId && !!this.hostGeneration
+        && this.hostSelection(sessionId).hostGeneration === this.hostGeneration;
+    } catch { return false; }
   }
   private saveWorkerProof(): void {
     if (this.workerProof) this.writeNativeState(this.sessionFilePath + '.worker-policy', this.workerProof);
@@ -210,11 +224,14 @@ export class AgyExecutor implements IExecutor {
       ? 'Legacy AGY worker history cannot execute over ACP. Use this worker card Clear action or parent /clear after task/artifact closeout; original history is retained.'
       : 'Legacy AGY conversation cannot execute over ACP. Use explicit /clear to start fresh; original native history is retained.');
     let cleanGeneration: string | undefined;
+    let commandCheckpoint: import('./agy/AgyCommandTasks').AgyCommandCheckpoint | undefined;
     if (this.conversationId) {
       if (this.scheduleOwner) throw new Error('AGY saved chat cannot safely resume: native notifications remain unconfirmed. Use a new thread.');
       const proof = this.workerProof;
       if (!this.delegationWorker && this.hostSelection(this.conversationId).hostScheduleCheckpoint) {
-        cleanGeneration = this.cleanHostSelection(this.conversationId).hostGeneration;
+        const pointer = this.cleanHostSelection(this.conversationId);
+        cleanGeneration = pointer.hostGeneration;
+        commandCheckpoint = pointer.hostScheduleCheckpoint.commands;
       }
       if (!cleanGeneration && !this.resumeCurrent && !(this.delegationWorker && proof?.sessionId === this.conversationId
         && proof.policy === 'hook-denial-v2' && proof.settled && proof.closed)) {
@@ -247,7 +264,7 @@ export class AgyExecutor implements IExecutor {
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
       sessionId: original ?? undefined, worker: this.delegationWorker,
-      hostScheduleChat,
+      hostScheduleChat, commandCheckpoint,
       beforeSessionLoad: original && (cleanGeneration || firstSetup) ? () => {
         const pointer = firstSetup ? this.hostSelection(original) : this.cleanHostSelection(original);
         if (pointer.hostGeneration !== (firstSetup?.generation ?? cleanGeneration)
@@ -305,8 +322,11 @@ export class AgyExecutor implements IExecutor {
       },
       beforePrompt: () => { if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); } },
       settledPrompt: reusable => { if (this.workerProof) { this.workerProof.settled = reusable; this.saveWorkerProof(); } },
-      ownedSessionClosed: (id, cleanHistory, unpromptedHistory) => {
+      ownedSessionClosed: (id, cleanHistory, unpromptedHistory, commands) => {
         if (id === this.conversationId) this.acpLeaseUnconfirmed = false;
+        // The deletion path rechecks the installed pointer after exit. Writing
+        // a checkpoint here could replace an intervening selection.
+        if (this.retiringSelection) return;
         if (this.workerProof?.sessionId === id) { this.workerProof.closed = true; this.saveWorkerProof(); }
         if ((cleanHistory || unpromptedHistory) && this.hostGeneration && id === this.conversationId) {
           const pointer = this.hostSelection(id);
@@ -314,7 +334,7 @@ export class AgyExecutor implements IExecutor {
           if (cleanHistory) {
             this.writeNativeState(this.sessionFilePath, { ...pointer, hostScheduleCheckpoint: {
               policy: 'host-timed-chat-v1', generation: this.hostGeneration, configuration: this.checkpointConfiguration(),
-              history: cleanHistory,
+              history: cleanHistory, commands,
             } });
           } else if (unpromptedHistory && this.transitioning) {
             // Only a controlled reconnect can carry settings-only provenance across group retirement.
@@ -644,6 +664,37 @@ export class AgyExecutor implements IExecutor {
       success: true,
       output: '⚠️ Handoff summary failed — the conversation was reset without carryover. Context starts fresh.',
     };
+  }
+
+  canRetireAgySelection(threadId: string): boolean {
+    if (this.delegationWorker || threadId !== this.threadId) throw new Error('AGY deletion requires the original main thread.');
+    this.assertScheduleResettable(true);
+    if (this.isBusy() || this.acp && !this.acp.canRetireForContextReset) throw new Error('AGY native work is still active.');
+    if (!this.acp || !this.conversationId || this.legacy) return false;
+    if (this.acp.sessionId !== this.conversationId) throw new Error('AGY session ownership changed before deletion.');
+    const stat = fs.lstatSync(this.sessionFilePath, { bigint: true });
+    if (!this.ownedPointer || stat.dev !== this.ownedPointer.dev || stat.ino !== this.ownedPointer.ino
+      || stat.ctimeNs !== this.ownedPointer.ctimeNs || !stat.isFile() || stat.nlink !== 1n || stat.size > 65536n) {
+      throw new Error('The selected AGY conversation changed before deletion.');
+    }
+    const pointer = JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8'));
+    if (pointer.transport !== 'acp' || pointer.id !== this.conversationId || pointer.hostGeneration !== this.hostGeneration) {
+      throw new Error('The selected AGY conversation changed before deletion.');
+    }
+    return true;
+  }
+
+  async retireAgySelection(threadId: string): Promise<void> {
+    const owned = this.canRetireAgySelection(threadId);
+    this.retiringSelection = true;
+    try { await this.destroy(); } finally { this.retiringSelection = false; }
+    this.assertScheduleResettable();
+    if (owned) {
+      if (this.acpLeaseUnconfirmed || !this.canRetireAgySelection(threadId)) throw new Error('AGY session retirement is unconfirmed.');
+      fs.unlinkSync(this.sessionFilePath);
+      syncDirectory(path.dirname(this.sessionFilePath));
+      this.conversationId = null;
+    }
   }
 
   async deleteThreadData(_threadId: string): Promise<void> {

@@ -864,7 +864,10 @@ export class ScheduleService {
   }
 
   /** Durable outputs still awaiting their external delivery receipt. */
-  hasPendingResults(): boolean { return this.pending.size > 0; }
+  hasPendingResults(threadId?: string): boolean {
+    if (threadId === undefined) return this.pending.size > 0;
+    return [...this.pending.values()].some(delivery => this.records.get(delivery.scheduleId)?.threadId === threadId);
+  }
 
   /** Includes terminal jobs whose native process exit is still unconfirmed. */
   hasActiveSchedules(threadId?: string): boolean {

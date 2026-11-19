@@ -39,6 +39,7 @@ async function fixture() {
     setThreadBusy: vi.fn((id: string, busy: boolean) => { if (busy) busyThreads.add(id); else busyThreads.delete(id); }),
     setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}),
     setWorkingDirectory: vi.fn(async () => ({ cwd, changed: false })),
+    assertThreadDeletionAllowed: vi.fn(),
     assertContextResettable: vi.fn(), clearThreadContext: vi.fn(async () => {}), destroyThread: vi.fn(async () => {}),
   };
   const manager = {
@@ -263,6 +264,40 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(f.executor.execute).toHaveBeenCalledOnce();
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect(f.pool.setThreadBusy.mock.calls).toEqual([['thread-a', true], ['thread-a', false]]);
+  });
+
+  it.each(backends)('limits deferral for an observed AGY command to the AGY backend (%s)', async backend => {
+    f.setBackend(backend);
+    const { dispatch } = await dispatchFixture();
+    const waiting = vi.fn(() => true);
+    Object.assign(f.executor, { isHostScheduleWaitingForCommand: waiting });
+    const admit = vi.fn(async () => true);
+    if (backend === 'agy') {
+      expect(await dispatch(admit)).toBeUndefined();
+      expect(waiting).toHaveBeenCalledWith('bound', f.cwd);
+      expect(admit).not.toHaveBeenCalled();
+      expect(f.executor.execute).not.toHaveBeenCalled();
+      waiting.mockReturnValue(false);
+    }
+    expect(await dispatch(admit)).toMatchObject({ success: true });
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+    expect(admit).toHaveBeenCalledOnce();
+    if (backend !== 'agy') expect(waiting).not.toHaveBeenCalled();
+  });
+
+  it('delivers the admitted AGY result when its verified command is still pending', async () => {
+    f.setBackend('agy');
+    const { dispatch } = await dispatchFixture();
+    const waiting = vi.fn(() => false);
+    Object.assign(f.executor, { isHostScheduleWaitingForCommand: waiting });
+    f.executor.execute.mockImplementationOnce(async () => {
+      waiting.mockReturnValue(true);
+      f.executor.checkHostScheduleSession.mockImplementation(() => { throw new Error('Command still running'); });
+      return { success: true, output: 'Foreground result' };
+    });
+    expect(await dispatch()).toMatchObject({ success: true, output: 'Foreground result' });
+    expect(await dispatch()).toBeUndefined();
+    expect(f.executor.execute).toHaveBeenCalledOnce();
   });
 
   it('holds an occurrence while disconnected and accepts the original binding on reconnect', async () => {

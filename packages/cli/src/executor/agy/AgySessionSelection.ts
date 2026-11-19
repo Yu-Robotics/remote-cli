@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { isWorkerLaneExecutorId, type DelegatedWorkerLane } from '../../delegation/DelegatedWorkerSessionStore';
 import { createHash } from 'crypto';
 import { syncDirectory } from '../../delegation/OwnershipRuntime';
 
@@ -66,5 +68,29 @@ export function assertAgyWorkerSelectionResettable(pointer: string): void {
     // Use the existing card handler's safe, actionable error category. No path
     // or native identifier from storage is forwarded to the remote caller.
     throw new Error('The Worker context has changed. AGY allocation or schedule ownership is unconfirmed; Clear did not discard it. Preserve this lane and use a new thread or worker lane.');
+  }
+}
+
+/** Parent thread deletion removes the whole lane HOME. A worker archive cannot
+ * use the main thread's storage-preserving deletion path. */
+export function assertAgyWorkerLaneDeletable(lane: DelegatedWorkerLane): void {
+  if (!isWorkerLaneExecutorId(lane.executorThreadId)) throw new Error('Invalid AGY worker lane identity.');
+  if (lane.nativeHistoryExitUnconfirmed || lane.nativeMaintenanceExitUnconfirmed || lane.nativeSessionConflict) {
+    throw new Error('AGY worker history ownership is unconfirmed.');
+  }
+  for (const home of new Set([process.env.HOME, os.homedir()])) {
+    if (!home) continue;
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', lane.executorThreadId + '.json');
+    assertAgySelectionResettable(pointer);
+    if (present(pointer + '.detached-acp')) throw new Error('Detached AGY worker history must be retained.');
+    if (!present(pointer)) continue;
+    const stat = fs.lstatSync(pointer);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 65536) throw new Error('Unsafe AGY worker selection.');
+    const session = JSON.parse(fs.readFileSync(pointer, 'utf8'));
+    if (session.transport === 'acp' && (lane.nativeGroupExitGeneration !== (lane.contextGeneration ?? 0)
+      || lane.nativeSession?.backend !== 'agy' || lane.nativeSession.sessionId !== session.id
+      || lane.nativeSession.executorThreadId !== lane.executorThreadId || lane.nativeSession.pointer !== pointer)) {
+      throw new Error('AGY worker selection ownership or process-group exit is unconfirmed.');
+    }
   }
 }

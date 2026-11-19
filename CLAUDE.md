@@ -426,7 +426,12 @@ Saved main ACP selections remain refused after host loss, even without a schedul
 journal. Explicit `/clear` may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
 ownership remain blockers; use a new thread when guided to do so. Thread data erasure
-has stricter proof requirements than selection reset. No backend switch is automatic.
+has stricter proof requirements than selection reset. From CLI 1.6.270, an idle
+thread with only detached main ACP history can be deleted with `/thread delete`.
+Its name and thread slot become available immediately. On supported local Linux
+volumes, the CLI can erase the old history on startup after a subsequent host
+reboot if it can still verify the files and their ownership. On other platforms
+or when ownership is uncertain, it keeps the files under the deleted thread's ID.
 
 Per-thread HOME links share authentication/configuration and programs while native
 conversation storage remains per-thread. These links are not an OS sandbox.

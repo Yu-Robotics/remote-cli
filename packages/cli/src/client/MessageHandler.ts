@@ -29,6 +29,7 @@ import { isDelegationEnabled } from '../thread/DelegationSettings';
 import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorGoalRunRequest, IExecutor } from '../executor/IExecutor';
 import { formatGoal, GOAL_USAGE, parseGoalCommand } from './GoalCommand';
 import { createExecutor } from '../executor';
+import { assertAgyWorkerLaneDeletable } from '../executor/agy/AgySessionSelection';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
@@ -213,6 +214,7 @@ export class MessageHandler {
   private readonly threadQueues = new Map<string, QueuedCommand[]>();
   private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
   private readonly pausedQueues = new Set<string>();
+  private readonly deletingThreads = new Map<string, Promise<void>>();
   private readonly messageOpenIds = new Map<string, string | undefined>();
   /** Thread operations held by session controls (adopt and detach). */
   private readonly sessionOperations = new Map<string, symbol>();
@@ -226,7 +228,7 @@ export class MessageHandler {
     },
     threadName: threadId => this.threadManager.getThread(threadId)?.name,
     // Queued or pending work counts as busy: a confirmation must never redirect it into another session.
-    isBusy: threadId => this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
+    isBusy: threadId => this.deletingThreads.has(threadId) || this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
       || this.abortOperations.has(threadId) || this.isDestroyed || this.automaticUpdateInProgress
       || this.delegation.hasActiveTasks(threadId) || this.settingsAdmission.hasCommand(threadId),
     setBusy: (threadId, busy) => {
@@ -308,7 +310,7 @@ export class MessageHandler {
     this.config = config;
     this.scheduleCards = new ScheduleCardService({
       current: owner => {
-        try { return !this.isDestroyed && this.scheduleOwnerCurrent(owner); }
+        try { return !this.isDestroyed && !this.deletingThreads.has(owner.threadId) && this.scheduleOwnerCurrent(owner); }
         catch { return false; }
       },
       threadName: id => this.threadManager.getThread(id)?.name ?? id,
@@ -367,7 +369,7 @@ export class MessageHandler {
       backend: (id, target, scope, follow) => this.applyBackendSetting(id, target, scope, follow),
       preference: (id, target, kind, value) => this.applyPreference(id, target, kind, value),
       delegation: (id, enabled) => this.applyDelegationSetting(id, enabled),
-      delegationSupported: id => Boolean(this.threadPool.getExecutor(id).configureDelegation),
+      delegationSupported: id => !this.deletingThreads.has(id) && Boolean(this.threadPool.getExecutor(id).configureDelegation),
       speedSettingsSupported: () => this.modelSpeedSettingsSupported,
     });
     this.directoryBrowser = new DirectoryBrowser({
@@ -528,7 +530,8 @@ export class MessageHandler {
             const fileServer = this.config.get('serverUrl') as string;
             const fileNamespace = createHash('sha256').update(fileOrigin(fileServer)).digest('hex');
             this.fileInbox = new FileInbox(path.join(this.config.getConfigDir(), 'attachments', fileNamespace), fileServer, {
-              thread: id => id ? this.threadManager.getThread(id) : this.threadManager.getDefaultThread(),
+              thread: id => id && this.deletingThreads.has(id) ? undefined
+                : id ? this.threadManager.getThread(id) : this.threadManager.getDefaultThread(),
               send: value => this.wsClient.send(value), extract: extractDocument,
             }, this.config.get('files.retentionDays') as number | undefined);
             await this.fileInbox.initialize();
@@ -594,6 +597,7 @@ export class MessageHandler {
       || hasQueuedCommands
       || this.pendingQueueConfirmations.size > 0
       || this.pendingReplaces.size > 0
+      || this.deletingThreads.size > 0
       || this.activeThreadOperations.size > 0
       || this.abortOperations.size > 0
       || this.scheduleManagement.size > 0 || this.schedules && !this.schedules.canRestartWithoutActiveWork()
@@ -624,6 +628,10 @@ export class MessageHandler {
     const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
     const content = message.content?.trim() ?? '';
     this.messageOpenIds.set(message.messageId, message.openId);
+    if (this.deletingThreads.has(threadId)) {
+      this.sendResponse(message.messageId, threadId, { success: false, error: 'Thread deletion is in progress.' }, true);
+      return;
+    }
     const occurrence = this.hostOccurrences.get(threadId);
     if (occurrence && (occurrence.record.openId !== message.openId || !this.hostBindingCurrent(occurrence.record))) {
       this.sendResponse(message.messageId, threadId, { success: false, error: 'This scheduled turn belongs to another owner.' }, true);
@@ -689,6 +697,14 @@ export class MessageHandler {
       return;
     }
     try {
+      if (/^\/thread\s+delete(?:\s|$)/.test(content)) {
+        this.threadManager.contextResets.assertReady(threadId);
+        if (!this.threadManager.getThread(threadId)) throw new Error('Thread not found.');
+        if (this.settingsBusy(threadId) || this.settingsAdmission.isBlocked(threadId)) {
+          throw new Error('The caller thread is busy. Wait for running or queued work before deleting a thread.');
+        }
+        return await this.handleThreadCommand(message.messageId, threadId, content);
+      }
       if (management) return await body();
       if (clearing) {
         await this.settingsAdmission.recovery(threadId, body);
@@ -706,7 +722,7 @@ export class MessageHandler {
       } else {
         await this.settingsAdmission.command(threadId, message.messageId, async isCurrent => {
           admissionCurrent = isCurrent;
-          if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
+          if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
           await body();
         }, !content.startsWith('/') && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId), cancelAdmission);
       }
@@ -1251,9 +1267,13 @@ export class MessageHandler {
         || !Number.isSafeInteger(request.generation) || (request.generation as number) < 0) {
         throw new Error('Invalid worker context reference');
       }
-      const thread = this.threadManager.getThread(request.threadId);
-      if (!thread) throw new Error('This Worker card has expired. Use the latest Worker card.');
-      await this.delegation.resetWorkerContext(thread, request.laneId, request.generation as number);
+      const { threadId, laneId } = request;
+      if (this.deletingThreads.has(threadId)) throw new Error('The Worker context has changed.');
+      await this.settingsAdmission.command(threadId, request.messageId, async () => {
+        const thread = this.threadManager.getThread(threadId);
+        if (!thread) throw new Error('This Worker card has expired. Use the latest Worker card.');
+        await this.delegation.resetWorkerContext(thread, laneId, request.generation as number);
+      });
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : '';
       error = /^(Invalid worker context reference|This Worker card has expired\.|The Worker context has changed\.|The Worker is active)/.test(detail)
@@ -2121,24 +2141,22 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
 
-      if (this.threadPool.isThreadBusy(target.id)) {
+      if (this.settingsBusy(target.id) || this.activeThreadOperations.has(target.id) || this.pendingGoalActivations.has(target.id)) {
         this.sendResponse(messageId, callerThreadId, {
           success: false,
-          error: `Cannot delete thread "${name}" while it is running. Send /abort first.`,
+          error: `Cannot delete thread "${name}" while work is running or queued. Inspect /queue or send /abort first.`,
         });
         return;
       }
 
       try {
-        await this.assertSchedulesIdle(target.id);
-        await this.delegation.cancelThread(target.id);
-        await this.delegationBridges.get(target.id)?.close();
-        this.delegationBridges.delete(target.id);
-        await this.delegation.deleteWorkerLanes(target.id);
-        await this.delegation.store.deleteThread(target.id);
-        await this.threadPool.destroyThread(target.id);
-        await this.threadManager.deleteThread(target.id);
-        await this.fileInbox?.deleteThread(target.id);
+        const remove = () => this.settingsAdmission.mutation(target.id, async () => {
+          const deletion = this.deleteIdleThread(target.id);
+          this.deletingThreads.set(target.id, deletion);
+          try { await deletion; } finally { this.deletingThreads.delete(target.id); }
+        });
+        if (callerThreadId === target.id) await remove();
+        else await this.settingsAdmission.command(callerThreadId, messageId, remove);
         this.sendResponse(messageId, callerThreadId, {
           success: true,
           output: `✅ Thread "${name}" deleted.`,
@@ -2157,6 +2175,24 @@ You can also use natural language commands to control Claude Code CLI.`,
       success: false,
       error: `Unknown /thread subcommand: ${sub}\nUsage: /thread list | /thread new [name] | /thread delete <name>`,
     });
+  }
+
+  private async deleteIdleThread(id: string): Promise<void> {
+    await this.assertSchedulesIdle(id);
+    if (this.schedules?.hasPendingResults(id)) {
+      throw new Error('A scheduled result for this thread is awaiting delivery. Try again after delivery.');
+    }
+    await this.threadPool.assertThreadDeletionAllowed(id);
+    await this.delegation.assertThreadContextResettable(id);
+    for (const lane of await this.delegation.laneStore.lanesForThread(id, 'agy')) assertAgyWorkerLaneDeletable(lane);
+    await this.delegation.cancelThread(id);
+    await this.delegation.deleteWorkerLanes(id);
+    await this.threadPool.destroyThread(id, { forThreadDeletion: true });
+    await this.delegationBridges.get(id)?.close();
+    this.delegationBridges.delete(id);
+    await this.delegation.store.deleteThread(id);
+    await this.threadManager.deleteThread(id);
+    await this.fileInbox?.deleteThread(id);
   }
 
   /**
@@ -3688,16 +3724,19 @@ You can also use natural language commands to control Claude Code CLI.`,
         const executor = this.threadPool.getExecutor(threadId);
         if (executor.hasPendingCancellation?.() || executor.hasPendingScheduleMutation?.()
           || executor.hasPendingSettingsChange?.() || executor.isGoalRunning?.() || executor.isBusy?.()) return undefined;
-        const check = (allowDisconnectedResult = false) => {
+        const check = (allowDisconnectedResult = false, allowPendingCommand = false): boolean => {
           checkOwner(allowDisconnectedResult);
           if (this.threadPool.getExistingExecutor(threadId) !== executor) throw new Error('Scheduled executor changed.');
+          if (allowPendingCommand && record.backend === 'agy' && executor.getSessionId?.() === sessionId
+            && executor.getCurrentWorkingDirectory() === cwd && executor.isHostScheduleWaitingForCommand?.(sessionId, cwd)) return false;
           this.checkHostSession(executor, sessionId, cwd);
+          return true;
         };
-        check();
+        if (!check(false, true)) return undefined;
         assertWorkingDirectoryExists(cwd);
         if (this.delegation.blocksWorkspace(cwd, threadId)) return undefined;
         await this.delegation.assertExecutionSafe(cwd, threadId);
-        check();
+        if (!check(false, true)) return undefined;
         if (occurrence.cancelled || !await admit()) return undefined;
         const beforePrompt = () => {
           check();
@@ -3731,7 +3770,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         }).catch((error: unknown) => ({ success: false, output: undefined,
           error: error instanceof Error ? error.message : 'Scheduled execution failed.' }));
         const aborted = occurrence.abort && await occurrence.abort;
-        check(true);
+        // An observed AGY command may still be pending when this admitted turn returns its answer.
+        // The result belongs to this occurrence. Only a later prompt needs to wait.
+        check(true, true);
         if (aborted) return { success: false, abortedByUser: true, output: display || result.output,
           error: 'Scheduled occurrence interrupted by /abort.' };
         // Prefer the public display stream, but preserve the executor's final
@@ -4114,6 +4155,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private settingsState(threadId: string): SettingsState | undefined {
+    if (this.deletingThreads.has(threadId)) return undefined;
     this.threadManager.contextResets.assertReady(threadId);
     const thread = this.threadManager.getThread(threadId);
     if (!thread) return undefined;
@@ -4129,7 +4171,8 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private settingsBusy(threadId: string, exceptRequest?: string, includeQueue = true, setting?: SettingsMenu['kind']): boolean {
-    return this.isDestroyed || this.automaticUpdateInProgress || (setting === 'model' ? this.threadPool.isThreadBusy(threadId, 'model') : this.threadPool.isThreadBusy(threadId))
+    return this.isDestroyed || this.automaticUpdateInProgress || this.deletingThreads.has(threadId)
+      || (setting === 'model' ? this.threadPool.isThreadBusy(threadId, 'model') : this.threadPool.isThreadBusy(threadId))
       || this.delegation.hasActiveTasks(threadId) || this.abortOperations.has(threadId)
       || this.coordinatorPreparations.has(threadId) || this.settingsAdmission.hasCommand(threadId, exceptRequest) || (includeQueue && this.hasThreadQueueState(threadId));
   }
@@ -4401,6 +4444,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   async destroy(): Promise<void> {
     this.isDestroyed = true;
+    if (this.deletingThreads.size) await Promise.allSettled(this.deletingThreads.values());
     const scheduledTurns = [...this.hostOccurrences.keys()].map(id => this.activeThreadOperations.get(id)?.done);
     this.directoryBrowser.destroy();
     this.settingsService.destroy();

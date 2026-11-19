@@ -5,6 +5,8 @@ import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { ThreadManager } from '../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
+import { detachAgySelection } from '../src/executor/agy/AgySessionSelection';
+import { AgyExecutor } from '../src/executor/AgyExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { DelegationManager, type DelegationScope } from '../src/delegation/DelegationManager';
 import type { ExecuteOptions, ExecuteResult, IExecutor } from '../src/executor/IExecutor';
@@ -14,6 +16,11 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
 }
+
+vi.mock('os', async importOriginal => {
+  const actual = await importOriginal<typeof import('os')>();
+  return { ...actual, homedir: () => os.homedir() };
+});
 
 vi.mock('../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/delegation/OwnershipRuntime')>();
@@ -49,7 +56,7 @@ describe('managed conversation recovery', () => {
     const guard = new DirectoryGuard([home]);
     pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, () => executor, 5);
     send = vi.fn();
-    handler = new MessageHandler({ send, trackTask: vi.fn(), onClose: vi.fn(), isConnected: () => true } as any,
+    handler = new MessageHandler({ send, trackTask: vi.fn(), onClose: vi.fn(), isConnected: () => true, hasPendingTaskResults: () => false } as any,
       pool, manager, guard, { get: vi.fn(), set: vi.fn(), getAll: () => ({}), getConfigDir: () => home } as any);
     delegation = (handler as any).delegation;
   });
@@ -63,6 +70,140 @@ describe('managed conversation recovery', () => {
 
   const command = async (content: string, id = content) => handler.handleMessage({ type: 'command', messageId: id, content, threadId });
   const response = (id: string) => send.mock.calls.map(([value]) => value).find(value => value.type === 'response' && value.messageId === id);
+
+  function stubDeletionPreflight(check = vi.fn(async (_id: string, _options: { allowCurrentAgySession: boolean }) => {})) {
+    Object.assign(manager, { assertThreadDeletionAllowed: check });
+    return check;
+  }
+
+  it('deletes a thread with two detached main sessions and preserves its isolated history through restart', async () => {
+    const target = await manager.createThread('archived', home, 'agy');
+    executor = new AgyExecutor(new DirectoryGuard([home]), { threadId: target.id, initialWorkingDirectory: home });
+    pool.getExecutor(target.id);
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', target.id + '.json');
+    for (const id of ['first-main', 'second-main']) {
+      await fs.writeFile(pointer, JSON.stringify({ id, transport: 'acp' }));
+      detachAgySelection(pointer);
+    }
+    const archive = pointer + '.detached-acp';
+    const entries = await fs.readdir(archive);
+    expect(entries).toHaveLength(2);
+    const nativeHome = path.join(home, '.remote-cli', 'agy-homes', target.id);
+    await fs.mkdir(nativeHome, { recursive: true });
+    const history = path.join(nativeHome, 'original-history');
+    await fs.writeFile(history, 'original');
+    await command('/thread delete archived');
+    expect(response('/thread delete archived')).toMatchObject({ success: true });
+    expect(pool.getExistingExecutor(target.id)).toBeUndefined();
+    expect(manager.getThread(target.id)).toBeUndefined();
+    const replacement = await manager.createThread('archived', home, 'agy');
+    const loaded = await ThreadManager.initialize(home, { retryDeferredDeletion: true });
+    expect(loaded.getThread(target.id)).toBeUndefined();
+    expect(loaded.getThreadByName('archived')?.id).toBe(replacement.id);
+    expect(await fs.readdir(archive)).toEqual(entries);
+    expect(await fs.readFile(history, 'utf8')).toBe('original');
+  });
+
+  it('excludes new work throughout self-deletion and rejects the old UUID after a same-name replacement', async () => {
+    const target = await manager.createThread('retiring', home, 'agy');
+    const gate = deferred<void>();
+    const preflight = stubDeletionPreflight(vi.fn(async () => gate.promise));
+    const sendToTarget = (content: string, messageId: string) => handler.handleMessage({
+      type: 'command', content, threadId: target.id, messageId, isSlashCommand: content.startsWith('/'),
+    });
+    const deleting = sendToTarget('/thread delete retiring', 'self-delete');
+    try {
+      await vi.waitFor(() => expect(preflight).toHaveBeenCalledWith(target.id, { allowCurrentAgySession: false }));
+      for (const content of ['late chat', '/clear', '/thread delete retiring']) {
+        await sendToTarget(content, content);
+        expect(response(content)).toMatchObject({ success: false, error: expect.stringContaining('deletion') });
+      }
+      await command('/thread delete retiring', 'another-caller');
+      expect(response('another-caller')).toMatchObject({ success: false });
+      expect(handler.tryBeginAutomaticUpdate()).toBe(false);
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(pool.getExistingExecutor(target.id)).toBeUndefined();
+    } finally { gate.resolve(); await deleting; }
+    expect(response('self-delete')).toMatchObject({ success: true });
+    const replacement = await manager.createThread('retiring', home, 'agy');
+    expect(replacement.id).not.toBe(target.id);
+    for (const content of ['stale chat', '/thread delete retiring']) {
+      await sendToTarget(content, 'stale-' + content);
+      expect(response('stale-' + content)).toMatchObject({ success: false });
+    }
+    expect(manager.getThread(replacement.id)).toBeDefined();
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('joins the original executor before final removal and holds shutdown until deletion settles', async () => {
+    const target = await manager.createThread('owned', home, 'agy');
+    const exit = deferred<void>();
+    executor.canRetireAgySelection = vi.fn(id => id === target.id);
+    executor.retireAgySelection = vi.fn(async () => {});
+    executor.deleteThreadData = vi.fn();
+    executor.waitForExit = vi.fn(() => exit.promise);
+    pool.getExecutor(target.id);
+    const preflight = stubDeletionPreflight();
+    const finalCheck = vi.spyOn(manager, 'deleteThread');
+    const shutdownPool = vi.spyOn(pool, 'destroyAll');
+    const deleting = command('/thread delete owned');
+    let shutdown: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(executor.waitForExit).toHaveBeenCalledOnce());
+      shutdown = handler.destroy();
+      expect(preflight).toHaveBeenCalledWith(target.id, { allowCurrentAgySession: true });
+      expect(executor.retireAgySelection).toHaveBeenCalledWith(target.id);
+      expect(executor.deleteThreadData).not.toHaveBeenCalled();
+      expect(finalCheck).not.toHaveBeenCalled();
+      expect(shutdownPool).not.toHaveBeenCalled();
+    } finally { exit.resolve(); await deleting; await shutdown; }
+    expect(finalCheck).toHaveBeenCalledWith(target.id);
+    expect(shutdownPool).toHaveBeenCalledOnce();
+  });
+
+  it.each(['executor', 'queue', 'schedule', 'pending delivery', 'storage', 'worker', 'worker archive', 'worker allocation'])(
+    'rejects deletion at %s preflight before changing a worker, bridge or session', async blocker => {
+      const target = await manager.createThread('guarded', home, 'agy');
+      const preflight = stubDeletionPreflight();
+      const bridge = { close: vi.fn() };
+      (handler as any).delegationBridges.set(target.id, bridge);
+      const cancel = vi.spyOn(delegation, 'cancelThread');
+      const cleanup = vi.spyOn(delegation, 'deleteWorkerLanes');
+      const remove = vi.spyOn(manager, 'deleteThread');
+      const destroy = vi.spyOn(pool, 'destroyThread');
+      if (blocker === 'executor') pool.setThreadBusy(target.id, true);
+      if (blocker === 'queue') (handler as any).threadQueues.set(target.id, [{ messageId: 'queued' }]);
+      if (blocker === 'schedule' || blocker === 'pending delivery') (handler as any).schedules = {
+        hasCleanupContext: () => false,
+        hasActiveSchedules: (id: string) => blocker === 'schedule' && id === target.id,
+        hasPendingResults: (id: string) => blocker === 'pending delivery' && id === target.id,
+      };
+      if (blocker === 'storage') preflight.mockRejectedValue(new Error('Unconfirmed main ACP ownership'));
+      if (blocker === 'worker') vi.spyOn(delegation, 'assertThreadContextResettable').mockRejectedValue(new Error('Active worker'));
+      if (blocker.startsWith('worker ')) {
+        const lane = (await delegation.laneStore.acquire({ threadId: target.id, workingDirectory: home,
+          backend: 'agy', workspaceGeneration: 0 })).lane;
+        await delegation.laneStore.markReady(lane.id);
+        // Cleanup considers both home roots, even when they differ.
+        const other = path.join(home, 'other-home');
+        process.env.HOME = other;
+        const directory = path.join(other, '.remote-cli', 'agy-sessions');
+        await fs.mkdir(directory, { recursive: true });
+        const pointer = path.join(directory, lane.executorThreadId + '.json');
+        if (blocker === 'worker archive') {
+          await fs.writeFile(pointer, JSON.stringify({ id: 'prior-worker', transport: 'acp' }));
+          detachAgySelection(pointer);
+        } else await fs.writeFile(pointer + '.allocation-unconfirmed', '{}');
+      }
+      await command('/thread delete guarded');
+      expect(response('/thread delete guarded')).toMatchObject({ success: false });
+      expect(cancel).not.toHaveBeenCalled();
+      expect(cleanup).not.toHaveBeenCalled();
+      expect(destroy).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(bridge.close).not.toHaveBeenCalled();
+      expect(manager.getThread(target.id)).toBeDefined();
+    });
 
   it.each(['/abort', '/clear', '/new'])('completes admission cancellation once during attachment initialization via %s', async recovery => {
     const initialization = deferred<void>();
@@ -654,6 +795,7 @@ describe('managed conversation recovery', () => {
 
     const sibling = await manager.createThread('healthy-sibling', home, 'codex');
 
+    stubDeletionPreflight();
     const poolDestroySpy = vi.spyOn(pool, 'destroyThread');
     const managerDeleteSpy = vi.spyOn(manager, 'deleteThread');
     const cancelThreadSpy = vi.spyOn(delegation, 'cancelThread');
@@ -704,7 +846,7 @@ describe('managed conversation recovery', () => {
       output: expect.stringContaining('healthy-sibling'),
     });
     expect(managerDeleteSpy).toHaveBeenCalledWith(sibling.id);
-    expect(poolDestroySpy).toHaveBeenCalledWith(sibling.id);
+    expect(poolDestroySpy).toHaveBeenCalledWith(sibling.id, { forThreadDeletion: true });
     expect(manager.getThread(sibling.id)).toBeUndefined();
     expect(manager.listThreads().map(t => t.name)).not.toContain('healthy-sibling');
   });

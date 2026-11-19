@@ -152,6 +152,8 @@ export interface IExecutor {
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
   /** Validate the original session without allocating one. May run inside its creating turn. */
   checkHostScheduleSession?(sessionId: string): void;
+  /** AGY can temporarily wait for an observed command in the original live session. */
+  isHostScheduleWaitingForCommand?(sessionId: string, cwd: string): boolean;
   /** Exact retained cancellation only; never restores execution or starts a host. */
   nativeScheduleCleanup?: import('../scheduling/types').NativeScheduleCleanup;
   /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
@@ -199,6 +201,10 @@ export interface IExecutor {
    * Each backend cleans up its own storage format and location.
    */
   deleteThreadData?(threadId: string): Promise<void>;
+
+  /** Main-thread deletion can retire an owned AGY pointer before storage decides which history to retain. */
+  canRetireAgySelection?(threadId: string): boolean;
+  retireAgySelection?(threadId: string): Promise<void>;
 
   /** Release a known temporary metadata session while its transport is alive.
    * Local pointers are removed separately, only after confirmed process exit.

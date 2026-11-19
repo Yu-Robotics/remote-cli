@@ -126,6 +126,44 @@ describe('AGY ACP-only executor policies', () => {
     fs.writeFileSync(pointer(), JSON.stringify({ id: 'old-acp', transport: 'acp' })); executor = make({ delegationWorker: true });
     await expect(executor.execute('unsafe')).rejects.toThrow('cannot safely resume'); expect(fixture.runtimes).toHaveLength(0);
   });
+
+  it.each(['confirmed', 'replaced', 'unconfirmed'])('retires only its installed main pointer after %s group exit', async outcome => {
+    fs.writeFileSync(pointer(), JSON.stringify({ id: 'detached-main', transport: 'acp' }));
+    executor = make();
+    await executor.resetContext();
+    const archive = pointer() + '.detached-acp';
+    const evidence = path.join(archive, fs.readdirSync(archive)[0]);
+    const original = fs.readFileSync(evidence);
+    await executor.execute('fresh');
+    const nativeHistory = path.join(last().options.home, 'archived-history');
+    fs.writeFileSync(nativeHistory, 'retain');
+    expect(executor.canRetireAgySelection('synthetic-thread')).toBe(true);
+    let release!: () => void;
+    fixture.wait = new Promise(resolve => { release = resolve; });
+    fixture.close = outcome === 'unconfirmed';
+    const retirement = executor.retireAgySelection('synthetic-thread');
+    expect(fs.existsSync(pointer())).toBe(true);
+    // Replace even with the same session and generation. Ownership belongs
+    // to the selection installed by this executor.
+    if (outcome === 'replaced') {
+      fs.writeFileSync(pointer() + '.replacement', fs.readFileSync(pointer()));
+      fs.renameSync(pointer() + '.replacement', pointer());
+    }
+    release();
+    if (outcome === 'confirmed') await expect(retirement).resolves.toBeUndefined();
+    else await expect(retirement).rejects.toThrow(outcome === 'replaced' ? 'changed' : 'unconfirmed');
+    expect(fs.existsSync(pointer())).toBe(outcome !== 'confirmed');
+    expect(fs.readFileSync(evidence)).toEqual(original);
+    expect(fs.readFileSync(nativeHistory, 'utf8')).toBe('retain');
+  });
+
+  it('refuses to apply main-thread retirement to a worker executor', async () => {
+    executor = make({ delegationWorker: true });
+    await executor.execute('worker');
+    await expect(executor.retireAgySelection('synthetic-thread')).rejects.toThrow('main thread');
+    expect(last().closed).toBe(false);
+    expect(fs.existsSync(pointer())).toBe(true);
+  });
   it('retains allocation uncertainty across executor reconstruction and blocks clear', async () => {
     fs.writeFileSync(pointer() + '.allocation-unconfirmed', '{}'); executor = make();
     await expect(executor.execute('retry')).rejects.toThrow('allocation'); await expect(executor.resetContext()).rejects.toThrow('allocation');

@@ -98,6 +98,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     getExecutor: vi.fn().mockReturnValue(mockExecutor),
     getExistingExecutor: vi.fn().mockImplementation((id: string) => mockThreadPool.getExecutor(id)),
     assertContextResettable: vi.fn(),
+    assertThreadDeletionAllowed: vi.fn(),
     clearThreadContext: vi.fn(async () => { mockExecutor.resetContext(); }),
     setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: '/home/user/test-project', changed: true }),
     isThreadBusy: vi.fn().mockReturnValue(false),
@@ -2602,7 +2603,7 @@ describe('MessageHandler', () => {
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td', content: '/thread delete my-feat', timestamp: Date.now() });
 
-      expect(ctx.mockThreadPool.destroyThread).toHaveBeenCalledWith('target-id');
+      expect(ctx.mockThreadPool.destroyThread).toHaveBeenCalledWith('target-id', { forThreadDeletion: true });
       expect(ctx.mockThreadManager.deleteThread).toHaveBeenCalledWith('target-id');
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     });

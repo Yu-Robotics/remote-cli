@@ -562,10 +562,10 @@ describe('thread-wide conversation reset', () => {
 
   it('retains reset intent when thread metadata persistence fails without changing unrelated persistence semantics', async () => {
     await seedDirect();
-    const original = fs.writeFile.bind(fs);
-    const fail = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args: any[]) => {
-      if (String(file) === path.join(home, '.remote-cli', 'threads.json')) throw new Error('Synthetic metadata failure');
-      return (original as any)(file, ...args);
+    const original = fs.rename.bind(fs);
+    const fail = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (String(destination) === path.join(home, '.remote-cli', 'threads.json')) throw new Error('Synthetic metadata failure');
+      return original(source, destination);
     });
     expect(await send('/clear')).toMatchObject({ success: false });
     expect(existsSync(pointer('codex', threadId))).toBe(false);

@@ -205,7 +205,7 @@ export async function startCommand(
 
     // Initialize thread manager (creates default thread if not exists, migrates from single session)
     spinner.text = 'Initializing thread manager...';
-    const threadManager = await ThreadManager.initialize();
+    const threadManager = await ThreadManager.initialize(undefined, { retryDeferredDeletion: true });
 
     // Initialize executor pool (lazily creates executors per thread)
     const threadPool = new ThreadExecutorPool(threadManager, directoryGuard, executorConfig);

@@ -581,6 +581,10 @@ occurrence that is still waiting one minute after its scheduled time is skipped.
 When an occurrence finishes, its owner receives a scheduled result card in the
 original Feishu thread with a task preview and the final output or error.
 
+In an AGY main conversation, a scheduled prompt waits while a verified
+`run_command` is running in the background. It can use the same live conversation
+once AGY confirms the command ended and the foreground turn has settled.
+
 From CLI 1.6.266, `/abort` interrupts the current scheduled run. A recurring
 task keeps its next scheduled time. To stop future runs, use `/schedule cancel <id>`.
 Clearing the conversation with `/clear` or `/new` also removes its locally
@@ -649,7 +653,12 @@ Saved main ACP selections remain refused after host loss, even without a schedul
 journal. Explicit `/clear` may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
 ownership remain blockers; use a new thread when guided to do so. Thread data erasure
-has stricter proof requirements than selection reset. No backend switch is automatic.
+has stricter proof requirements than selection reset. From CLI 1.6.270, an idle
+thread with only detached main ACP history can be deleted with `/thread delete`.
+Its name and thread slot become available immediately. On supported local Linux
+volumes, the CLI can erase the old history on startup after a subsequent host
+reboot if it can still verify the files and their ownership. On other platforms
+or when ownership is uncertain, it keeps the files under the deleted thread's ID.
 
 When the AGY executor is not loaded, any retained AGY schedule-owner journal
 (including one marked retired) blocks thread-wide `/clear` and `/cd`, even if the

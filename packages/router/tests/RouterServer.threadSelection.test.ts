@@ -625,7 +625,10 @@ describe('Router durable selected-thread integration', () => {
     const malformed = await click(restored, socket, 'old-card', 'target', []);
     expect(malformed.toast.type).toBe('error');
     expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
-    const missing = await click(restored, socket, 'old-card', 'target', [{ id: 'default-id', name: 'default', status: 'idle' }]);
+    const missing = await click(restored, socket, 'old-card', 'target', [
+      { id: 'default-id', name: 'default', status: 'idle' },
+      { id: 'replacement-id', name: 'target', status: 'idle' },
+    ]);
     expect(missing.toast.content).toContain('no longer exists');
     expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
     expect(commands(socket)).toHaveLength(0);

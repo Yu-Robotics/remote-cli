@@ -12,6 +12,11 @@ import {
 import type { BackendKey } from '../types/config';
 import { assertAgySelectionResettable, detachAgySelection } from '../executor/agy/AgySessionSelection';
 import { ThreadContextReset } from './ThreadContextReset';
+import { auxiliaryFiles, collectDetachedDeletion, inspectAgyDeletion, observeDetachedDeletion, threadUuid, type DetachedDeletion } from './DetachedAgyDeletion';
+import { replaceAtomicFile } from '../delegation/AtomicFile';
+import { syncDirectory } from '../delegation/OwnershipRuntime';
+
+interface Catalog extends ThreadStore { deferredAgyDeletions?: Record<string, DetachedDeletion> }
 
 /**
  * Manages thread lifecycle: create, list, update, delete.
@@ -21,12 +26,12 @@ import { ThreadContextReset } from './ThreadContextReset';
  */
 export class ThreadManager {
   readonly contextResets: ThreadContextReset;
-  private store: ThreadStore;
+  private store: Catalog;
   private storePath: string;
   private sessionsDir: string;
   private persistQueue: Promise<void> = Promise.resolve();
 
-  private constructor(storePath: string, sessionsDir: string, store: ThreadStore) {
+  private constructor(storePath: string, sessionsDir: string, store: Catalog) {
     this.storePath = storePath;
     this.sessionsDir = sessionsDir;
     this.store = store;
@@ -39,7 +44,7 @@ export class ThreadManager {
    *
    * @param configDir Base config directory (defaults to ~/.remote-cli)
    */
-  static async initialize(configDir?: string): Promise<ThreadManager> {
+  static async initialize(configDir?: string, options: { retryDeferredDeletion?: boolean } = {}): Promise<ThreadManager> {
     const baseDir = configDir
       ? path.join(configDir, '.remote-cli')
       : path.join(process.env.HOME || require('os').homedir(), '.remote-cli');
@@ -50,13 +55,26 @@ export class ThreadManager {
     await fs.mkdir(baseDir, { recursive: true });
     await fs.mkdir(sessionsDir, { recursive: true });
 
-    let store: ThreadStore = { threads: {} };
+    let store: Catalog = { threads: {} };
 
     try {
       const raw = await fs.readFile(storePath, 'utf-8');
-      store = JSON.parse(raw) as ThreadStore;
-    } catch {
-      // File does not exist or is invalid — start fresh
+      store = JSON.parse(raw) as Catalog;
+      if (!store?.threads || typeof store.threads !== 'object' || Array.isArray(store.threads)
+        || (store.deferredAgyDeletions !== undefined && (!store.deferredAgyDeletions
+          || typeof store.deferredAgyDeletions !== 'object' || Array.isArray(store.deferredAgyDeletions)))) {
+        throw new Error('Invalid thread catalog; retained thread identities cannot be verified.');
+      }
+      for (const [id, record] of Object.entries(store.deferredAgyDeletions ?? {})) {
+        if (!threadUuid.test(id) || record?.threadId !== id || record.version !== 1 || store.threads[id]) {
+          throw new Error('Conflicting or invalid retained thread identity.');
+        }
+      }
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error('The thread catalog (threads.json) could not be parsed. Restore an intact copy from backup and restart the CLI.');
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
 
     const manager = new ThreadManager(storePath, sessionsDir, store);
@@ -65,7 +83,7 @@ export class ThreadManager {
     if (!Object.values(store.threads).some(thread => thread.name === DEFAULT_THREAD_NAME)) {
       const sessionId = await manager.readLegacySessionId(baseDir);
       const defaultThread: Thread = {
-        id: randomUUID(),
+        id: manager.newId(store),
         name: DEFAULT_THREAD_NAME,
         sessionId,
         workingDirectory: process.cwd(),
@@ -73,10 +91,10 @@ export class ThreadManager {
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
       };
-      store.threads[defaultThread.id] = defaultThread;
-      await manager.persist();
+      await manager.commit(next => { next.threads[defaultThread.id] = defaultThread; });
     }
 
+    if (options.retryDeferredDeletion) await manager.retryDeferredDeletion();
     return manager;
   }
 
@@ -102,29 +120,29 @@ export class ThreadManager {
       throw new Error(`Invalid thread name: "${name}". Use alphanumeric characters and hyphens only (no leading/trailing hyphens).`);
     }
 
-    if (this.getThreadByName(name)) {
-      throw new Error(`Thread "${name}" already exists.`);
-    }
+    return this.commit(store => {
+      if (Object.values(store.threads).some(t => t.name === name)) throw new Error(`Thread "${name}" already exists.`);
+      if (Object.keys(store.threads).length >= MAX_THREADS) throw new Error(`Maximum ${MAX_THREADS} threads allowed. Delete an existing thread first.`);
+      const thread: Thread = {
+        id: this.newId(store),
+        name,
+        sessionId: null,
+        workingDirectory,
+        delegationWorkspaceGeneration: 0,
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        ...(backend ? { backend } : {}),
+      };
 
-    const count = Object.keys(this.store.threads).length;
-    if (count >= MAX_THREADS) {
-      throw new Error(`Maximum ${MAX_THREADS} threads allowed. Delete an existing thread first.`);
-    }
+      store.threads[thread.id] = thread;
+      return thread;
+    });
+  }
 
-    const thread: Thread = {
-      id: randomUUID(),
-      name,
-      sessionId: null,
-      workingDirectory,
-      delegationWorkspaceGeneration: 0,
-      createdAt: Date.now(),
-      lastActiveAt: Date.now(),
-      ...(backend ? { backend } : {}),
-    };
-
-    this.store.threads[thread.id] = thread;
-    await this.persist();
-    return thread;
+  private newId(store: Catalog): string {
+    let id = randomUUID();
+    while (store.threads[id] || store.deferredAgyDeletions?.[id]) id = randomUUID();
+    return id;
   }
 
   /**
@@ -162,81 +180,94 @@ export class ThreadManager {
     id: string,
     updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'speeds' | 'backend' | 'delegation' | 'delegationBackends' | 'delegationWorkspaceGeneration'>>
   ): Promise<Thread> {
-    const thread = this.store.threads[id];
-    if (!thread) throw new Error(`Thread not found: ${id}`);
-
-    const updated: Thread = { ...thread, ...updates };
-    this.store.threads[id] = updated;
-    await this.persist();
-    return updated;
+    return this.commit(store => {
+      const thread = store.threads[id];
+      if (!thread) throw new Error(`Thread not found: ${id}`);
+      return store.threads[id] = { ...thread, ...updates };
+    });
   }
 
   /** Clear explicit backend overrides so all threads follow the global backend. */
   async clearBackendOverrides(): Promise<void> {
-    let changed = false;
-    for (const thread of Object.values(this.store.threads)) {
-      if (thread.backend !== undefined) {
-        delete thread.backend;
-        changed = true;
+    await this.commit(store => {
+      for (const thread of Object.values(store.threads)) {
+        if (thread.backend === undefined) continue;
+        const { backend, ...rest } = thread;
+        store.threads[thread.id] = rest;
       }
-    }
-    if (changed) await this.persist();
+    });
   }
 
-  /**
-   * Delete a thread.
-   * Cannot delete the default thread.
-   * Removes AGY data even when that backend has no active executor.
-   */
-  async deleteThread(id: string): Promise<void> {
+  private async agyRoot(): Promise<string> {
+    const root = path.join(await fs.realpath(os.homedir()), '.remote-cli');
+    try { return await fs.realpath(root); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return root; throw error; }
+  }
+
+  async assertThreadDeletionAllowed(id: string, options: { allowCurrentAgySession?: boolean } = {}): Promise<void> {
+    const root = await this.agyRoot();
+    await this.inspectDeletion(root, id, options.allowCurrentAgySession);
+    await auxiliaryFiles(await fs.realpath(path.dirname(this.storePath)), root, id);
+  }
+
+  private async inspectDeletion(root: string, id: string, allowCurrent = false): Promise<string[]> {
     const thread = this.store.threads[id];
     if (!thread) throw new Error(`Thread not found: ${id}`);
+    if (thread.id !== id) throw new Error('Invalid thread catalog identity.');
+    if (thread.name === DEFAULT_THREAD_NAME) throw new Error('Cannot delete the default thread.');
+    this.contextResets.assertReady(id);
+    return inspectAgyDeletion(root, id, allowCurrent);
+  }
 
-    if (thread.name === DEFAULT_THREAD_NAME) {
-      throw new Error('Cannot delete the default thread.');
-    }
-
-    const dataDir = path.dirname(this.storePath);
-    const agyDataDir = path.join(os.homedir(), '.remote-cli');
-    // Thread IDs are generated UUIDs; refuse a malformed persisted ID before
-    // using it as a filesystem component for recursive cleanup.
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-      throw new Error('Invalid thread ID for data cleanup');
-    }
-    // An inactive backend can still own native work. A recorded exact group exit
-    // permits explicit data deletion, never automatic conversation replay.
-    const agyOwner = path.join(agyDataDir, 'agy-sessions', `${id}.json.native-schedules`);
-    const agyCheckpoint = path.join(agyDataDir, 'agy-sessions', `${id}.json.checkpoint`);
-    try {
-      await fs.lstat(agyCheckpoint + '.lock');
-      throw new Error('AGY checkpoint transition is unconfirmed; thread state was retained.');
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    try {
-      await fs.lstat(path.join(agyDataDir, 'agy-sessions', `${id}.json.detached-acp`));
-      throw new Error('Detached AGY ACP history has unconfirmed predecessor retirement; thread data was retained.');
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    try {
-      const pointer = JSON.parse(await fs.readFile(path.join(agyDataDir, 'agy-sessions', `${id}.json`), 'utf8'));
-      if (pointer.transport === 'acp') throw new Error('AGY ACP host retirement is unconfirmed; session data was retained.');
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    try {
-      const owner = JSON.parse(await fs.readFile(agyOwner, 'utf8'));
-      if (typeof owner.sessionId !== 'string' || typeof owner.hostId !== 'string' || owner.retired !== true) {
-        throw new Error('AGY native host retirement is unconfirmed; thread data and schedule ownership were retained.');
+  async deleteThread(id: string): Promise<void> {
+    await this.commit(async store => {
+      const dataDir = await fs.realpath(path.dirname(this.storePath));
+      const root = await this.agyRoot();
+      const archived = await this.inspectDeletion(root, id);
+      const auxiliary = await auxiliaryFiles(dataDir, root, id);
+      const pointer = path.join(root, 'agy-sessions', id + '.json');
+      if (archived.length) {
+        const canonicalHome = await fs.realpath(os.homedir());
+        const record: DetachedDeletion = root === path.join(canonicalHome, '.remote-cli')
+          ? await observeDetachedDeletion(root, id, archived, Object.values(store.threads))
+          : { version: 1, threadId: id };
+        if (auxiliary.length) record.auxiliary = Object.fromEntries(auxiliary.map(e => [e.key, e.identity]));
+        store.deferredAgyDeletions = { ...store.deferredAgyDeletions, [id]: record };
+      } else {
+        await fs.rm(pointer, { force: true });
+        await fs.rm(path.join(root, 'agy-homes', id), { recursive: true, force: true });
+        await fs.rm(pointer + '.native-schedules', { force: true });
+        await fs.rm(pointer + '.checkpoint', { force: true });
+        for (const entry of auxiliary) await fs.unlink(entry.file);
       }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    // Revoke Codex grants and remove AGY data regardless of the active backend.
-    await fs.rm(path.join(dataDir, 'codex-sandbox', `${id}.json`), { force: true });
-    await fs.rm(path.join(agyDataDir, 'agy-sessions', `${id}.json`), { force: true });
-    await fs.rm(path.join(agyDataDir, 'agy-homes', id), { recursive: true, force: true });
-    await fs.rm(agyOwner, { force: true });
-    await fs.rm(agyCheckpoint, { force: true });
-    for (const root of new Set([dataDir, agyDataDir])) {
-      await fs.rm(path.join(root, 'dsh-sessions', `${id}.json`), { force: true });
-      await fs.rm(path.join(root, 'dsh-sessions', `${id}.handoff.json`), { force: true });
+      delete store.threads[id];
+    });
+    const record = this.store.deferredAgyDeletions?.[id];
+    if (record?.auxiliary) await this.finishAuxiliary(id, record);
+  }
+
+  private async finishAuxiliary(id: string, record: DetachedDeletion): Promise<boolean> {
+    if (!record.auxiliary) return true;
+    try {
+      const entries = await auxiliaryFiles(await fs.realpath(path.dirname(this.storePath)), await this.agyRoot(), id);
+      if (entries.some(e => record.auxiliary?.[e.key] !== e.identity)) return false;
+      for (const entry of entries) { await fs.unlink(entry.file); syncDirectory(path.dirname(entry.file)); }
+      return true;
+    } catch { return false; }
+  }
+
+  private async retryDeferredDeletion(): Promise<void> {
+    for (const [id, record] of Object.entries(this.store.deferredAgyDeletions ?? {})) {
+      if (record.completed || !await this.finishAuxiliary(id, record) || !record.proof) continue;
+      try { this.contextResets.assertReady(id); }
+      catch { continue; }
+      if (await collectDetachedDeletion(await this.agyRoot(), id, record, Object.values(this.store.threads))) {
+        await this.commit(store => {
+          store.deferredAgyDeletions = { ...store.deferredAgyDeletions,
+            [id]: { version: 1, threadId: id, completed: true } };
+        });
+      }
     }
-    delete this.store.threads[id];
-    await this.persist();
   }
 
   /**
@@ -302,20 +333,23 @@ export class ThreadManager {
     for (const pointer of pointers) if (!detached.has(pointer)) await fs.rm(pointer, { force: true });
   }
 
-  /**
-   * Persist store to disk.
-   * Serialized through a promise queue to prevent concurrent writes from
-   * overwriting each other when multiple operations fire simultaneously.
-   * Errors are logged but swallowed in the queue so a single failure does
-   * not disable persistence for subsequent operations.
-   */
-  private persist(): Promise<void> {
-    const write = () =>
-      fs.writeFile(this.storePath, JSON.stringify(this.store, null, 2), 'utf-8');
-    this.persistQueue = this.persistQueue.then(write).catch((err) => {
-      console.error('[ThreadManager] Persistence error:', err);
-      return write();
+  /** Publish the catalog and its UUID reservations in one atomic replacement. */
+  private commit<T>(update: (next: Catalog) => T | Promise<T>): Promise<T> {
+    const result = this.persistQueue.then(async () => {
+      const next = { ...this.store, threads: { ...this.store.threads } };
+      const value = await update(next);
+      const temporary = this.storePath + '.' + randomUUID() + '.tmp';
+      const file = await fs.open(temporary, 'wx', 0o600);
+      try {
+        try { await file.writeFile(JSON.stringify(next, null, 2)); await file.sync(); }
+        finally { await file.close(); }
+        await replaceAtomicFile(temporary, this.storePath);
+        this.store = next;
+        syncDirectory(path.dirname(this.storePath));
+      } finally { await fs.rm(temporary, { force: true }); }
+      return value;
     });
-    return this.persistQueue;
+    this.persistQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

@@ -5,6 +5,19 @@ import path from 'path';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { DEFAULT_THREAD_NAME, MAX_THREADS } from '../../src/thread/types';
 import { isDelegationEnabled } from '../../src/thread/DelegationSettings';
+import { bootIdentity } from '../../src/delegation/OwnershipRuntime';
+import { exclusiveLocalVolume } from '../../src/thread/AgyDeletionVolume';
+import { replaceAtomicFile } from '../../src/delegation/AtomicFile';
+
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>()),
+  bootIdentity: vi.fn(),
+}));
+vi.mock('../../src/thread/AgyDeletionVolume', () => ({ exclusiveLocalVolume: vi.fn() }));
+vi.mock('../../src/delegation/AtomicFile', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/AtomicFile')>();
+  return { replaceAtomicFile: vi.fn(actual.replaceAtomicFile) };
+});
 
 // Mock os.homedir() so tests don't write to real home directory
 const originalHomedir = os.homedir();
@@ -20,6 +33,8 @@ describe('ThreadManager', () => {
     tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-manager-test-')));
     previousHome = process.env.HOME; previousProfile = process.env.USERPROFILE;
     process.env.HOME = tmpDir; process.env.USERPROFILE = tmpDir;
+    vi.mocked(bootIdentity).mockReturnValue({ host: 'fixture-host', boot: 'fixture-boot-a', namespace: 'host' });
+    vi.mocked(exclusiveLocalVolume).mockResolvedValue(true);
     manager = await ThreadManager.initialize(tmpDir);
   });
 
@@ -204,7 +219,176 @@ describe('ThreadManager', () => {
   });
 
   describe('deleteThread', () => {
-    it.each([true, false])('archives inactive ACP selection on explicit clear and refuses later erasure (retired=%s)', async retired => {
+    async function detachedFixture() {
+      const thread = await manager.createThread('old-agy', tmpDir);
+      const root = path.join(tmpDir, '.remote-cli');
+      const pointer = path.join(root, 'agy-sessions', thread.id + '.json');
+      const home = path.join(root, 'agy-homes', thread.id);
+      const conversations = path.join(home, '.gemini', 'antigravity-cli', 'conversations');
+      await fs.mkdir(conversations, { recursive: true });
+      await fs.mkdir(path.dirname(pointer), { recursive: true });
+      for (const id of ['first', 'second']) {
+        await fs.writeFile(pointer, JSON.stringify({ id, transport: 'acp', retired: false }));
+        await fs.writeFile(path.join(conversations, id + '.db'), id);
+        await manager.clearBackendSessionPointers(thread.id);
+      }
+      return { thread, home, pointer, archive: pointer + '.detached-acp', conversations, root };
+    }
+    function reboot(host = 'fixture-host') {
+      vi.mocked(bootIdentity).mockReturnValue({ host, boot: 'fixture-boot-b', namespace: 'host' });
+    }
+    const start = () => ThreadManager.initialize(tmpDir, { retryDeferredDeletion: true });
+
+    it('releases name and quota durably and retries only after a later boot of the original host', async () => {
+      const { thread, home, root, archive } = await detachedFixture();
+      for (let i = 2; i < MAX_THREADS; i++) await manager.createThread('filler-' + i, tmpDir);
+      await expect(manager.createThread('overflow', tmpDir)).rejects.toThrow('Maximum');
+      await manager.assertThreadDeletionAllowed(thread.id);
+      await manager.deleteThread(thread.id);
+      manager = await start();
+      expect(manager.getThread(thread.id)).toBeUndefined();
+      const replacement = await manager.createThread(thread.name, tmpDir);
+      expect(replacement.id).not.toBe(thread.id);
+      const sibling = path.join(root, 'agy-homes', replacement.id);
+      await fs.mkdir(sibling);
+      await fs.writeFile(path.join(sibling, 'keep'), 'sibling');
+      expect(await fs.readdir(archive)).toHaveLength(2);
+      reboot('foreign');
+      await start();
+      expect(await fs.stat(home)).toBeDefined();
+      reboot();
+      await ThreadManager.initialize(tmpDir);
+      expect(await fs.stat(home)).toBeDefined();
+      manager = await start();
+      expect(manager.getThreadByName(thread.name)?.id).toBe(replacement.id);
+      expect(await fs.readFile(path.join(sibling, 'keep'), 'utf8')).toBe('sibling');
+      if (process.platform !== 'linux') {
+        expect(await fs.readdir(archive)).toHaveLength(2);
+        expect(await fs.stat(home)).toBeDefined();
+        return;
+      }
+      await expect(fs.stat(home)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(archive)).rejects.toMatchObject({ code: 'ENOENT' });
+      const catalog = JSON.parse(await fs.readFile(path.join(root, 'threads.json'), 'utf8'));
+      expect(catalog.deferredAgyDeletions[thread.id]).toEqual({ version: 1, threadId: thread.id, completed: true });
+    });
+
+    it('retains the deleted thread\'s own project inside its old native HOME', async () => {
+      const { thread, home, archive } = await detachedFixture();
+      const project = path.join(home, 'project');
+      await fs.mkdir(project);
+      await fs.writeFile(path.join(project, 'source'), 'keep');
+      await manager.updateThread(thread.id, { workingDirectory: project });
+      await manager.deleteThread(thread.id);
+      reboot();
+      manager = await start();
+      expect(manager.getThread(thread.id)).toBeUndefined();
+      expect(await fs.readFile(path.join(project, 'source'), 'utf8')).toBe('keep');
+      expect(await fs.readdir(archive)).toHaveLength(2);
+    });
+
+    it('limits the live-owner exception to the current ACP pointer', async () => {
+      const { thread, pointer, archive } = await detachedFixture();
+      await fs.writeFile(pointer, JSON.stringify({ id: 'active', transport: 'acp' }));
+      const preflight = () => manager.assertThreadDeletionAllowed(thread.id, { allowCurrentAgySession: true });
+      await preflight();
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('retirement is unconfirmed');
+      for (const suffix of ['.allocation-unconfirmed', '.checkpoint.lock', '.native-schedules', '.checkpoint', '.worker-policy']) {
+        await fs.writeFile(pointer + suffix, '{}');
+        await expect(preflight()).rejects.toThrow();
+        await fs.unlink(pointer + suffix);
+      }
+      await fs.writeFile(pointer, JSON.stringify({ id: 'legacy' }));
+      await expect(preflight()).rejects.toThrow();
+      await fs.unlink(pointer);
+      const names = await fs.readdir(archive);
+      await fs.writeFile(path.join(archive, names[0]), JSON.stringify({ retirement: 'unconfirmed', session: { id: 'wrong', transport: 'acp' } }));
+      await expect(preflight()).rejects.toThrow();
+      expect(manager.getThread(thread.id)).toBeDefined();
+    });
+
+    it('preserves both catalog views on atomic replacement failure and supports retry', async () => {
+      const { thread, root, archive } = await detachedFixture();
+      const file = path.join(root, 'threads.json');
+      const grants = path.join(root, 'codex-sandbox');
+      await fs.mkdir(grants);
+      const grant = path.join(grants, thread.id + '.json');
+      await fs.writeFile(grant, '{}');
+      const previous = await fs.readFile(file);
+      vi.mocked(replaceAtomicFile).mockRejectedValueOnce(new Error('injected storage failure'));
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('injected');
+      expect(await fs.readFile(file)).toEqual(previous);
+      expect(await fs.readFile(grant, 'utf8')).toBe('{}');
+      expect(manager.getThreadByName(thread.name)?.id).toBe(thread.id);
+      expect(await fs.readdir(archive)).toHaveLength(2);
+      await manager.deleteThread(thread.id);
+      expect(manager.getThread(thread.id)).toBeUndefined();
+      await expect(fs.stat(grant)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['foreign-workspace', 'replaced-file', 'new-pointer', 'shared-volume', 'hard-link', 'sibling-pointer'])(
+      'retains history after reboot when ownership changes (%s)', async reason => {
+        const { thread, pointer, home, conversations } = await detachedFixture();
+        await manager.deleteThread(thread.id);
+        const file = path.join(conversations, 'first.db');
+        if (reason === 'foreign-workspace') await manager.createThread('linked', home);
+        if (reason === 'replaced-file') await fs.writeFile(file, 'replacement');
+        if (reason === 'new-pointer') await fs.writeFile(pointer, JSON.stringify({ id: 'fresh', transport: 'acp' }));
+        if (reason === 'shared-volume') vi.mocked(exclusiveLocalVolume).mockResolvedValue(false);
+        if (reason === 'hard-link') await fs.link(file, path.join(tmpDir, 'alias'));
+        if (reason === 'sibling-pointer') await fs.writeFile(path.join(path.dirname(pointer), 'sibling.json'), JSON.stringify({ id: 'FIRST' }));
+        reboot();
+        manager = await start();
+        expect(manager.getThread(thread.id)).toBeUndefined();
+        expect(await fs.readFile(path.join(conversations, 'second.db'), 'utf8')).toBe('second');
+      });
+
+    it.runIf(process.platform === 'linux')('resumes after interrupted erasure without requiring already removed entries', async () => {
+      const { thread, home, archive } = await detachedFixture();
+      await manager.deleteThread(thread.id);
+      reboot();
+      const names = await fs.readdir(archive);
+      await fs.unlink(path.join(archive, names[0]));
+      manager = await start();
+      await expect(fs.stat(home)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(archive)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('retains history referenced by a redirected shared native directory', async () => {
+      const { thread, home, conversations } = await detachedFixture();
+      await manager.deleteThread(thread.id);
+      await fs.symlink(path.join(home, '.gemini'), path.join(tmpDir, '.gemini'), process.platform === 'win32' ? 'junction' : 'dir');
+      reboot();
+      await start();
+      expect(await fs.readFile(path.join(conversations, 'first.db'), 'utf8')).toBe('first');
+    });
+
+    it('refuses an archive redirected to a sibling', async () => {
+      const { thread, archive } = await detachedFixture();
+      const sibling = path.join(tmpDir, 'sibling-archive');
+      await fs.rename(archive, sibling);
+      await fs.symlink(sibling, archive, process.platform === 'win32' ? 'junction' : 'dir');
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('ambiguous');
+      expect(await fs.readdir(sibling)).toHaveLength(2);
+      expect(manager.getThread(thread.id)).toBeDefined();
+    });
+
+    it('rejects ambiguous Linux mount inventories before enabling reboot cleanup', async () => {
+      const { exclusiveLinuxMount } = await vi.importActual<typeof import('../../src/thread/AgyDeletionVolume')>('../../src/thread/AgyDeletionVolume');
+      const disk = '1 0 8:1 / / rw - ext4 /dev/example rw';
+      const root = '/fixture/.remote-cli';
+      expect(exclusiveLinuxMount(disk, root)).toBe(true);
+      for (const line of [
+        '2 1 8:1 /fixture /second rw - ext4 /dev/example rw',
+        '2 1 8:1 / /fixture rw - ext4 /dev/example rw',
+        '2 1 8:2 / /fixture/.remote-cli/agy-homes rw - ext4 /dev/example2 rw',
+        '2 1 0:2 / / rw - nfs example.com:/fixture rw',
+        '2 1 0:2 / /fixture rw - nfs example.com:/fixture rw',
+      ]) expect(exclusiveLinuxMount(disk + '\n' + line, root)).toBe(false);
+      expect(() => exclusiveLinuxMount('incomplete', root)).toThrow();
+    });
+
+    it.each([true, false])('archives inactive ACP selection on explicit clear and releases the thread (retired=%s)', async retired => {
       const thread = await manager.createThread('inactive-agy', tmpDir, 'claude');
       const directory = path.join(tmpDir, '.remote-cli', 'agy-sessions'); await fs.mkdir(directory, { recursive: true });
       const pointer = path.join(directory, `${thread.id}.json`), session = { id: 'synthetic-session', transport: 'acp', retired };
@@ -217,9 +401,9 @@ describe('ThreadManager', () => {
       const archive = pointer + '.detached-acp';
       const [name] = await fs.readdir(archive); expect(JSON.parse(await fs.readFile(path.join(archive, name), 'utf8')).session).toEqual(session);
       manager = await ThreadManager.initialize(tmpDir);
-      await expect(manager.deleteThread(thread.id)).rejects.toThrow('Detached');
+      await manager.deleteThread(thread.id);
       expect(await fs.readFile(history, 'utf8')).toBe('native history');
-      expect(manager.getThread(thread.id)).toBeDefined();
+      expect(manager.getThread(thread.id)).toBeUndefined();
     });
 
     it('does not discard inactive schedule ownership during pointer reset', async () => {
@@ -478,15 +662,25 @@ describe('ThreadManager', () => {
   });
 
   describe('initialization edge cases', () => {
-    it('recovers gracefully from corrupt threads.json and recreates default thread', async () => {
+    it('preserves corrupt catalog bytes and fails closed on unknown UUID reservations', async () => {
       const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
       await fs.mkdir(path.join(tmpDir, '.remote-cli'), { recursive: true });
       await fs.writeFile(threadsFile, '{ invalid json !!!');
 
-      const freshManager = await ThreadManager.initialize(tmpDir);
-      const threads = freshManager.listThreads();
-      expect(threads).toHaveLength(1);
-      expect(threads[0].name).toBe(DEFAULT_THREAD_NAME);
+      await expect(ThreadManager.initialize(tmpDir)).rejects.toThrow(/threads\.json.*restore/i);
+      expect(await fs.readFile(threadsFile, 'utf8')).toBe('{ invalid json !!!');
+    });
+
+    it('supports deleting an idle non-AGY thread in a linked config directory', async () => {
+      const root = path.join(tmpDir, '.remote-cli');
+      const actual = path.join(tmpDir, 'config');
+      await fs.rename(root, actual);
+      await fs.symlink(actual, root, process.platform === 'win32' ? 'junction' : 'dir');
+      manager = await ThreadManager.initialize(tmpDir);
+      const thread = await manager.createThread('ordinary', tmpDir, 'codex');
+      await manager.assertThreadDeletionAllowed(thread.id);
+      await manager.deleteThread(thread.id);
+      expect((await ThreadManager.initialize(tmpDir)).getThread(thread.id)).toBeUndefined();
     });
   });
 

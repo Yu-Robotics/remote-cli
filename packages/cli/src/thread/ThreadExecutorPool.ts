@@ -109,6 +109,18 @@ export class ThreadExecutorPool {
   /** Cleanup may inspect an existing executor without resuming a blocked binding. */
   getExistingExecutor(threadId: string): IExecutor | undefined { return this.executors.get(threadId); }
 
+  async assertThreadDeletionAllowed(threadId: string): Promise<void> {
+    this.threadManager.contextResets.assertReady(threadId);
+    const executor = this.executors.get(threadId);
+    if (this.isThreadBusy(threadId) || executor?.hasPendingCancellation?.() || executor?.hasPendingSettingsChange?.()
+      || executor?.hasPendingScheduleMutation?.() || this.contextResetShutdowns.has(threadId)) {
+      throw new Error('Thread has pending backend work or unconfirmed shutdown.');
+    }
+    await this.threadManager.assertThreadDeletionAllowed(threadId, {
+      allowCurrentAgySession: executor?.canRetireAgySelection?.(threadId) === true,
+    });
+  }
+
   assertContextResettable(threadId: string): void {
     if (!this.threadManager.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`);
     if (this.executors.get(threadId)?.isBusy?.()) {
@@ -252,18 +264,24 @@ export class ThreadExecutorPool {
    * process should be torn down (e.g. backend switch), so switching back can
    * resume the conversation.
    */
-  async destroyThread(threadId: string, options: { deleteData?: boolean } = {}): Promise<void> {
+  async destroyThread(threadId: string, options: { deleteData?: boolean; forThreadDeletion?: boolean } = {}): Promise<void> {
     // Teardown must not discard ownership of cleanup retained by a failed reset.
     this.threadManager.contextResets.assertReady(threadId);
     const deleteData = options.deleteData ?? true;
     const executor = this.executors.get(threadId);
     if (executor) {
-      if (deleteData && executor.deleteThreadData) {
+      if (options.forThreadDeletion && executor.retireAgySelection) {
+        await executor.retireAgySelection(threadId);
+      } else if (deleteData && executor.deleteThreadData) {
         await executor.deleteThreadData(threadId);
       }
       // Always destroy the process: some deleteThreadData implementations
       // (e.g. Claude) only unlink the session file. destroy() is idempotent.
       await executor.destroy();
+      if (options.forThreadDeletion) {
+        if (executor.waitForExit) await executor.waitForExit();
+        else if (executor.isProcessRunning?.()) throw new Error('Backend shutdown is unconfirmed. Retry thread deletion after it exits.');
+      }
       this.executors.delete(threadId);
       this.busy.delete(threadId);
       this.errorFlag.delete(threadId);
