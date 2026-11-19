@@ -6,6 +6,7 @@ import type { Server } from 'http';
 import type { AddressInfo } from 'net';
 import os from 'os';
 import path from 'path';
+import { isMainThread } from 'worker_threads';
 import Koa from 'koa';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RouterServer } from '../../../router/src/server';
@@ -297,6 +298,8 @@ describe('Host-timed scheduled turns over the local Router', () => {
   let root: string;
   let f: Awaited<ReturnType<typeof fixture>> | undefined;
   beforeEach(async () => {
+    // Restart cases release and reacquire the native schedule catalog lock.
+    expect(isMainThread).toBe(true);
     root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'host-scheduled-turns-')));
     vi.stubEnv('HOME', root);
     vi.stubEnv('USERPROFILE', root);

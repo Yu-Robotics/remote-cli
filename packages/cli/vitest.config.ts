@@ -45,6 +45,7 @@ export const nativeOwnershipTestFiles = [
   'tests/delegation/ManagedNativeSessionDeletion.test.ts',
   'tests/delegation/ManagedHistoryBackends.test.ts',
   'tests/delegation/ManagedRemainingHistoryBackends.test.ts',
+  'tests/integration/host-scheduled-turns.test.ts',
   'tests/integration/thread-context-reset.test.ts',
 ];
 export const processIsolatedTestFiles = [...realGitTestFiles, ...nativeOwnershipTestFiles];
