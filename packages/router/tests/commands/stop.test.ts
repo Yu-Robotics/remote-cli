@@ -36,6 +36,7 @@ describe('stop command', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     vi.restoreAllMocks();
   });
@@ -64,27 +65,13 @@ describe('stop command', () => {
       mockPidManager.getRunningPid.mockResolvedValue(12345);
     });
 
-    it('should send SIGTERM to the running process', async () => {
+    it('signals the recorded PID, removes its record and reports a graceful stop', async () => {
       mockPidManager.isProcessRunning.mockReturnValue(false);
 
       await stopCommand();
 
-      expect(processKillSpy).toHaveBeenCalledWith(12345, 'SIGTERM');
-    });
-
-    it('should clean up PID file after stopping', async () => {
-      mockPidManager.isProcessRunning.mockReturnValue(false);
-
-      await stopCommand();
-
-      expect(mockPidManager.removePid).toHaveBeenCalled();
-    });
-
-    it('should report success when stopped', async () => {
-      mockPidManager.isProcessRunning.mockReturnValue(false);
-
-      await stopCommand();
-
+      expect(processKillSpy.mock.calls).toEqual([[12345, 'SIGTERM']]);
+      expect(mockPidManager.removePid).toHaveBeenCalledOnce();
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('stopped successfully'));
     });
 
@@ -117,32 +104,18 @@ describe('stop command', () => {
     it('should send SIGKILL if process does not stop within timeout', async () => {
       mockPidManager.getRunningPid.mockResolvedValue(12345);
 
-      // Process keeps running until SIGKILL
-      let killCount = 0;
-      mockPidManager.isProcessRunning.mockImplementation(() => {
-        // After SIGKILL, process stops
-        return killCount < 2;
-      });
-      processKillSpy.mockImplementation((pid: number, signal: string) => {
-        killCount++;
-        return true;
-      });
-
-      // Use fake timers for timeout test
+      mockPidManager.isProcessRunning.mockReturnValue(true);
       vi.useFakeTimers();
 
       const stopPromise = stopCommand();
 
-      // Fast forward time to trigger timeout
-      await vi.advanceTimersByTimeAsync(11000);
-
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(processKillSpy.mock.calls).toEqual([[12345, 'SIGTERM']]);
+      expect(mockPidManager.removePid).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_001);
       await stopPromise;
-
-      vi.useRealTimers();
-
-      // Should have sent both SIGTERM and SIGKILL
-      expect(processKillSpy).toHaveBeenCalledWith(12345, 'SIGTERM');
-      expect(processKillSpy).toHaveBeenCalledWith(12345, 'SIGKILL');
+      expect(processKillSpy.mock.calls).toEqual([[12345, 'SIGTERM'], [12345, 'SIGKILL']]);
+      expect(mockPidManager.removePid).toHaveBeenCalledOnce();
     });
   });
 });

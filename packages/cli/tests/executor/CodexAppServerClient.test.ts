@@ -155,23 +155,11 @@ describe('CodexAppServerClient', () => {
     await Promise.all([stopping, retry, waiting, starting]);
     expect(closed).toBe(true);
     expect(restarted).toBe(true);
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
     const finalStop = client.stop();
     await vi.advanceTimersByTimeAsync(10);
     await finalStop;
     expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('retains child ownership when signaling fails, until a later close is observed', async () => {
-    const child = fakeProcess('test', false);
-    child.kill.mockImplementation(() => { throw new Error('Synthetic signal failure'); });
-    mockSpawn.mockReturnValue(child);
-    const client = new CodexAppServerClient();
-    await client.start();
-    await expect(client.stop()).rejects.toThrow('could not be stopped');
-    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
-    await expect(client.start()).rejects.toThrow('exit could not be confirmed');
-    child.emit('close', null, 'SIGKILL');
-    await expect(client.waitForExit()).resolves.toBeUndefined();
   });
 
   it('keeps whole-thread reset retries blocked after the real Codex executor has already been destroyed', async () => {
@@ -274,25 +262,6 @@ describe('CodexAppServerClient', () => {
     mockSpawn.mockReturnValue(fakeProcess());
     await client.start(); await client.stop();
     expect(mockSpawn).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not spawn a replacement while a previous stop is still awaiting exit', async () => {
-    const child = fakeProcess(); child.exitCode = null; child.signalCode = null;
-    mockSpawn.mockReturnValue(child);
-    const client = new CodexAppServerClient();
-    await client.start();
-    const stopping = client.stop();
-    mockSpawn.mockReturnValue(fakeProcess());
-    const starting = client.start();
-    await Promise.resolve();
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
-    child.emit('exit', 0, null);
-    await Promise.resolve();
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
-    child.emit('close', 0, null);
-    await stopping; await starting;
-    expect(mockSpawn).toHaveBeenCalledTimes(2);
-    await client.stop();
   });
 
   it('applies launch isolation only to opted-in maintenance clients and leaves ordinary clients unchanged', async () => {

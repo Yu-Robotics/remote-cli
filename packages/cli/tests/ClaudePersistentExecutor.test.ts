@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { EventEmitter } from 'events';
+import os from 'os';
+import path from 'path';
 
 // Mock child_process
 vi.mock('child_process', () => ({
@@ -245,16 +247,14 @@ describe('ClaudePersistentExecutor', () => {
     });
 
     it('should have default working directory', () => {
-      const cwd = executor.getCurrentWorkingDirectory();
-      expect(cwd).toBeDefined();
-      expect(typeof cwd).toBe('string');
+      expect(executor.getCurrentWorkingDirectory()).toBe(process.cwd());
     });
 
     it('should initialize with custom working directory', () => {
       const customDir = '~/test-project';
       const customExecutor = new ClaudePersistentExecutor(directoryGuard, customDir);
       const cwd = customExecutor.getCurrentWorkingDirectory();
-      expect(cwd).toContain('test-project');
+      expect(cwd).toBe(path.join(os.homedir(), 'test-project'));
     });
 
     it('should fall back to process.cwd() if custom directory is invalid', () => {
@@ -267,11 +267,11 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('working directory management', () => {
-    it('should set working directory if path is safe', async () => {
+    it('sets an allowed tilde path to its absolute working directory', async () => {
       const safePath = '~/test-project';
       await executor.setWorkingDirectory(safePath);
       const cwd = executor.getCurrentWorkingDirectory();
-      expect(cwd).toContain('test-project');
+      expect(cwd).toBe(path.join(os.homedir(), 'test-project'));
     });
 
     it('should throw error if path is not safe', async () => {
@@ -279,12 +279,6 @@ describe('ClaudePersistentExecutor', () => {
       await expect(executor.setWorkingDirectory(unsafePath)).rejects.toThrow();
     });
 
-    it('should normalize tilde paths', async () => {
-      await executor.setWorkingDirectory('~/test-project');
-      const cwd = executor.getCurrentWorkingDirectory();
-      expect(cwd).not.toContain('~');
-      expect(cwd).toContain('test-project');
-    });
   });
 
   describe('incremental text output', () => {
@@ -634,12 +628,8 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('cleanup', () => {
-    it('should cleanup resources on destroy', async () => {
+    it('allows repeated destruction and rejects subsequent execution', async () => {
       await executor.destroy();
-      expect(() => executor.destroy()).not.toThrow();
-    });
-
-    it('should reject executions after destroy', async () => {
       await executor.destroy();
       const result = await executor.execute('test command');
 

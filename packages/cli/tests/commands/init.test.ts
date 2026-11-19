@@ -46,44 +46,24 @@ describe('explicit text-only init command', () => {
   });
 
   describe('first time initialization', () => {
-    it('should generate device ID and binding code', async () => {
+    it('registers and saves the machine-derived device ID and returns the Router binding code', async () => {
+      const serverUrl = 'https://router.example.com';
+      const deviceId = `dev_${os.platform()}_test-machine`;
       mockAxios.post.mockResolvedValue({
         data: {
           success: true,
           bindingCode: 'ABC-123-XYZ',
-          deviceId: 'dev_test_12345',
           expiresAt: Date.now() + 300000,
         },
       });
 
-      const result = await initCommand({
-        withFiles: false,
-        serverUrl: 'https://test-server.com',
-      });
+      const result = await initCommand({ withFiles: false, serverUrl });
 
-      expect(result.success).toBe(true);
-      expect(result.bindingCode).toBe('ABC-123-XYZ');
-      expect(result.deviceId).toMatch(/^dev_[a-z0-9]+_[a-z0-9\-]+$/);
-      expect(mockConfig.set).toHaveBeenCalledWith('deviceId', expect.stringMatching(/^dev_[a-z0-9]+_[a-z0-9\-]+$/));
-      expect(mockConfig.set).toHaveBeenCalledWith('serverUrl', 'https://test-server.com');
-    });
-
-    it('should use machine ID to generate device ID', async () => {
-      mockAxios.post.mockResolvedValue({
-        data: {
-          success: true,
-          bindingCode: 'XYZ-456-ABC',
-          deviceId: 'dev_test_12345',
-          expiresAt: Date.now() + 300000,
-        },
-      });
-
-      await initCommand({
-        withFiles: false,
-        serverUrl: 'https://test-server.com',
-      });
-
-      expect(mockMachineId).toHaveBeenCalled();
+      expect(mockAxios.post).toHaveBeenCalledWith(`${serverUrl}/api/bind/request`,
+        { deviceId, deviceName: 'synthetic-device', platform: os.platform() }, expect.any(Object));
+      expect(result).toMatchObject({ success: true, deviceId, bindingCode: 'ABC-123-XYZ' });
+      expect(mockConfig.set).toHaveBeenCalledWith('deviceId', deviceId);
+      expect(mockConfig.set).toHaveBeenCalledWith('serverUrl', serverUrl);
     });
 
     it('should handle server connection errors', async () => {

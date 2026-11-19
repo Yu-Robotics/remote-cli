@@ -1175,7 +1175,7 @@ describe('delegation in the existing thread workflow', () => {
 });
 
 describe('delegation workflow fixture phase boundaries', () => {
-  it('observes slow admission beyond the old polling window without assuming worker entry', async () => {
+  it('waits for the worker entry signal while admission is delayed', async () => {
     vi.useFakeTimers();
     const phases = fixturePhases();
     const admission = signal();
@@ -1190,12 +1190,8 @@ describe('delegation workflow fixture phase boundaries', () => {
     });
     phases.releaseOnDrain(() => { admission.resolve(); finish.resolve(); });
     const observed = phases.wait('worker entry', started.promise, active);
-    // Reproduce the old default observer's false failure, without sleeping.
-    const oldObserver = vi.waitFor(() => expect(entered).toBe(true));
-    const oldFailure = expect(oldObserver).rejects.toThrow();
     try {
       await vi.advanceTimersByTimeAsync(1_500);
-      await oldFailure;
       expect(entered).toBe(false);
       admission.resolve();
       await observed;

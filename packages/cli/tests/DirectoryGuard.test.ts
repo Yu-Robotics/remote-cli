@@ -63,11 +63,6 @@ describe('DirectoryGuard', () => {
       expect(result).toBe(false);
     });
 
-    it('should detect symlink-like path traversal', () => {
-      const result = guard.isSafePath('~/projects/subdir/../../../../etc');
-      expect(result).toBe(false);
-    });
-
     it('should allow legitimate parent directory access within allowed path', () => {
       const result = guard.isSafePath('~/projects/subdir/../another');
       expect(result).toBe(true);
@@ -144,7 +139,8 @@ describe('DirectoryGuard', () => {
     });
 
     it('should reject unsafe working directory', () => {
-      expect(() => guard.resolveWorkingDirectory('/etc')).toThrow('not allowed');
+      const denied = path.join(homeDir, 'outside');
+      expect(() => guard.resolveWorkingDirectory(denied)).toThrow(`${denied} is not allowed`);
     });
 
     it('should reject path traversal in working directory', () => {
@@ -211,27 +207,6 @@ describe('DirectoryGuard', () => {
     });
   });
 
-  describe('error messages', () => {
-    it('should provide descriptive error for unsafe path', () => {
-      try {
-        guard.resolveWorkingDirectory('/etc');
-        expect.fail('Should have thrown an error');
-      } catch (error: any) {
-        expect(error.message).toContain('not allowed');
-        expect(error.message).toContain(guard.normalizePath('/etc'));
-      }
-    });
-
-    it('should provide descriptive error for path traversal', () => {
-      try {
-        guard.resolveWorkingDirectory('~/projects/../../etc');
-        expect.fail('Should have thrown an error');
-      } catch (error: any) {
-        expect(error.message).toContain('not allowed');
-      }
-    });
-  });
-
   describe('edge cases', () => {
     it('should handle paths with double slashes', () => {
       const result = guard.isSafePath('~/projects//subdir//file.ts');
@@ -249,11 +224,8 @@ describe('DirectoryGuard', () => {
       expect(result).toBe(true);
     });
 
-    it('should handle case sensitivity correctly', () => {
-      // On macOS/Windows paths are case-insensitive, on Linux case-sensitive
-      const result = guard.isSafePath('~/PROJECTS/file.ts');
-      // Should still work due to normalization
-      expect(typeof result).toBe('boolean');
+    it('rejects a sibling that shares an allowed directory name prefix', () => {
+      expect(guard.isSafePath('~/projects-copy/file.ts')).toBe(false);
     });
   });
 

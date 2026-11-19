@@ -283,8 +283,9 @@ describe('ScheduleService purge', () => {
     await f.service.purge(owner, { all: true });
     expect((await f.read()).cleanup[0].attribution.ownerToken).toBe(ownerToken);
     const restored = await reload(f);
-    expect((await restored.service.listCleanup(owner))[0].id).toBe('owned-history');
-    expect((restored.service as any).cleanup.get('owned-history').attribution.ownerToken).toBe(ownerToken);
+    expect(await restored.service.listCleanup(owner)).toMatchObject([
+      { id: 'owned-history', attribution: { ownerToken } },
+    ]);
 
   });
 
@@ -338,8 +339,9 @@ describe('ScheduleService purge', () => {
     expect((await f.read()).pending[0]).toMatchObject({ afterCancellation: true, output: 'Synthetic retained result' });
     const restored = await reload(f);
     expect((await restored.service.list(owner))[0]).toMatchObject({ cleanupConfirmed: true, state: 'cancelled' });
-    expect((restored.service as any).pending.size).toBe(1);
+    expect(restored.service.hasPendingResults(owner.threadId)).toBe(true);
     expect(await restored.service.purge(owner, { ids: ['reviewed'] })).toMatchObject({ removedIds: ['reviewed'] });
+    expect(restored.service.hasPendingResults(owner.threadId)).toBe(false);
   });
 
   it.each(['claude', 'dsh'] as const)('retains a completed %s cancellation receipt across restart before purge', async backend => {

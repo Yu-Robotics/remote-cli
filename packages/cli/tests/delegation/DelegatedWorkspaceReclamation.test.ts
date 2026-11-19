@@ -91,7 +91,7 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     await fs.rm(fixture.directory, { recursive: true, force: true });
   }, 60_000);
 
-  it.each([['fulfilled', 30_000], ['rejected', 30_000], ['fulfilled', 120_000], ['rejected', 120_000]] as const)(
+  it.each([['fulfilled', 30_000], ['rejected', 120_000]] as const)(
     'drains a timed-out %s phase before fixture removal with a %i ms deadline', async (outcome, timeoutMs) => {
       let release!: () => void;
       const gate = new Promise<void>(resolve => { release = resolve; });

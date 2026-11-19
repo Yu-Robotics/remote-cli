@@ -9,19 +9,14 @@ function fixture() {
   return { operations, options, scope: operations.scope(options) };
 }
 describe('ScheduleToolScope', () => {
-  it.each([
-    { backend: 'claude', action: { tool: 'CronDelete', input: { id: 'native-other' } } },
-    { backend: 'claude', action: { tool: 'CronCreate', input: { prompt: 'Synthetic unexpected mutation' } } },
-    { backend: 'claude', action: { tool: 'CronList', input: { unexpected: true } } },
-    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'delete', TaskId: 'native-other' } } },
-    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'list', TaskId: 'native-other' } } },
-    { backend: 'agy', action: { tool: 'CronList', input: {} } },
-    { backend: 'dsh', action: { tool: 'CronList', input: {} } },
-  ] as const)('never exposes an unexpected native action from list or its receipt: %j', async ({ backend, action }) => {
+  it.each(['claude', 'agy', 'dsh'] as const)('keeps %s list and its receipt read-only even if the runner requests a native action', async backend => {
     const f = fixture(); let finish!: (value: []) => void;
-    f.options.run.mockImplementation(() => new Promise<[]>(resolve => { finish = resolve; }));
-    const nativeAction = vi.fn(() => action);
-    const scope = f.operations.scope({ ...f.options, backend, nativeAction });
+    const run = vi.fn((_command, _id, allowNativeAction: () => void) => {
+      allowNativeAction();
+      return new Promise<[]>(resolve => { finish = resolve; });
+    });
+    const nativeAction = vi.fn(() => ({ tool: 'CronDelete', input: { id: 'native-other' } }));
+    const scope = f.operations.scope({ ...f.options, backend, run, nativeAction });
     try {
       const first = await scope.invoke('remote_cli_schedule_list', { requestId: 'inventory' });
       const repeated = await scope.invoke('remote_cli_schedule_operation', { requestId: 'inventory' });
@@ -29,7 +24,7 @@ describe('ScheduleToolScope', () => {
       expect(repeated).toEqual(first);
       expect(nativeAction).not.toHaveBeenCalled();
       expect(scope.hasSideEffects).toBe(false);
-      expect(f.options.run).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledOnce();
     } finally { finish([]); await scope.close(); }
   });
 

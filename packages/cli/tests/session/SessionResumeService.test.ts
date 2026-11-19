@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { isSessionControl, sessionResumeGate, SESSION_BACKENDS, validateSessionSharing } from '../../src/session/SessionResumeService';
 
 describe('Session resume capability gate', () => {
-  it.each(SESSION_BACKENDS)('does not pretend that %s can resume before certification', backend => {
+  it.each(SESSION_BACKENDS)('returns an unavailable result for %s at the fallback gate', backend => {
     expect(sessionResumeGate('/resume', backend, { enabled: true })).toMatchObject({
       success: false, code: 'native_capability_unavailable', error: expect.stringContaining('No session was loaded or task sent'),
     });

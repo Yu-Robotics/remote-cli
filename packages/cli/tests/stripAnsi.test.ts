@@ -28,73 +28,14 @@ describe('stripAnsi', () => {
     });
   });
 
-  describe('color codes', () => {
-    it('should strip red color code', () => {
-      expect(stripAnsi('\x1B[31mRed Text\x1B[0m')).toBe('Red Text');
-    });
-
-    it('should strip green color code', () => {
-      expect(stripAnsi('\x1B[32mGreen Text\x1B[0m')).toBe('Green Text');
-    });
-
-    it('should strip yellow color code', () => {
-      expect(stripAnsi('\x1B[33mYellow Text\x1B[0m')).toBe('Yellow Text');
-    });
-
-    it('should strip blue color code', () => {
-      expect(stripAnsi('\x1B[34mBlue Text\x1B[0m')).toBe('Blue Text');
-    });
-
-    it('should strip magenta color code', () => {
-      expect(stripAnsi('\x1B[35mMagenta Text\x1B[0m')).toBe('Magenta Text');
-    });
-
-    it('should strip cyan color code', () => {
-      expect(stripAnsi('\x1B[36mCyan Text\x1B[0m')).toBe('Cyan Text');
-    });
-
-    it('should strip white color code', () => {
-      expect(stripAnsi('\x1B[37mWhite Text\x1B[0m')).toBe('White Text');
-    });
-
-    it('should strip bright color codes', () => {
-      expect(stripAnsi('\x1B[91mBright Red\x1B[0m')).toBe('Bright Red');
-      expect(stripAnsi('\x1B[92mBright Green\x1B[0m')).toBe('Bright Green');
-    });
-  });
-
-  describe('formatting codes', () => {
-    it('should strip bold code', () => {
-      expect(stripAnsi('\x1B[1mBold Text\x1B[0m')).toBe('Bold Text');
-    });
-
-    it('should strip dim code', () => {
-      expect(stripAnsi('\x1B[2mDim Text\x1B[0m')).toBe('Dim Text');
-    });
-
-    it('should strip italic code', () => {
-      expect(stripAnsi('\x1B[3mItalic Text\x1B[0m')).toBe('Italic Text');
-    });
-
-    it('should strip underline code', () => {
-      expect(stripAnsi('\x1B[4mUnderlined Text\x1B[0m')).toBe('Underlined Text');
-    });
-
-    it('should strip blink code', () => {
-      expect(stripAnsi('\x1B[5mBlink Text\x1B[0m')).toBe('Blink Text');
-    });
-
-    it('should strip reverse/inverse code', () => {
-      expect(stripAnsi('\x1B[7mReverse Text\x1B[0m')).toBe('Reverse Text');
-    });
-
-    it('should strip hidden code', () => {
-      expect(stripAnsi('\x1B[8mHidden Text\x1B[0m')).toBe('Hidden Text');
-    });
-
-    it('should strip strikethrough code', () => {
-      expect(stripAnsi('\x1B[9mStrikethrough Text\x1B[0m')).toBe('Strikethrough Text');
-    });
+  it.each([
+    ['foreground', [31, 32, 33, 34, 35, 36, 37]],
+    ['bright foreground', [91, 92]],
+    ['style', [1, 2, 3, 4, 5, 7, 8, 9]],
+  ] as const)('strips %s SGR parameters and preserves the enclosed text', (_group, codes) => {
+    for (const code of codes) {
+      expect(stripAnsi(`\x1b[${code}mText\x1b[0m`)).toBe('Text');
+    }
   });
 
   describe('combined codes', () => {
@@ -242,19 +183,17 @@ describe('stripAnsi', () => {
   });
 
   describe('Claude Code TUI rendering', () => {
-    it('should fully strip Claude Code v2.1.59 TUI header', () => {
+    it('preserves all visible characters in a styled TUI header', () => {
       // Simulated TUI output with private mode + colors
       const tui = '\x1B[?2026h\x1B[32m▐▛███▜▌\x1B[1mClaude Code\x1B[0mv2.1.59';
       const result = stripAnsi(tui);
-      expect(result).not.toContain('[?2026h');
-      expect(result).toContain('Claude Code');
+      expect(result).toBe('▐▛███▜▌Claude Codev2.1.59');
     });
 
     it('should strip mixed escape sequences from TUI prompt line', () => {
       const promptLine = '\x1B[?25l\x1B[36m❯\x1B[0m Try "create a util logging.py..."';
       const result = stripAnsi(promptLine);
       expect(result).toBe('❯ Try "create a util logging.py..."');
-      expect(result).not.toContain('[?25l');
     });
   });
 

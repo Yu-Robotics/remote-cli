@@ -4,10 +4,6 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
-
 describe('JsonStore', () => {
   let store: JsonStore;
   let testDir: string;
@@ -18,22 +14,18 @@ describe('JsonStore', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    // Create a temporary directory for test data
-    testDir = path.join(os.tmpdir(), `jsonstore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    await fs.mkdir(testDir, { recursive: true });
+    testDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'jsonstore-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(testDir);
     storePath = path.join(testDir, 'bindings.json');
     store = new JsonStore(storePath, 0);
   });
 
   afterEach(async () => {
-    // Flush pending saves before cleanup
-    await store.flush();
-
-    // Clean up test directory
     try {
+      await store.flush();
+    } finally {
+      vi.restoreAllMocks();
       await fs.rm(testDir, { recursive: true, force: true });
-    } catch {
-      // Ignore cleanup errors
     }
   });
 
@@ -45,12 +37,14 @@ describe('JsonStore', () => {
       expect(exists).toBe(true);
     });
 
-    it('should use default path when not specified', () => {
+    it('writes to the home-directory bindings file through the default constructor', async () => {
       const defaultStore = new JsonStore();
-      // Access private property via any for testing
-      expect((defaultStore as any).storePath).toBe(
-        path.join(os.homedir(), '.remote-cli-router', 'bindings.json')
-      );
+      await defaultStore.initialize();
+      const pending = defaultStore.setDeviceToUserMap('device', 'owner');
+      await Promise.all([pending, defaultStore.flush()]);
+      const saved = new JsonStore(path.join(testDir, '.remote-cli-router', 'bindings.json'));
+      await saved.initialize();
+      expect(saved.getUserByDeviceId('device')).toBe('owner');
     });
 
     it('should initialize with empty data', async () => {
@@ -303,7 +297,6 @@ describe('JsonStore', () => {
       };
 
       await store.setUserBinding(openId, binding);
-      await new Promise(resolve => setTimeout(resolve, 10));
       await store.updateLastActive(openId);
 
       const updated = store.getUserBinding(openId);
@@ -615,39 +608,16 @@ describe('JsonStore', () => {
     });
   });
 
-  describe('debounced save', () => {
-    beforeEach(async () => {
-      await store.initialize();
-    });
-
-    it('should debounce multiple saves', async () => {
-      // Make multiple rapid changes
-      await store.setBindingCode('CODE-1', {
-        code: 'CODE-1',
-        deviceId: 'dev_1',
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 60000
-      });
-      await store.setBindingCode('CODE-2', {
-        code: 'CODE-2',
-        deviceId: 'dev_2',
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 60000
-      });
-      await store.setBindingCode('CODE-3', {
-        code: 'CODE-3',
-        deviceId: 'dev_3',
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 60000
-      });
-
-      // Flush to ensure data is saved
-      await store.flush();
-
-      // Verify all data is saved
-      const content = await fs.readFile(storePath, 'utf-8');
-      const data = JSON.parse(content);
-      expect(Object.keys(data.bindingCodes).length).toBe(3);
-    });
+  it('flushes all pending binding codes and settles each writer before the save delay', async () => {
+    store = new JsonStore(storePath, 60_000);
+    await store.initialize();
+    const now = Date.now();
+    const codes = ['first', 'second', 'third'].map(code => ({
+      code, deviceId: `device-${code}`, createdAt: now, expiresAt: now + 60_000,
+    }));
+    const writes = codes.map(code => store.setBindingCode(code.code, code));
+    await Promise.all([...writes, store.flush()]);
+    const saved = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    expect(saved.bindingCodes).toEqual(Object.fromEntries(codes.map(code => [code.code, code])));
   });
 });

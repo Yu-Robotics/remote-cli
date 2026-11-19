@@ -22,7 +22,7 @@ describe('FeishuClient', () => {
   });
 
   afterEach(() => {
-    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   describe('getAccessToken', () => {
@@ -49,33 +49,16 @@ describe('FeishuClient', () => {
       );
     });
 
-    it('should return cached token if not expired', async () => {
-      const mockResponse = {
-        data: {
-          code: 0,
-          tenant_access_token: 'test_token_123',
-          expire: 7200
-        }
-      };
-
-      mockedAxios.post = vi.fn().mockResolvedValue(mockResponse);
-
-      // First call
-      const token1 = await client.getAccessToken();
-      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
-
-      // Second call should use cached token
-      const token2 = await client.getAccessToken();
-      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
-      expect(token1).toBe(token2);
-    });
-
-    it('should refresh token if expired', async () => {
+    it('reuses a token until the five-minute refresh window opens', async () => {
+      vi.useFakeTimers();
+      const issuedAt = Date.now();
+      const lifetimeSeconds = 7200;
+      const refreshAt = issuedAt + (lifetimeSeconds - 300) * 1000;
       const mockResponse1 = {
         data: {
           code: 0,
           tenant_access_token: 'test_token_old',
-          expire: 0.001 // Very short expiration
+          expire: lifetimeSeconds
         }
       };
 
@@ -91,17 +74,13 @@ describe('FeishuClient', () => {
         .mockResolvedValueOnce(mockResponse1)
         .mockResolvedValueOnce(mockResponse2);
 
-      // First call
-      await client.getAccessToken();
-
-      // Wait for token to expire
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Second call should fetch new token
-      const token = await client.getAccessToken();
-
+      expect(await client.getAccessToken()).toBe('test_token_old');
+      vi.setSystemTime(refreshAt - 1);
+      expect(await client.getAccessToken()).toBe('test_token_old');
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(refreshAt);
+      expect(await client.getAccessToken()).toBe('test_token_new');
       expect(mockedAxios.post).toHaveBeenCalledTimes(2);
-      expect(token).toBe('test_token_new');
     });
 
     it('should throw error on API failure', async () => {

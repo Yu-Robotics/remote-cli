@@ -271,72 +271,19 @@ describe('/backend command', () => {
       expect(res.output).toContain('★ (active)');
     });
 
-    it('marks Claude Code as active when executor.type is claude-persistent', async () => {
-      mockInstalled('claude');
-      mockConfig.get.mockReturnValue({ type: 'claude-persistent' });
+    it.each([
+      ['claude-persistent', 'Claude Code'], ['agy', 'AGY CLI'], ['codex', 'Codex CLI'],
+      ['opencode', 'OpenCode CLI'], ['kimi', 'Kimi Code CLI'], ['pi', 'Pi'], ['dsh', 'DeepSeek Harness'],
+    ])('marks only the configured %s backend as active', async (type, label) => {
+      mockInstalled('claude', 'agy', 'codex', 'opencode', 'kimi', 'pi', 'dsh');
+      mockConfig.get.mockReturnValue({ type });
 
       await send('/backend');
 
-      const res = sentResponse();
-      expect(res.output).toContain('★ (active)');
-    });
-
-    it('marks AGY as active when executor.type is agy', async () => {
-      mockInstalled('claude', 'agy');
-      mockConfig.get.mockReturnValue({ type: 'agy' });
-
-      await send('/backend');
-
-      const res = sentResponse();
-      const lines = res.output.split('\n');
-      const agyLine = lines.find((l: string) => l.includes('AGY CLI'));
-      const claudeLine = lines.find((l: string) => l.includes('Claude Code'));
-      expect(agyLine).toContain('★ (active)');
-      expect(claudeLine).not.toContain('★ (active)');
-    });
-
-    it('shows Codex CLI when codex is installed', async () => {
-      mockInstalled('claude', 'agy', 'codex');
-
-      await send('/backend');
-
-      const res = sentResponse();
-      expect(res.success).toBe(true);
-      expect(res.output).toContain('Codex CLI');
-    });
-
-    it('shows and marks OpenCode active when opencode is installed', async () => {
-      mockInstalled('claude', 'opencode');
-      mockConfig.get.mockReturnValue({ type: 'opencode' });
-      mockThreadPool.getBackendKey.mockReturnValue('opencode');
-
-      await send('/backend');
-
-      const res = sentResponse();
-      const openCodeLine = res.output.split('\n').find((line: string) => line.includes('OpenCode CLI'));
-      expect(openCodeLine).toContain('★ (active)');
-    });
-
-    it('shows and marks Kimi Code active when kimi is installed', async () => {
-      mockInstalled('claude', 'kimi');
-      mockConfig.get.mockReturnValue({ type: 'kimi' });
-      mockThreadPool.getBackendKey.mockReturnValue('kimi');
-
-      await send('/backend');
-
-      const kimiLine = sentResponse().output.split('\n').find((line: string) => line.includes('Kimi Code CLI'));
-      expect(kimiLine).toContain('★ (active)');
-    });
-
-    it('shows and marks Pi active when pi is installed', async () => {
-      mockInstalled('claude', 'pi');
-      mockConfig.get.mockReturnValue({ type: 'pi' });
-      mockThreadPool.getBackendKey.mockReturnValue('pi');
-
-      await send('/backend');
-
-      const piLine = sentResponse().output.split('\n').find((line: string) => line.includes('Pi'));
-      expect(piLine).toContain('★ (active)');
+      const response = sentResponse();
+      expect(response.success).toBe(true);
+      const active = response.output.split('\n').filter((line: string) => line.includes('★ (active)'));
+      expect(active).toEqual([expect.stringContaining(label)]);
     });
 
     it('shows and marks ZCode active when an official installation is available', async () => {

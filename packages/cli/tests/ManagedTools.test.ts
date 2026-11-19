@@ -52,20 +52,11 @@ describe('managed tool registration', () => {
     vi.stubEnv('REMOTE_CLI_TOOL_GROUPS', '["shell"]'); expect(environmentTools()).toEqual([]);
     vi.stubEnv('REMOTE_CLI_TOOL_GROUPS', ''); expect(environmentTools()).toEqual(managedTools());
   });
-  it('retires only the owning activation, including reuse of the same callback', () => {
-    const bridge = new ManagedToolBridge(); bridges.push(bridge);
-    const handler = vi.fn(async () => ({}));
-    const old = bridge.activate(handler), latest = bridge.activate(handler);
-    old(); expect((bridge as any).handler).toBe(handler);
-    latest(); expect((bridge as any).handler).toBeUndefined();
-    const final = bridge.activate(handler);
-    latest(); expect((bridge as any).handler).toBe(handler);
-    final(); expect((bridge as any).handler).toBeUndefined();
-  });
   it('authenticates tool groups without granting delegation and retains a stable transport across turns', async () => {
     const bridge = new ManagedToolBridge(); bridges.push(bridge);
     const connection = await bridge.start(['scheduling']);
-    const invoke = vi.fn(async () => ({ accepted: true })); const retire = bridge.activate(invoke);
+    const invoke = vi.fn(async () => ({ accepted: true }));
+    const retireFirst = bridge.activate(invoke);
     const call = (name: string, token = connection.token) => fetch(connection.url, { method: 'POST',
       headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ name, args: {}, callId: 'fixture-call' }) });
     expect((await call('remote_cli_delegate')).status).toBe(400);
@@ -74,6 +65,16 @@ describe('managed tool registration', () => {
     const second = await bridge.start(['delegation', 'scheduling']);
     expect(second.url).toBe(connection.url); expect(second.token).toBe(connection.token);
     expect((await call('remote_cli_delegate')).status).toBe(200);
-    retire(); expect((await call('remote_cli_schedule_capabilities')).status).toBe(409);
+    const retireSecond = bridge.activate(invoke);
+    retireFirst();
+    expect((await call('remote_cli_delegate')).status).toBe(200);
+    retireSecond();
+    expect((await call('remote_cli_schedule_capabilities')).status).toBe(409);
+    const retireThird = bridge.activate(invoke);
+    retireSecond();
+    expect((await call('remote_cli_schedule_capabilities')).status).toBe(200);
+    retireThird();
+    expect((await call('remote_cli_schedule_capabilities')).status).toBe(409);
+    expect(invoke).toHaveBeenCalledTimes(4);
   });
 });

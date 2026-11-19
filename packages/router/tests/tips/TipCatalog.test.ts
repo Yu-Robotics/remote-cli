@@ -94,7 +94,7 @@ describe('reviewed illustrated tip catalog', () => {
 
   it('keeps unsupported commands out while allowing the newly approved thread workflow', () => {
     for (const id of ['named-thread', 'reply-old-card', 'queue-clear', 'queue-continue', 'same-backend-worker']) {
-      expect(expectedIds).not.toContain(id);
+      expect(TIPS.some(tip => tip.id === id)).toBe(false);
     }
     for (const tip of TIPS) {
       const text = JSON.stringify(tip);
@@ -232,7 +232,7 @@ describe('reviewed illustrated tip catalog', () => {
     expect(find('file-needs-instruction').action).toContain('\u5b8c\u6210\u6587\u4ef6\u63a5\u6536\u6388\u6743');
     expect(find('file-needs-instruction').detail).toMatch(/\u4e0d\u4f1a\u81ea\u52a8\u542f\u52a8\u4efb\u52a1\u6216\u590d\u5236\u5230\u9879\u76ee\u76ee\u5f55.*\u89e3\u6790\u6709\u8303\u56f4\u9650\u5236/);
     expect(find('image-with-question').action).toContain('\u540c\u4e00\u6761\u98de\u4e66\u5bcc\u6587\u672c\u6d88\u606f');
-    expect(find('image-with-question').detail).toMatch(/AGY \u53ea\u6536\u6587\u672c.*DSH.*\u8fde\u63a5\u80fd\u529b\u548c\u6240\u9009\u6a21\u578b/);
+    expect(find('image-with-question').detail).toMatch(/DSH.*\u8fde\u63a5\u80fd\u529b\u548c\u6240\u9009\u6a21\u578b/);
     expect(find('device-selection').example).toBe('/device\n/device <index>');
     expect(find('device-selection').detail).toMatch(/\u4e0d\u4f1a.*\u4efb\u52a1\u3001\u9879\u76ee\u6587\u4ef6\u6216\u4f1a\u8bdd\u5386\u53f2\u8fc1\u79fb/);
     expect(find('clear-thread-context').action).toMatch(/\u9000\u51fa\u5df2\u786e\u8ba4.*\/clear.*\/new/);

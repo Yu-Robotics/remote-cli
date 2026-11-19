@@ -6,8 +6,6 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { PiExecutor } from '../../src/executor/PiExecutor';
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 
-const originalHome = process.env.HOME;
-const originalHomedir = os.homedir();
 
 const models = [
   { id: 'gemini-3-flash', name: 'Gemini 3 Flash', provider: 'google', reasoning: true, input: ['text', 'image'] },
@@ -134,10 +132,12 @@ describe('PiExecutor', () => {
   let executor: PiExecutor;
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(originalHomedir, '.pi-executor-test-'));
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'pi-executor-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     project = path.join(home, 'project');
     await fs.mkdir(project);
-    process.env.HOME = home;
     executor = new PiExecutor(new DirectoryGuard([home]), {
       initialWorkingDirectory: project,
       threadId: 'thread-pi',
@@ -152,8 +152,8 @@ describe('PiExecutor', () => {
   afterEach(async () => {
     await executor.destroy();
     await fs.rm(home, { recursive: true, force: true });
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('resolves prompt context after native state refresh rather than using a stale pointer', async () => {
@@ -978,67 +978,50 @@ describe('PiExecutor', () => {
     });
   });
 
-  it('re-arms the inactivity watchdog timer on each Pi event', async () => {
-    let resolvePrompt!: (response: PiRpcResponse) => void;
-    transport.request.mockImplementation((command: Record<string, unknown>) => {
-      if (command.type === 'prompt') {
-        return new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; });
-      }
-      return Promise.resolve({ type: 'response', command: String(command.type), success: true });
+  it.each(['text', 'tool start', 'tool end'] as const)('extends the idle deadline on %s activity', async activity => {
+    await executor.listModels();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let dispatched!: () => void;
+    const prompt = new Promise<void>(resolve => { dispatched = resolve; });
+    transport.request.mockImplementation(async command => {
+      if (command.type === 'prompt') dispatched();
+      return { type: 'response', command: String(command.type), success: true };
     });
-
-    const pending = executor.execute('long turn', { inactivityTimeout: 60_000 });
-    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
-    const armed = (executor as any).activeTurn.inactivityTimer;
-    expect(armed).toBeDefined();
-
-    transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'still working' } });
-    expect((executor as any).activeTurn.inactivityTimer).toBeDefined();
-    expect((executor as any).activeTurn.inactivityTimer).not.toBe(armed);
-
-    // Tool events count as activity too.
-    const afterText = (executor as any).activeTurn.inactivityTimer;
-    transport.emit({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { command: 'ls' } });
-    expect((executor as any).activeTurn.inactivityTimer).not.toBe(afterText);
-    const afterStart = (executor as any).activeTurn.inactivityTimer;
-    transport.emit({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'bash', result: { content: [] }, isError: false });
-    expect((executor as any).activeTurn.inactivityTimer).not.toBe(afterStart);
-
-    await executor.abort();
-    resolvePrompt({ type: 'response', command: 'prompt', success: true });
-    await expect(pending).resolves.toMatchObject({ success: false, error: 'Aborted' });
+    try {
+      const run = executor.execute('wait for activity', { inactivityTimeout: 100 });
+      await prompt;
+      await vi.advanceTimersByTimeAsync(90);
+      const events = {
+        text: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '.' } },
+        'tool start': { type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: {} },
+        'tool end': { type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'bash', result: { content: [] } },
+      };
+      transport.emit(events[activity]);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(transport.request).not.toHaveBeenCalledWith({ type: 'abort' });
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(run).resolves.toMatchObject({ success: false, error: expect.stringContaining('inactivity') });
+    } finally { vi.useRealTimers(); }
   });
 
   it('keeps a positive timeout as one hard limit that events cannot extend', async () => {
     await executor.listModels();
-    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
-      if (command.type === 'prompt') {
-        transport.emit({ type: 'agent_start' });
-        return { type: 'response', command: 'prompt', success: true };
-      }
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let dispatched!: () => void;
+    const prompt = new Promise<void>(resolve => { dispatched = resolve; });
+    transport.request.mockImplementation(async command => {
+      if (command.type === 'prompt') dispatched();
       return { type: 'response', command: String(command.type), success: true };
     });
-
-    const startedAt = Date.now();
-    let resolvedAt = 0;
-    const running = executor.execute('long turn', { timeout: 120 });
-    void running.then(() => { resolvedAt = Date.now(); });
-    await vi.waitFor(() => expect((executor as any).activeTurn?.timeoutTimer).toBeDefined());
-    const armed = (executor as any).activeTurn.timeoutTimer;
-    for (let index = 0; index < 8; index += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    try {
+      const running = executor.execute('long turn', { timeout: 120 });
+      await prompt;
+      await vi.advanceTimersByTimeAsync(119);
       transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '.' } });
-      const current = (executor as any).activeTurn;
-      // Pi events must never replace the hard deadline with a fresh one.
-      if (current === undefined || current === null) break;
-      expect(current.timeoutTimer).toBe(armed);
-    }
-
-    await expect(running).resolves.toMatchObject({
-      success: false,
-      error: expect.stringContaining('hard time limit'),
-    });
-    expect(resolvedAt - startedAt).toBeLessThan(400);
+      expect(transport.request).not.toHaveBeenCalledWith({ type: 'abort' });
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(running).resolves.toMatchObject({ success: false, error: expect.stringContaining('hard time limit') });
+    } finally { vi.useRealTimers(); }
   });
 
   it('ignores a non-finite hard timeout instead of arming an immediate deadline', async () => {

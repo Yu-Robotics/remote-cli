@@ -40,7 +40,7 @@ describe('AGY shared original ACP host lifecycle', () => {
     await expect(host.prompt([{ type: 'text', text: 'No automatic nudge' }])).rejects.toThrow('queued');
     expect(client.prompt).toHaveBeenCalledOnce();
   });
-  it('treats cancel timeout as unresolved and never tears down or starts a successor', async () => {
+  it('fences the host when a native foreground prompt rejects', async () => {
     const { host, client } = harness();
     client.prompt.mockRejectedValue(new Error('Synthetic cancellation failure'));
     await expect(host.prompt([{ type: 'text', text: 'Work' }])).rejects.toThrow('failure');
@@ -67,7 +67,8 @@ describe('AGY shared original ACP host lifecycle', () => {
     const { host, client } = harness(); client.waitForExit.mockImplementation(() => new Promise(() => {}));
     await expect(host.close(5)).rejects.toThrow('unconfirmed');
     await expect(host.qualify()).rejects.toThrow();
-    expect('recoveryFor' in host).toBe(false); expect('releaseForRestart' in host).toBe(false);
+    await expect(host.prompt([{ type: 'text', text: 'After unconfirmed exit' }])).rejects.toThrow('closing');
+    expect(client.prompt).not.toHaveBeenCalled();
     expect(client.destroy).toHaveBeenCalledOnce();
   });
 });

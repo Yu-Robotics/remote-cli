@@ -190,15 +190,19 @@ describe('ScheduleService', () => {
     });
 
     it.each(['same user', 'different user'])('retires a full outbox on verified rebind to the %s', async identity => {
-      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_r, _id, admit) =>
-        await admit() ? { success: true, output: 'Old private result' } : undefined);
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (row, _id, admit) =>
+        await admit() ? { success: true, output: `Result for ${row.id}` } : undefined);
       const options = { maxPendingDeliveries: 1, maxRecords: 2, maxLiveSchedules: 2 };
       let service = await run(dispatch, options);
       await service.create(owner, hostInput('completed'));
       await service.create(owner, hostInput('queued', true));
-      deliver.mockRejectedValue(new Error('Offline'));
+      const offlineAttempt = deferred<ScheduleDelivery>();
+      deliver.mockImplementation(async (delivery: ScheduleDelivery) => {
+        offlineAttempt.resolve(delivery);
+        throw new Error('Offline');
+      });
       await tick(interval);
-      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(await offlineAttempt.promise).toMatchObject({ schedule: { ...owner, id: 'completed' }, output: 'Result for completed' });
       await service.destroy();
       current.mockReturnValue(undefined);
       service = await run(dispatch, options);
@@ -209,6 +213,7 @@ describe('ScheduleService', () => {
       current.mockImplementation(candidate => candidate.openId === rebound.openId && candidate.bindingEpoch === rebound.bindingEpoch);
       await service.retryDeliveries();
       expect(service.hasPendingResults()).toBe(false);
+      expect(deliver).toHaveBeenCalledOnce();
       expect(service.hasActiveSchedules()).toBe(false);
       expect((await read()).records.every((row: ScheduleRecord) => row.state === 'interrupted')).toBe(true);
       expect(await service.list(rebound)).toEqual([]);
@@ -216,11 +221,12 @@ describe('ScheduleService', () => {
       expect((await read()).purged).toContainEqual({ ...owner, id: 'completed' });
       await service.destroy();
       service = await run(dispatch, options);
-      deliver.mockResolvedValue(undefined);
+      const reboundDelivery = deferred<ScheduleDelivery>();
+      deliver.mockImplementation(async (delivery: ScheduleDelivery) => { reboundDelivery.resolve(delivery); });
       await tick(interval);
-      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(await reboundDelivery.promise).toMatchObject({ schedule: { ...rebound, id: 'new' }, output: 'Result for new' });
+      expect(deliver).toHaveBeenCalledTimes(2);
       expect(dispatch.mock.calls.map(([record]) => record.id)).toEqual(['completed', 'new']);
-      expect(deliver.mock.calls[1][0].schedule).toMatchObject(rebound);
       await expect(service.create(rebound, { ...hostInput('completed', true), bindingEpoch: rebound.bindingEpoch })).rejects.toThrow(/purged/);
     });
 

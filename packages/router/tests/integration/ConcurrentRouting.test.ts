@@ -39,6 +39,7 @@ describe('ConcurrentRouting - Integration Tests', () => {
   }, 10000); // Increase timeout for setup
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     // Cleanup
     connectionHub.closeAllConnections();
     await store.flush(); // Ensure all saves are complete
@@ -166,7 +167,6 @@ describe('ConcurrentRouting - Integration Tests', () => {
       // Rapidly register and re-register connections
       for (const ws of connections) {
         connectionHub.registerConnection(deviceId, ws);
-        await new Promise(resolve => setTimeout(resolve, 1));
       }
 
       // Only the last connection should be active
@@ -264,22 +264,13 @@ describe('ConcurrentRouting - Integration Tests', () => {
         setupUserWithDevices('user_003', ['dev_003']),
       ]);
 
-      // Register connections
-      registerDeviceConnections(['dev_001', 'dev_002', 'dev_003']);
-
-      // Concurrently update last active for all users
-      const updates = users.map(user =>
-        bindingManager.updateLastActive(user.openId)
-      );
-
-      // Should not throw
-      await expect(Promise.all(updates)).resolves.toBeDefined();
-
-      // Verify all users have updated lastActiveAt
+      const updateTime = Date.now() + 60_000;
+      vi.spyOn(Date, 'now').mockReturnValue(updateTime);
+      await Promise.all(users.map(user => bindingManager.updateLastActive(user.openId)));
       for (const user of users) {
         const binding = await bindingManager.getUserBinding(user.openId);
-        expect(binding).not.toBeNull();
-        expect(binding!.updatedAt).toBeGreaterThan(Date.now() - 1000); // Updated within last second
+        expect(binding?.updatedAt).toBe(updateTime);
+        expect((await bindingManager.getActiveDevice(user.openId))?.lastActiveAt).toBe(updateTime);
       }
     });
   });
@@ -355,10 +346,12 @@ describe('ConcurrentRouting - Integration Tests', () => {
       };
 
       // Concurrently send message and unbind user
-      await Promise.all([
+      const [sent] = await Promise.all([
         connectionHub.sendToDevice(user.activeDeviceId, message),
         bindingManager.unbindUser(user.openId),
       ]);
+      expect(sent).toBe(true);
+      expect(connections.get(user.activeDeviceId).send.mock.calls).toEqual([[JSON.stringify(message)]]);
 
       // Connection should still exist in hub (it's only removed on disconnect)
       expect(connectionHub.isDeviceOnline(user.activeDeviceId)).toBe(true);
@@ -368,7 +361,7 @@ describe('ConcurrentRouting - Integration Tests', () => {
       expect(binding).toBeNull();
     });
 
-    it('should handle concurrent device registration and message send', async () => {
+    it('does not replay an offline send on registration and delivers the next command', async () => {
       const deviceId = 'dev_001';
       const ws = createMockWebSocket();
 
@@ -379,38 +372,33 @@ describe('ConcurrentRouting - Integration Tests', () => {
         timestamp: Date.now(),
       };
 
-      // Race: register and send at the same time
-      const [sendResult] = await Promise.all([
-        connectionHub.sendToDevice(deviceId, message),
-        (async () => {
-          connectionHub.registerConnection(deviceId, ws);
-        })(),
-      ]);
-
-      // Send might fail or succeed depending on timing
-      // The important thing is it doesn't crash
-      expect(typeof sendResult).toBe('boolean');
-
-      // Device should be online after registration
+      const pending = connectionHub.sendToDevice(deviceId, message);
+      connectionHub.registerConnection(deviceId, ws);
+      expect(await pending).toBe(false);
       expect(connectionHub.isDeviceOnline(deviceId)).toBe(true);
+      const next = { ...message, messageId: 'msg_002' };
+      expect(await connectionHub.sendToDevice(deviceId, next)).toBe(true);
+      expect(ws.send.mock.calls).toEqual([[JSON.stringify(next)]]);
     });
 
     it('should handle cleanup during active connections', async () => {
       // Setup multiple devices
       const deviceIds = Array.from({ length: 5 }, (_, i) => `dev_${String(i).padStart(3, '0')}`);
-      registerDeviceConnections(deviceIds);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+      const sockets = registerDeviceConnections(deviceIds);
 
       // All devices are online
       expect(connectionHub.getOnlineDevices()).toHaveLength(5);
 
-      // Wait a bit to ensure timestamps are old enough
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Cleanup stale connections (with 1ms timeout - all should be cleaned because they're older than 1ms)
-      connectionHub.cleanupStaleConnections(1);
-
-      // All devices should be removed
+      clock.mockReturnValue(2000);
+      connectionHub.updateLastActive(deviceIds[0]);
+      connectionHub.cleanupStaleConnections(500);
+      expect(connectionHub.getOnlineDevices()).toEqual([deviceIds[0]]);
+      expect(sockets.get(deviceIds[0]).close).not.toHaveBeenCalled();
+      clock.mockReturnValue(3000);
+      connectionHub.cleanupStaleConnections(500);
       expect(connectionHub.getOnlineDevices()).toHaveLength(0);
+      for (const ws of sockets.values()) expect(ws.close).toHaveBeenCalledOnce();
     });
   });
 

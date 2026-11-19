@@ -24,11 +24,9 @@ describe('stop command', () => {
     vi.clearAllMocks();
 
     mockConfig = {
-      get: vi.fn(),
-      has: vi.fn(() => true),
       getAll: vi.fn(() => ({
         deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
+        serverUrl: 'https://router.example.com',
         service: {
           running: true,
           pid: 12345,
@@ -58,8 +56,9 @@ describe('stop command', () => {
       expect(result.success).toBe(true);
       expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
       expect(mockConfig.set).toHaveBeenCalledWith('service.stoppedAt', expect.any(Number));
-      expect(mockConfig.set).not.toHaveBeenCalledWith('deviceId', undefined);
-      expect(mockConfig.set).not.toHaveBeenCalledWith('serverUrl', undefined);
+      const writtenKeys = mockConfig.set.mock.calls.map(([key]: [string]) => key);
+      expect(writtenKeys).not.toContain('deviceId');
+      expect(writtenKeys).not.toContain('serverUrl');
     });
 
     it.skipIf(process.platform === 'win32')('should stop an installed user service even when config state is stale', async () => {
@@ -80,47 +79,20 @@ describe('stop command', () => {
       expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
     });
 
-    it('should handle service not running', async () => {
-      mockConfig.getAll.mockReturnValue({
-        deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
-        service: {
-          running: false,
-        },
-      });
+    it.each([{}, { service: { running: false } }])('leaves config untouched when no service is running (%j)', async config => {
+      mockConfig.getAll.mockReturnValue(config);
 
       const result = await stopCommand();
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('not running');
-    });
-
-    it('should handle missing service configuration', async () => {
-      mockConfig.getAll.mockReturnValue({
-        deviceId: 'dev_test_12345',
-        serverUrl: 'https://test-server.com',
-      });
-
-      const result = await stopCommand();
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('not running');
+      expect(mockConfig.set).not.toHaveBeenCalled();
     });
   });
 
   describe('shutdown options', () => {
-    it('should return the graceful option after a successful stop', async () => {
-      const result = await stopCommand({ graceful: true });
-
-      expect(result.success).toBe(true);
-      expect(result.graceful).toBe(true);
-    });
-
-    it('should return the force option after a successful stop', async () => {
-      const result = await stopCommand({ force: true });
-
-      expect(result.success).toBe(true);
-      expect(result.force).toBe(true);
+    it.each(['graceful', 'force'] as const)('returns the requested %s option on success', async option => {
+      expect(await stopCommand({ [option]: true })).toMatchObject({ success: true, [option]: true });
     });
   });
 

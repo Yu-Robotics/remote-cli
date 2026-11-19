@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -144,6 +144,15 @@ describe('read-only Codex session catalog', () => {
         expect(list().candidates).toEqual([]);
         expect(list().complete).toBe(false);
       } finally { fs.chmodSync(active, 0o700); }
+    } else {
+      // Windows ACLs and privileged POSIX users do not honor this mode-bit fixture.
+      const readdir = fs.readdirSync.bind(fs);
+      const denied = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: Parameters<typeof readdir>) => {
+        if (String(args[0]) === active) throw Object.assign(new Error('Access denied'), { code: 'EACCES' });
+        return readdir(...args);
+      }) as typeof fs.readdirSync);
+      try { expect(list()).toMatchObject({ candidates: [], complete: false }); }
+      finally { denied.mockRestore(); }
     }
   });
 

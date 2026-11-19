@@ -7,9 +7,6 @@ import os from 'os'
 import fs from 'fs/promises'
 import path from 'path'
 
-// Mock os.homedir() for test isolation
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || '/tmp')
-
 describe('Integration: SSH Workflow', () => {
   let commands: MachineCommands
   let mockSsh: any
@@ -19,7 +16,9 @@ describe('Integration: SSH Workflow', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-workflow-test-'))
-    process.env.HOME = tmpDir
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpDir)
+    vi.stubEnv('HOME', tmpDir)
+    vi.stubEnv('USERPROFILE', tmpDir)
 
     config = await ConfigManager.initialize()
     backupStore = new BackupStore(config.getConfigDir())
@@ -37,65 +36,66 @@ describe('Integration: SSH Workflow', () => {
   })
 
   afterEach(async () => {
-    delete process.env.HOME
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
   it('should support full workflow: add machine → search → view → replace → backup → restore', async () => {
     // Step 2: Add a machine (just id + user, host auto-derived)
-    const addResult = await commands.addMachine('fixture-machine', 'nvidia')
+    const addResult = await commands.addMachine('test-node', 'operator')
     expect(addResult.success).toBe(true)
-    expect(addResult.output).toContain('fixture-machine')
+    expect(addResult.output).toContain('test-node')
 
     // Verify machine persisted by reloading config
     const freshConfig = await ConfigManager.initialize()
-    const machine = freshConfig.get('machines.fixture-machine') as MachineConfig
+    const machine = freshConfig.get('machines.test-node') as MachineConfig
     expect(machine).toBeDefined()
-    expect(machine.user).toBe('nvidia')
+    expect(machine.user).toBe('operator')
     expect(machine.port).toBe(22)
 
     // Step 3: List machines
     const listResult = await commands.listMachines()
     expect(listResult.success).toBe(true)
-    expect(listResult.output).toContain('fixture-machine')
-    expect(listResult.output).toContain('fixture-machine')
+    expect(listResult.output).toContain('test-node')
+    expect(listResult.output).toContain('test-node')
 
     // Step 4: Show machine
-    const showResult = commands.showMachine('fixture-machine')
+    const showResult = commands.showMachine('test-node')
     expect(showResult.success).toBe(true)
-    expect(showResult.output).toContain('fixture-machine')
-    expect(showResult.output).toContain('nvidia')
+    expect(showResult.output).toContain('test-node')
+    expect(showResult.output).toContain('operator')
 
     // Step 5: List containers
     mockSsh.execRemote.mockResolvedValueOnce(
       'abc123\ttraining\tUp 5 hours\tpytorch:latest\ndef456\tinference\tUp 2 hours\ttrt:latest\n'
     )
-    const containersResult = await commands.listContainers('fixture-machine')
+    const containersResult = await commands.listContainers('test-node')
     expect(containersResult.success).toBe(true)
     expect(containersResult.output).toContain('abc123')
     expect(containersResult.output).toContain('training')
 
     // Step 6: Search files on host
     mockSsh.execRemote.mockResolvedValueOnce('/app/model.py\n/app/train.py\n/app/config.yaml\n')
-    const searchResult = await commands.searchFiles('fixture-machine', '/app', '*.py')
+    const searchResult = await commands.searchFiles('test-node', '/app', '*.py')
     expect(searchResult.success).toBe(true)
     expect(searchResult.output).toContain('/app/model.py')
     expect(searchResult.output).toContain('/app/train.py')
 
     // Step 7: Search files in container
     mockSsh.execInContainer.mockResolvedValueOnce('/workspace/data.py\n')
-    const containerSearchResult = await commands.searchFiles('fixture-machine', '/workspace', '*.py', 'abc123')
+    const containerSearchResult = await commands.searchFiles('test-node', '/workspace', '*.py', 'abc123')
     expect(containerSearchResult.success).toBe(true)
     expect(containerSearchResult.output).toContain('container')
 
     // Step 8: View file on host
     mockSsh.readRemoteFile.mockResolvedValueOnce('learning_rate = 0.001\nbatch_size = 32\n')
-    const viewResult = await commands.viewFile('fixture-machine', '/app/config.yaml')
+    const viewResult = await commands.viewFile('test-node', '/app/config.yaml')
     expect(viewResult.success).toBe(true)
     expect(viewResult.output).toContain('learning_rate')
 
     // Step 9: Initiate replace
-    const replaceInit = commands.initiateReplace('fixture-machine', '/app/config.yaml')
+    const replaceInit = commands.initiateReplace('test-node', '/app/config.yaml')
     expect(replaceInit.success).toBe(true)
     expect(replaceInit.pending).toBeDefined()
     expect(replaceInit.output).toContain('Ready to replace')
@@ -108,26 +108,26 @@ describe('Integration: SSH Workflow', () => {
     expect(replaceResult.output).toContain('Backup saved')
 
     // Step 11: List backups
-    const backupsResult = await commands.listBackups('fixture-machine')
+    const backupsResult = await commands.listBackups('test-node')
     expect(backupsResult.success).toBe(true)
     expect(backupsResult.output).toContain('/app/config.yaml')
 
     // Step 12: Restore from backup
-    const backups = await backupStore.findByMachine('fixture-machine')
+    const backups = await backupStore.findByMachine('test-node')
     expect(backups).toHaveLength(1)
     const restoreResult = await commands.restoreBackup(
-      'fixture-machine', backups[0].backupPath, '/app/config.yaml'
+      'test-node', backups[0].backupPath, '/app/config.yaml'
     )
     expect(restoreResult.success).toBe(true)
     expect(restoreResult.output).toContain('Restored')
 
     // Step 13: Remove machine
-    const removeResult = await commands.removeMachine('fixture-machine')
+    const removeResult = await commands.removeMachine('test-node')
     expect(removeResult.success).toBe(true)
 
     // Verify machine removed
     const finalConfig = await ConfigManager.initialize()
-    expect(finalConfig.get('machines.fixture-machine')).toBeUndefined()
+    expect(finalConfig.get('machines.test-node')).toBeUndefined()
   })
 
   it('should handle container file operations end-to-end', async () => {

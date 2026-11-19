@@ -1,15 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MachineCommands } from '../../src/machines/MachineCommands'
-import { SshExecutor } from '../../src/machines/SshExecutor'
 import { BackupStore } from '../../src/machines/BackupStore'
 import { ConfigManager } from '../../src/config/ConfigManager'
 import type { MachineConfig } from '../../src/machines/types'
 import os from 'os'
 import fs from 'fs/promises'
 import path from 'path'
-
-// Mock os.homedir() for test isolation
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || '/tmp')
 
 describe('MachineCommands', () => {
   let commands: MachineCommands
@@ -20,7 +16,9 @@ describe('MachineCommands', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'machine-cmd-test-'))
-    process.env.HOME = tmpDir
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpDir)
+    vi.stubEnv('HOME', tmpDir)
+    vi.stubEnv('USERPROFILE', tmpDir)
 
     config = await ConfigManager.initialize()
     backupStore = new BackupStore(config.getConfigDir())
@@ -38,7 +36,8 @@ describe('MachineCommands', () => {
   })
 
   afterEach(async () => {
-    delete process.env.HOME
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -50,15 +49,15 @@ describe('MachineCommands', () => {
     })
 
     it('should list configured machines with host', async () => {
-      await config.set('machines.fixture-machine', {
-        user: 'nvidia', port: 22,
+      await config.set('machines.test-node', {
+        user: 'operator', port: 22,
       })
 
       const result = await commands.listMachines()
       expect(result.success).toBe(true)
-      expect(result.output).toContain('fixture-machine')
-      expect(result.output).toContain('fixture-machine')
-      expect(result.output).toContain('nvidia')
+      expect(result.output).toContain('test-node')
+      expect(result.output).toContain('test-node')
+      expect(result.output).toContain('operator')
     })
 
   })

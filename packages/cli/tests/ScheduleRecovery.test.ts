@@ -49,11 +49,13 @@ describe('schedule interruption without restart restoration', () => {
     Object.assign(data.records[0], { state, recovery: { ...data.records[0].recovery, abrupt: true,
       futureOnly: true, handoff: 'clean', nativeDefinitionAbsent: true, status: 'pending' } });
     await write(data);
-    const next = make(); await next.initialize(); await next.retryDeliveries();
+    const provider = vi.fn(cleanupFor!);
+    const next = make({ cleanupFor: provider }); await next.initialize(); await next.retryDeliveries();
     expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', recovery: { status: 'blocked', identity: 'original-session' },
       error: expect.stringContaining('not recreated or resumed') });
     expect(cancelRetained).not.toHaveBeenCalled();
-    expect(next).not.toHaveProperty('recover'); expect(next.canRestartWithoutActiveWork()).toBe(true);
+    expect(provider).not.toHaveBeenCalled();
+    expect(next.canRestartWithoutActiveWork()).toBe(true);
     expect(next.hasActiveSchedules(owner.threadId)).toBe(true);
   });
 
@@ -96,9 +98,12 @@ describe('schedule interruption without restart restoration', () => {
   });
 
   it('does not call native management or write an exit checkpoint during destruction', async () => {
+    const provider = vi.fn(cleanupFor!);
+    cleanupFor = provider;
     const first = await start(); const before = await catalog(); await first.destroy();
     expect(await catalog()).toEqual(before);
-    expect(await catalog()).toEqual(before); expect(deliver).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it('keeps failed future-only and unattributed interrupted mutations unsettled across repeated restarts', async () => {

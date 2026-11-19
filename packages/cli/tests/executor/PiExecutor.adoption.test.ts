@@ -23,8 +23,6 @@ vi.mock('fs', async importOriginal => {
   };
 });
 
-const originalHome = process.env.HOME;
-const originalHomedir = os.homedir();
 const NATIVE_ID = '01900000-0000-7000-8000-0000000000aa';
 
 /** Fake RPC process whose reported identity follows its launch unless overridden. */
@@ -91,14 +89,16 @@ describe('PiExecutor native session adoption', () => {
   const run = (prompt = 'continue') => executor.execute(prompt, { onStream: () => undefined } as any);
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(originalHomedir, '.pi-adoption-test-'));
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'pi-adoption-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     project = path.join(home, 'project');
     pointerDir = path.join(home, '.remote-cli', 'pi-sessions');
     await fs.mkdir(project, { recursive: true });
     await fs.mkdir(path.join(home, 'native'), { recursive: true });
     nativeFile = path.join(home, 'native', `2026-01-01T00-00-00-000Z_${NATIVE_ID}.jsonl`);
     await fs.writeFile(nativeFile, '{"type":"session"}\n');
-    process.env.HOME = home;
     transports = [];
     executor = create();
   });
@@ -106,8 +106,8 @@ describe('PiExecutor native session adoption', () => {
   afterEach(async () => {
     await executor.destroy().catch(() => undefined);
     await fs.rm(home, { recursive: true, force: true });
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('opens the exact file, verifies identity without a prompt, and never renames it', async () => {

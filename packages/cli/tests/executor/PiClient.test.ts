@@ -101,6 +101,14 @@ describe('Pi RPC helpers', () => {
 });
 
 describe('PiClient process lifecycle', () => {
+  function isolatedHome(prefix: string) {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    return home;
+  }
+
   afterEach(() => {
     vi.mocked(spawn).mockReset();
     vi.restoreAllMocks();
@@ -110,10 +118,7 @@ describe('PiClient process lifecycle', () => {
   it.each(['restart', 'adopted', 'missing-history', 'wrong-header', 'wrong-pointer', 'during-start',
     'during-state', 'native-substitution', 'before-prompt', 'process-exit'])(
     'pins a scheduled occurrence to the saved Pi history and verified RPC process (%s)', async scenario => {
-      const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-host-schedule-')));
-      vi.spyOn(os, 'homedir').mockReturnValue(home);
-      vi.stubEnv('HOME', home);
-      vi.stubEnv('USERPROFILE', home);
+      const home = isolatedHome('pi-host-schedule-');
       const cwd = path.join(home, 'project');
       fs.mkdirSync(cwd);
       const base = path.join(home, 'pointers');
@@ -199,7 +204,7 @@ describe('PiClient process lifecycle', () => {
     });
 
   it.each(['destroy', 'abort'] as const)('awaits native connection rollback on %s without restarting Pi for identity or abort RPCs', async action => {
-    const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-connect-stop-test-'));
+    const project = isolatedHome('pi-connect-stop-');
     const sessionFile = path.join(project, 'native.jsonl');
     fs.writeFileSync(sessionFile, '{"type":"session","id":"native-synthetic"}\n');
     const processes: any[] = [];
@@ -288,21 +293,20 @@ describe('PiClient process lifecycle', () => {
     proc.stderr = new EventEmitter();
     proc.exitCode = null;
     proc.signalCode = null;
-    proc.kill = vi.fn(() => {
-      setTimeout(() => {
-        proc.exitCode = 0;
-        proc.emit('exit', 0, null);
-        proc.emit('close', 0, null);
-      }, 30);
-    });
+    proc.kill = vi.fn();
     vi.mocked(spawn).mockReturnValue(proc as any);
 
     const client = new PiClient({ command: 'pi', killEscalationMs: 200 });
     await client.start();
-    const started = Date.now();
-    await client.stop();
-    expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    let stopped = false;
+    const stopping = client.stop().then(() => { stopped = true; });
+    await Promise.resolve();
     expect(proc.kill).toHaveBeenCalled();
+    expect(stopped).toBe(false);
+    proc.exitCode = 0;
+    proc.emit('exit', 0, null);
+    proc.emit('close', 0, null);
+    await stopping;
     expect(client.isRunning()).toBe(false);
   });
 
@@ -359,7 +363,7 @@ describe('PiClient process lifecycle', () => {
   });
 
   it('keeps a session reset blocked until the previous Pi process actually exits', async () => {
-    const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-reset-stop-'));
+    const project = isolatedHome('pi-reset-stop-');
     const processes: Array<ReturnType<typeof createProcess>> = [];
     function createProcess() {
       const proc = Object.assign(new EventEmitter(), {
@@ -409,11 +413,8 @@ describe('PiClient process lifecycle', () => {
   });
 
   it('keeps a delegated Pi workspace blocked after abort and repeated cleanup fail', async () => {
-    const isolatedHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegated-pi-home-')));
-    vi.spyOn(os, 'homedir').mockReturnValue(isolatedHome);
-    vi.stubEnv('HOME', isolatedHome);
-    vi.stubEnv('USERPROFILE', isolatedHome);
-    const project = path.join(isolatedHome, 'project');
+    const home = isolatedHome('delegated-pi-home-');
+    const project = path.join(home, 'project');
     fs.mkdirSync(project);
     const guard = new DirectoryGuard([project]);
     const proc = Object.assign(new EventEmitter(), {
@@ -473,7 +474,7 @@ describe('PiClient process lifecycle', () => {
         // child exits; do not turn production quarantine into automatic reuse.
         await (manager as unknown as { ownership: DelegationOwnership }).ownership.release();
       }
-      finally { fs.rmSync(isolatedHome, { recursive: true, force: true }); }
+      finally { fs.rmSync(home, { recursive: true, force: true }); }
     }
   });
 

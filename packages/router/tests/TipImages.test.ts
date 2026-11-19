@@ -50,9 +50,11 @@ describe('TipImages', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(upload).toHaveBeenCalledTimes(2);
     finishOld('stale-key'); await Promise.resolve();
-    expect(images.get(tip)).toBe(replacement);
-    finishNew('fresh-key'); expect(await replacement).toBe('fresh-key');
+    const concurrent = images.get(tip);
+    finishNew('fresh-key');
+    expect(await Promise.all([replacement, concurrent])).toEqual(['fresh-key', 'fresh-key']);
     expect(await images.get(tip)).toBe('fresh-key');
+    expect(upload).toHaveBeenCalledTimes(2);
   });
 
   it('never starts an upload after the preceding file read has expired', async () => {

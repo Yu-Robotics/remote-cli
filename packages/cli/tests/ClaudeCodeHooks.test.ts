@@ -28,12 +28,6 @@ describe('ClaudeCodeHooks', () => {
     vi.restoreAllMocks();
   });
 
-  describe('constructor', () => {
-    it('should create instance with high max listeners', () => {
-      expect(hooks.getMaxListeners()).toBe(100);
-    });
-  });
-
   describe('authorization', () => {
     const createAuthContext = (overrides: Partial<AuthorizationContext> = {}): AuthorizationContext => ({
       actionType: 'file_access',
@@ -55,37 +49,22 @@ describe('ClaudeCodeHooks', () => {
         expect(decision.reason).toBe('No authorization handler registered');
       });
 
-      it('should call registered handler', async () => {
-        const handler = vi.fn().mockResolvedValue({ granted: true });
+      it.each([
+        { decision: { granted: true }, event: HookEventType.AUTHORIZATION_GRANTED, other: HookEventType.AUTHORIZATION_DENIED },
+        { decision: { granted: false, reason: 'Denied by policy' }, event: HookEventType.AUTHORIZATION_DENIED, other: HookEventType.AUTHORIZATION_GRANTED },
+      ])('returns the handler decision and emits $event with the request context', async ({ decision, event, other }) => {
+        const handler = vi.fn().mockResolvedValue(decision);
         hooks.onAuthorizationRequired(handler);
+        const listener = vi.fn();
+        const opposite = vi.fn();
+        hooks.on(event, listener);
+        hooks.on(other, opposite);
 
         const context = createAuthContext();
-        const decision = await hooks.requestAuthorization(context);
-
+        await expect(hooks.requestAuthorization(context)).resolves.toEqual(decision);
         expect(handler).toHaveBeenCalledWith(context);
-        expect(decision.granted).toBe(true);
-      });
-
-      it('should emit AUTHORIZATION_GRANTED when granted', async () => {
-        const emitSpy = vi.fn();
-        hooks.on(HookEventType.AUTHORIZATION_GRANTED, emitSpy);
-        hooks.onAuthorizationRequired(() => ({ granted: true }));
-
-        const context = createAuthContext();
-        await hooks.requestAuthorization(context);
-
-        expect(emitSpy).toHaveBeenCalled();
-      });
-
-      it('should emit AUTHORIZATION_DENIED when denied', async () => {
-        const emitSpy = vi.fn();
-        hooks.on(HookEventType.AUTHORIZATION_DENIED, emitSpy);
-        hooks.onAuthorizationRequired(() => ({ granted: false, reason: 'Test reason' }));
-
-        const context = createAuthContext();
-        await hooks.requestAuthorization(context);
-
-        expect(emitSpy).toHaveBeenCalled();
+        expect(listener.mock.calls).toEqual([[context, decision]]);
+        expect(opposite).not.toHaveBeenCalled();
       });
 
       it('should handle handler errors gracefully', async () => {

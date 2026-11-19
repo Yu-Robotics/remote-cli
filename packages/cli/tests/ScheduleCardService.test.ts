@@ -34,12 +34,21 @@ describe('ScheduleCardService', () => {
   it('captures opaque choices and refreshes using the original owner without creating schedules', async () => {
     const f = fixture();
     expect(f.menu.entries[0].value).not.toBe(f.records[0].id);
-    f.menu.entries[0].value = 'tampered';
     const result = await f.service.action({ ...f.request, operation: 'refresh', value: undefined });
     expect(result.success).toBe(true);
     expect(f.dependencies.refresh).toHaveBeenCalledWith(f.owner);
     expect(f.dependencies.cancel).not.toHaveBeenCalled();
     expect(result.menu?.snapshotId).not.toBe(f.menu.snapshotId);
+  });
+
+  it('resolves the original opaque choice even if the returned menu is modified', async () => {
+    const f = fixture();
+    f.menu.entries[0].id = 'other-task';
+    f.menu.entries[0].value = 'replacement';
+    expect((await f.service.action({ ...f.request, value: 'replacement' })).success).toBe(false);
+    expect((await f.service.action(f.request)).success).toBe(true);
+    expect(f.dependencies.cancel).toHaveBeenCalledOnce();
+    expect(f.dependencies.cancel).toHaveBeenCalledWith(f.owner, 'schedule');
   });
 
   it('deduplicates concurrent and lost-ack retries, rejecting request-ID payload substitution', async () => {
@@ -105,8 +114,12 @@ describe('ScheduleCardService', () => {
     const menu = f.service.open(f.owner, f.records);
     expect(menu.entries[0].prompt.length).toBe(240);
     expect(menu.entries[0].error?.length).toBe(240);
-    await vi.advanceTimersByTimeAsync(16 * 60_000);
-    expect((await f.service.action({ ...f.request, snapshotId: menu.snapshotId })).success).toBe(false);
+    const choice = { ...f.request, snapshotId: menu.snapshotId, value: menu.entries[0].value };
+    await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+    expect((await f.service.action(choice)).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await f.service.action({ ...choice, messageId: 'expired' })).success).toBe(false);
+    expect(f.dependencies.cancel).toHaveBeenCalledOnce();
   });
 
   it('keeps the operation receipt if fetching its new view fails', async () => {

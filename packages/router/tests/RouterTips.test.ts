@@ -62,6 +62,8 @@ describe('Router Tips integration', () => {
 
   it('globally disables automatic delivery without disabling manual controller callbacks', async () => {
     setup({ enabled: false, timezone: 'UTC' });
+    await server.bindingManager.bindUser('owner', 'device', 'Test device');
+    vi.spyOn(server.connectionHub, 'isDeviceOnline').mockReturnValue(true);
     expect(options.timezone).toBe('UTC');
     expect(await options.canDeliver('owner')).toBe(false);
     await server.feishuLongConnHandler.onTipsCommand('owner', '/tips');

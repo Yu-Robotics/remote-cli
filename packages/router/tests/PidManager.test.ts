@@ -149,11 +149,6 @@ describe('PidManager', () => {
       expect(result).toBe(true);
     });
 
-    it('should return false for non-existent process', () => {
-      // Use a PID that is very unlikely to exist
-      const result = pidManager.isProcessRunning(999999);
-      expect(result).toBe(false);
-    });
   });
 
   describe('getRunningPid', () => {
@@ -169,15 +164,14 @@ describe('PidManager', () => {
     });
 
     it('should return null and clean up stale PID file', async () => {
-      // Write a PID that doesn't exist
-      await pidManager.writePid(999999);
-
-      const runningPid = await pidManager.getRunningPid();
-      expect(runningPid).toBeNull();
-
-      // Verify PID file was removed
-      const pidFilePath = path.join(testDir, 'server.pid');
-      expect(await fileExists(pidFilePath)).toBe(false);
+      const pid = 12345;
+      await pidManager.writePid(pid);
+      const probe = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('Process does not exist'), { code: 'ESRCH' });
+      });
+      expect(await pidManager.getRunningPid()).toBeNull();
+      expect(probe).toHaveBeenCalledWith(pid, 0);
+      await expect(fs.stat(path.join(testDir, 'server.pid'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
 });

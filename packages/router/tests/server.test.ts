@@ -17,7 +17,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
 import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
-import { createDelegationProgressElements, createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
+import { createDelegationProgressElements, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -44,8 +44,8 @@ vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createDelegationProgressElements: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElements),
   createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
   createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
-  createRedactedThinkingElement: vi.fn(() => []),
-  createPlanModeElement: vi.fn(() => []),
+  createRedactedThinkingElement: (await importActual<typeof import('../src/utils/ToolFormatter')>()).createRedactedThinkingElement,
+  createPlanModeElement: (await importActual<typeof import('../src/utils/ToolFormatter')>()).createPlanModeElement,
   createImageElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createImageElement),
 }));
 
@@ -61,7 +61,10 @@ describe('RouterServer', () => {
   let mockHttpServer: any;
   let mockWss: any;
 
-  beforeEach(() => {
+  let directory: string;
+  beforeEach(async () => {
+    directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-server-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(directory);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'info').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -70,7 +73,7 @@ describe('RouterServer', () => {
 
     // Setup mocks
     config = {
-      getConfigPath: () => '/virtual-router-tests/config.json',
+      getConfigPath: () => path.join(directory, 'config.json'),
       get: vi.fn((section, key) => {
         // These card/routing unit tests must not initialize real attachment storage.
         if (section === 'files') return { enabled: false };
@@ -166,9 +169,10 @@ describe('RouterServer', () => {
     server = new RouterServer(config, store);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    await fs.rm(directory, { recursive: true, force: true });
   });
 
   describe('paired tool-call progress', () => {
@@ -1980,8 +1984,6 @@ describe('RouterServer', () => {
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
     mockWs.send.mockClear();
-    const notice = { tag: 'markdown', content: 'Some reasoning was filtered' };
-    vi.mocked(createRedactedThinkingElement).mockReturnValueOnce([notice]);
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: 'Visible answer',
     })));
@@ -1994,7 +1996,8 @@ describe('RouterServer', () => {
     })));
 
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
-      'f1', [{ tag: 'markdown', content: 'Visible answer' }, notice], 'u1', undefined, undefined,
+      'f1', [{ tag: 'markdown', content: 'Visible answer' }, { tag: 'hr' },
+        { tag: 'markdown', content: expect.stringMatching(/reasoning.*filtered/i) }], 'u1', undefined, undefined,
     );
     expect(JSON.stringify(mockFeishuHandler.updateStreamingMessage.mock.calls)).not.toContain('ENCRYPTED_REASONING');
   });
@@ -2018,8 +2021,12 @@ describe('RouterServer', () => {
       openId: 'u1',
       planContent: 'my plan'
     })));
-    
-    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
+
+    const [cardId, elements, recipient] = mockFeishuHandler.updateStreamingMessage.mock.lastCall;
+    expect([cardId, recipient]).toEqual(['f1', 'u1']);
+    expect(elements).toContainEqual(expect.objectContaining({
+      tag: 'collapsible_panel', expanded: true, elements: [{ tag: 'markdown', content: 'my plan' }],
+    }));
   });
 
   it('should upload and render WebSocket stream images', async () => {
@@ -2147,27 +2154,20 @@ describe('RouterServer', () => {
     expect(mockHttpServer.close).toHaveBeenCalledOnce();
   });
 
-  it('should cleanup stale streaming sessions and expired cardThreadMap entries', async () => {
+  it('expires stale stream reply routes during heartbeat cleanup while keeping recent routes', async () => {
     await server.start();
-    
-    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    await onStartStreaming('m1', 'u1', 'f1', 'd1');
-    
-    // Also trigger some cardThreadMap entries via streaming sessions
-    // (Already done in onStartStreaming if feishuMessageId and threadId are provided)
-    await onStartStreaming('m2', 'u2', 'f2', 'd2', 't2');
-
-    // Advance time by 31 minutes (timeout is 30) for streaming session
-    vi.advanceTimersByTime(31 * 60 * 1000);
-    
-    // For cardThreadMap, TTL is 7 days.
-    // Let's mock Date.now() or just advance timers a lot.
-    vi.advanceTimersByTime(8 * 24 * 60 * 60 * 1000);
-
-    // Trigger cleanup (happens in interval)
-    vi.advanceTimersByTime(30000);
-    
+    const start = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    const resolve = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
+    await start('old-task', 'u1', 'old-card', 'd1', 'old-thread');
+    const admitted = Date.now();
+    vi.setSystemTime(admitted + 29 * 60_000);
+    await start('new-task', 'u1', 'new-card', 'd1', 'new-thread');
+    expect(await resolve('old-card', 'u1')).toEqual({ deviceId: 'd1', threadId: 'old-thread' });
+    vi.setSystemTime(admitted + 31 * 60_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(mockConnectionHub.cleanupStaleConnections).toHaveBeenCalled();
+    expect(await resolve('old-card', 'u1')).toBeUndefined();
+    expect(await resolve('new-card', 'u1')).toEqual({ deviceId: 'd1', threadId: 'new-thread' });
   });
 
   it('should trigger update when enough characters are accumulated', async () => {

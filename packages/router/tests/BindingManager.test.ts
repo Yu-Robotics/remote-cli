@@ -12,8 +12,7 @@ describe('BindingManager', () => {
 
   beforeEach(async () => {
     // Create a temporary directory for test data
-    testDir = path.join(os.tmpdir(), `binding-test-${Date.now()}`);
-    await fs.mkdir(testDir, { recursive: true });
+    testDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'binding-test-')));
 
     const storePath = path.join(testDir, 'bindings.json');
     store = new JsonStore(storePath, 0);
@@ -427,13 +426,14 @@ describe('BindingManager', () => {
       const openId = 'ou_test_user';
       await bindingManager.bindUser(openId, 'dev_1', 'Device-1');
 
-      const beforeUpdate = Date.now();
-      await new Promise(resolve => setTimeout(resolve, 10)); // Small delay
-
-      await bindingManager.updateLastActive(openId);
-
-      const activeDevice = await bindingManager.getActiveDevice(openId);
-      expect(activeDevice?.lastActiveAt).toBeGreaterThanOrEqual(beforeUpdate);
+      const original = await bindingManager.getActiveDevice(openId);
+      expect(original).not.toBeNull();
+      const next = original!.lastActiveAt + 1000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(next);
+      try {
+        await bindingManager.updateLastActive(openId);
+        expect((await bindingManager.getActiveDevice(openId))?.lastActiveAt).toBe(next);
+      } finally { clock.mockRestore(); }
     });
 
     it('should not throw for unbound user', async () => {

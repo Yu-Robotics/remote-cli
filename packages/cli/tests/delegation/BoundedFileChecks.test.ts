@@ -47,7 +47,7 @@ describe('bounded filesystem checks', () => {
     const checked: number[] = [];
     await expect(checkFilesInBatches([0, 1, 2], value => {
       checked.push(value);
-      if (value === 0) throw first;
+      if (value === 0) return Promise.resolve().then(() => { throw first; });
       if (value === 1) throw second;
       return Promise.resolve();
     })).rejects.toBe(first);

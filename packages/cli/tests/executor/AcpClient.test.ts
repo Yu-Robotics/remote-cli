@@ -305,9 +305,9 @@ describe('AcpClient', () => {
       await vi.advanceTimersByTimeAsync(10_001);
       await failed;
       expect((client as any).pendingRequests.size).toBe(0);
-      fake.process.push({ jsonrpc: '2.0', id: sent.id, result: { configOptions: [] } });
       const next = client.setConfigOption('ses-1', 'effort', 'low');
       const nextRequest = JSON.parse(fake.lines[fake.lines.length - 1]);
+      fake.process.push({ jsonrpc: '2.0', id: sent.id, error: { code: -32602, message: 'Late control failure' } });
       fake.process.push({ jsonrpc: '2.0', id: nextRequest.id, result: { configOptions: [] } });
       await expect(next).resolves.toMatchObject({ configOptions: [] });
       expect(vi.getTimerCount()).toBe(0);
@@ -320,7 +320,6 @@ describe('AcpClient', () => {
       const pending = client.prompt('ses-1', [{ type: 'text', text: 'inspect' }]);
       const sent = request(fake.lines, 'session/prompt');
       await vi.advanceTimersByTimeAsync(30_000);
-      expect((client as any).pendingRequests.size).toBe(1);
       fake.process.push({ jsonrpc: '2.0', id: sent.id, result: { stopReason: 'end_turn' } });
       await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
     } finally { vi.useRealTimers(); }

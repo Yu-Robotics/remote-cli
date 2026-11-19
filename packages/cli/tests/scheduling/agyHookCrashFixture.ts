@@ -35,6 +35,7 @@ export async function crashAgyOverlay(home: string, options: { groupPid?: number
   const exited = once(child, 'exit');
   try {
     const result = await Promise.race([once(child.stdout!, 'data').then(data => String(data[0])), exited.then(([code]) => code)]);
-    if (result !== 'ready\n' && result !== 77) throw new Error('Synthetic overlay fixture failed before its crash boundary');
+    const expected = options.crashRename === undefined ? 'ready\n' : 77;
+    if (result !== expected) throw new Error('Synthetic overlay fixture did not reach the requested crash boundary');
   } finally { child.kill('SIGKILL'); await exited; }
 }

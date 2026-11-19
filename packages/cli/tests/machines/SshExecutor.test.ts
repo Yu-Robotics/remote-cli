@@ -54,14 +54,14 @@ describe('SshExecutor', () => {
   let executor: SshExecutor
 
   const passwordMachine: ResolvedMachine = {
-    host: '192.168.1.100',
+    host: '192.0.2.10',
     user: 'deploy',
-    password: 'secret123',
+    password: 'fixture-password',
     port: 22,
   }
 
   const keyMachine: ResolvedMachine = {
-    host: '10.0.0.1',
+    host: '192.0.2.11',
     user: 'admin',
     port: 22,
   }
@@ -80,14 +80,14 @@ describe('SshExecutor', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         'sshpass',
         [
-          '-p', 'secret123',
+          '-p', 'fixture-password',
           'ssh',
           '-p', '22',
           '-o', 'StrictHostKeyChecking=no',
           '-o', 'UserKnownHostsFile=/dev/null',
           '-o', 'LogLevel=ERROR',
           '-o', 'ConnectTimeout=10',
-          'deploy@192.168.1.100',
+          'deploy@192.0.2.10',
           'echo hello',
         ],
         expect.objectContaining({ timeout: 30_000 })
@@ -104,7 +104,7 @@ describe('SshExecutor', () => {
 
       expect(mockSpawn.mock.calls[0][0]).toBe('ssh')
       const args = mockSpawn.mock.calls[0][1]
-      expect(args).toContain('admin@10.0.0.1')
+      expect(args).toContain('admin@192.0.2.11')
       expect(args[args.length - 1]).toBe('whoami')
     })
 

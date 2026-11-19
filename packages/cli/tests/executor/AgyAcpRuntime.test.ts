@@ -466,7 +466,6 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const client = last(), pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
     expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toMatchObject({ transport: 'acp', retired: false });
     expect(client.closed).toBe(true); expect(client.prompts).toEqual([]); expect(client.token).toBeUndefined();
-    expect((executor as any).acp).toBeUndefined(); expect((executor as any).acpLeaseUnconfirmed).toBe(true);
     await expect(executor.execute('still refused')).rejects.toThrow('explicit /clear');
     expect(native.clients).toHaveLength(1);
     await executor.destroy(); executor = make();
@@ -479,20 +478,21 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   it('retains an unconfirmed cleanup runtime until its exact group can be joined', async () => {
     native.settingFailure = true; native.exitConfirmed = false;
     await expect(executor.execute('do not send')).rejects.toThrow('stage=cleanup');
-    expect((executor as any).acp).toBeDefined(); expect(native.restore).not.toHaveBeenCalled();
+    expect(native.restore).not.toHaveBeenCalled();
     native.exitConfirmed = true; await executor.destroy();
+    expect(native.restore).toHaveBeenCalledOnce();
     const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
     expect(JSON.parse(await fs.readFile(pointer, 'utf8')).retired).toBe(false);
   });
   it('does not fall back after allocation when saving the initial pointer fails', async () => {
     const { runtime, ownedSessionClosed } = initialRuntime({ saveSession: () => { throw new Error('Synthetic private filesystem material'); } });
     await expect(runtime.start()).rejects.toThrow('stage=session-save'); expect(last().prompts).toEqual([]);
-    expect(last().controls).toEqual([]); expect(last().prompts).toEqual([]); expect(ownedSessionClosed).not.toHaveBeenCalled();
+    expect(last().controls).toEqual([]); expect(ownedSessionClosed).not.toHaveBeenCalled();
   });
   it.each(['', '../outside', 'x'.repeat(129), 123])('never falls back after malformed allocation %#', async id => {
     native.sessionId = id as string; const { runtime, saveSession } = initialRuntime();
     await expect(runtime.start()).rejects.toThrow('stage=session-create');
-    expect(saveSession).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]); expect(last().prompts).toEqual([]);
+    expect(saveSession).not.toHaveBeenCalled(); expect(last().prompts).toEqual([]); expect(native.bind).not.toHaveBeenCalled();
   });
   it('joins shutdown during initial settings without prompting or granting successor permission', async () => {
     let release!: () => void; native.settingWait = new Promise(resolve => { release = resolve; });

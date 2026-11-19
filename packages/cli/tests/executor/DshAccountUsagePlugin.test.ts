@@ -16,9 +16,7 @@ describe('DSH account query plugin', () => {
     await apply({ deepseekAccount: { getBalance } }, metadata);
     expect(getBalance).toHaveBeenCalledTimes(1);
     expect(getBalance).toHaveBeenCalledWith(metadata);
-    expect(write).toHaveBeenCalledWith(`${DSH_ACCOUNT_USAGE_PREFIX}${JSON.stringify({ output: '- Recharge balance: USD 2.00000001' })}\n`);
-    expect(write.mock.calls[0][0]).not.toContain('test-only-not-for-display');
-    expect(write.mock.calls[0][0]).not.toContain('fixture@example.com');
+    expect(write.mock.calls).toEqual([[`${DSH_ACCOUNT_USAGE_PREFIX}${JSON.stringify({ output: '- Recharge balance: USD 2.00000001' })}\n`]]);
   });
 
   it.each([null, { status: 'failed' }, new Error('Authorization: test-only-secret')])
@@ -27,6 +25,6 @@ describe('DSH account query plugin', () => {
       const getBalance = vi.fn();
       if (value instanceof Error) getBalance.mockRejectedValue(value); else getBalance.mockResolvedValue(value);
       await apply({ deepseekAccount: { getBalance } }, { version: '1.2.3', locale: 'en-US', timezoneOffsetSeconds: 0 });
-      expect(write).toHaveBeenCalledWith(`${DSH_ACCOUNT_USAGE_PREFIX}{"output":null}\n`);
+      expect(write.mock.calls).toEqual([[`${DSH_ACCOUNT_USAGE_PREFIX}{"output":null}\n`]]);
     });
 });

@@ -1,452 +1,121 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'child_process';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
+import type { ExecuteOptions } from '../../src/executor/IExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import os from 'os';
 
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
+vi.mock('child_process', () => ({ spawn: vi.fn() }));
 
-describe('ClaudePersistentExecutor - Plan Mode', () => {
+describe('Claude plan mode', () => {
+  let home: string;
   let executor: ClaudePersistentExecutor;
-  let directoryGuard: DirectoryGuard;
-  let mockOnStream: ReturnType<typeof vi.fn>;
-  let mockOnPlanMode: ReturnType<typeof vi.fn>;
-  let mockOnToolUse: ReturnType<typeof vi.fn>;
+  let child: EventEmitter;
+  let stdout: EventEmitter;
+  let write: ReturnType<typeof vi.fn>;
+  let pending: Promise<unknown>[];
 
-  beforeEach(() => {
-    directoryGuard = new DirectoryGuard([process.cwd()]);
-    executor = new ClaudePersistentExecutor(directoryGuard);
-    mockOnStream = vi.fn();
-    mockOnPlanMode = vi.fn();
-    mockOnToolUse = vi.fn();
+  beforeEach(async () => {
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'plan-mode-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.useFakeTimers();
+    child = new EventEmitter();
+    stdout = new EventEmitter();
+    write = vi.fn();
+    pending = [];
+    vi.mocked(spawn).mockReturnValue(Object.assign(child, {
+      stdout, stderr: new EventEmitter(), stdin: {
+        writable: true, write, end: () => queueMicrotask(() => {
+          child.emit('exit', 0, null);
+          child.emit('close', 0, null);
+        }),
+      },
+    }) as ChildProcess);
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([home]), home);
   });
 
   afterEach(async () => {
-    await executor.destroy();
+    try {
+      await executor.destroy();
+      await Promise.all(pending);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
-  describe('EnterPlanMode detection', () => {
-    it('should set isInPlanMode=true when EnterPlanMode tool_use is detected', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
+  function emit(message: object) {
+    stdout.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+  }
 
-      (executor as any).currentStreamCallback = mockOnStream;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
+  function assistant(...blocks: object[]) {
+    for (const block of blocks) emit({ type: 'assistant', message: { content: [block] } });
+  }
 
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
+  const text = (value: string) => ({ type: 'text', text: value });
+  const tool = (name: string, id: string, input = {}) => ({ type: 'tool_use', name, id, input });
 
-      expect((executor as any).isInPlanMode).toBe(true);
-    });
+  async function turn(options: ExecuteOptions, events: () => void) {
+    write.mockClear();
+    const result = executor.execute('Plan the task', options);
+    pending.push(Promise.allSettled([result]));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('Plan the task'));
+    events();
+    emit({ type: 'result', subtype: 'success' });
+    await expect(result).resolves.toMatchObject({ success: true });
+  }
 
-    it('should NOT forward EnterPlanMode as a tool_use card (no onToolUse call)', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentToolUseCallback = mockOnToolUse;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
-
-      expect(mockOnToolUse).not.toHaveBeenCalled();
-    });
-
-    it('should initialise an empty plan buffer on EnterPlanMode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      // Pre-populate buffer with stale data
-      (executor as any).planModeBuffer = ['stale'];
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
-
-      expect((executor as any).planModeBuffer).toEqual([]);
+  it('streams text immediately and publishes only the completed plan and ordinary tool cards', async () => {
+    const onStream = vi.fn(), onPlanMode = vi.fn(), onToolUse = vi.fn();
+    await turn({ onStream, onPlanMode, onToolUse }, () => {
+      assistant(text('Preamble'), tool('EnterPlanMode', 'start'), text('Discarded draft'));
+      assistant(tool('EnterPlanMode', 'restart'), text('First step\n'), text('Second step'));
+      expect(onStream.mock.calls.flat()).toEqual(['Preamble', 'Discarded draft', 'First step\n', 'Second step']);
+      expect(onPlanMode).not.toHaveBeenCalled();
+      assistant(tool('ExitPlanMode', 'end'), text('Postscript'), tool('ExitPlanMode', 'empty'));
+      assistant(tool('Read', 'read-id', { file_path: 'report.txt' }));
+      expect(onPlanMode.mock.calls).toEqual([['First step\nSecond step']]);
+      expect(onToolUse.mock.calls).toEqual([[{ name: 'Read', id: 'read-id', input: { file_path: 'report.txt' } }]]);
     });
   });
 
-  describe('Plan content buffering', () => {
-    it('should buffer text blocks while in plan mode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentStreamCallback = mockOnStream;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      // Enter plan mode
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
-
-      // Plan text
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'text', text: '1. First I will read the file\n2. Then I will edit it' }
-          ]
-        }
-      }));
-
-      expect((executor as any).planModeBuffer).toContain('1. First I will read the file\n2. Then I will edit it');
+  it('discards an unfinished plan between turns and permits a turn without a plan callback', async () => {
+    const previous = vi.fn(), current = vi.fn();
+    await turn({ onPlanMode: previous }, () => {
+      assistant(tool('EnterPlanMode', 'start'), text('Unfinished'));
     });
-
-    it('should still stream plan text to the user in real time while buffering', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentStreamCallback = mockOnStream;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      // Enter plan mode
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
-
-      // Plan text
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'text', text: 'Step 1: read file' }
-          ]
-        }
-      }));
-
-      expect(mockOnStream).toHaveBeenCalledWith('Step 1: read file');
+    await turn({ onPlanMode: current }, () => {
+      assistant(text('Ordinary reply'), tool('ExitPlanMode', 'stale'));
+      assistant(tool('EnterPlanMode', 'empty'), tool('ExitPlanMode', 'end'));
+      expect(current).not.toHaveBeenCalled();
+      assistant(tool('EnterPlanMode', 'fresh'), text('Current plan'), tool('ExitPlanMode', 'done'));
     });
-
-    it('should NOT buffer text blocks when not in plan mode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentStreamCallback = mockOnStream;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'text', text: 'Regular response' }
-          ]
-        }
-      }));
-
-      expect((executor as any).planModeBuffer).toEqual([]);
+    await turn({}, () => {
+      assistant(tool('EnterPlanMode', 'optional'), text('Another plan'), tool('ExitPlanMode', 'end'));
     });
+    expect(previous).not.toHaveBeenCalled();
+    expect(current.mock.calls).toEqual([['Current plan']]);
   });
 
-  describe('ExitPlanMode detection', () => {
-    it('should set isInPlanMode=false on ExitPlanMode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      // Enter then exit
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'EnterPlanMode', id: 'tool_plan_1', input: {} }
-          ]
-        }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'ExitPlanMode', id: 'tool_plan_2', input: {} }
-          ]
-        }
-      }));
-
-      expect((executor as any).isInPlanMode).toBe(false);
-    });
-
-    it('should fire onPlanMode callback with accumulated plan content on ExitPlanMode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentStreamCallback = mockOnStream;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id1', input: {} }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'text', text: 'Plan step A\n' }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'text', text: 'Plan step B\n' }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id2', input: {} }] }
-      }));
-
-      expect(mockOnPlanMode).toHaveBeenCalledTimes(1);
-      const planContent: string = mockOnPlanMode.mock.calls[0][0];
-      expect(planContent).toContain('Plan step A');
-      expect(planContent).toContain('Plan step B');
-    });
-
-    it('should clear planModeBuffer after ExitPlanMode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id1', input: {} }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'text', text: 'some plan' }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id2', input: {} }] }
-      }));
-
-      expect((executor as any).planModeBuffer).toEqual([]);
-    });
-
-    it('should NOT forward ExitPlanMode as a tool_use card', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentToolUseCallback = mockOnToolUse;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id1', input: {} }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id2', input: {} }] }
-      }));
-
-      expect(mockOnToolUse).not.toHaveBeenCalled();
-    });
-
-    it('should not fire onPlanMode if plan content is empty', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      // Enter and immediately exit with no text in between
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id1', input: {} }] }
-      }));
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id2', input: {} }] }
-      }));
-
-      expect(mockOnPlanMode).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('State reset', () => {
-    it('should clear plan mode state on resetCurrentCommand', () => {
-      (executor as any).isInPlanMode = true;
-      (executor as any).planModeBuffer = ['some plan text'];
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-
-      (executor as any).resetCurrentCommand();
-
-      expect((executor as any).isInPlanMode).toBe(false);
-      expect((executor as any).planModeBuffer).toEqual([]);
-      expect((executor as any).currentPlanModeCallback).toBeUndefined();
-    });
-  });
-
-  describe('Integration with other block types', () => {
-    it('should handle regular tool_use blocks normally when not in plan mode', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentToolUseCallback = mockOnToolUse;
-
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'Read', id: 'tool_read_1', input: { file_path: '/tmp/test' } }
-          ]
-        }
-      }));
-
-      expect(mockOnToolUse).toHaveBeenCalledWith({
-        name: 'Read',
-        id: 'tool_read_1',
-        input: { file_path: '/tmp/test' }
-      });
-    });
-
-    it('should handle mixed content: plan mode sandwich around regular tools', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      (executor as any).currentStreamCallback = mockOnStream;
-      (executor as any).currentPlanModeCallback = mockOnPlanMode;
-      (executor as any).currentToolUseCallback = mockOnToolUse;
-
-      // Pre-plan text
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'text', text: 'Let me plan this.' }] }
-      }));
-
-      // Enter plan mode
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id_enter', input: {} }] }
-      }));
-
-      // Plan text
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'text', text: 'Step 1: Read file' }] }
-      }));
-
-      // Exit plan mode
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id_exit', input: {} }] }
-      }));
-
-      // Regular tool call after plan mode
-      handleOutputLine(JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'Read', id: 'id_read', input: { file_path: '/f' } }] }
-      }));
-
-      // Plan mode callback fires with plan content
-      expect(mockOnPlanMode).toHaveBeenCalledTimes(1);
-      expect(mockOnPlanMode.mock.calls[0][0]).toContain('Step 1: Read file');
-
-      // Regular tool call forwarded normally
-      expect(mockOnToolUse).toHaveBeenCalledTimes(1);
-      expect(mockOnToolUse.mock.calls[0][0].name).toBe('Read');
-
-      // Pre-plan text was streamed
-      expect(mockOnStream).toHaveBeenCalledWith('Let me plan this.');
-    });
-  });
-
-  describe('ExitPlanMode pseudo-error suppression', () => {
-    it('should suppress ExitPlanMode tool_result with "exit plan mode?" error content', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-      const mockToolResultCallback = vi.fn();
-      (executor as any).currentToolResultCallback = mockToolResultCallback;
-
-      handleOutputLine(JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            content: 'Exit plan mode?',
-            is_error: true,
-            tool_use_id: 'toolu_01ShaFVAHWeaKihWZYqb8nsX'
-          }]
-        }
-      }));
-
-      // Should not emit a tool result card for this pseudo-error
-      expect(mockToolResultCallback).not.toHaveBeenCalled();
-    });
-
-    it('should still emit real tool_result errors to callback', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-      const mockToolResultCallback = vi.fn();
-      (executor as any).currentToolResultCallback = mockToolResultCallback;
-
-      handleOutputLine(JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            content: 'File not found',
-            is_error: true,
-            tool_use_id: 'toolu_abc123'
-          }]
-        }
-      }));
-
-      expect(mockToolResultCallback).toHaveBeenCalledWith(
-        expect.objectContaining({ is_error: true, content: 'File not found' })
-      );
-    });
-
-    it('should read tool_use_id from block.tool_use_id field', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-      const mockToolResultCallback = vi.fn();
-      (executor as any).currentToolResultCallback = mockToolResultCallback;
-
-      handleOutputLine(JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            content: 'ok',
-            is_error: false,
-            tool_use_id: 'toolu_correct_id'
-          }]
-        }
-      }));
-
-      expect(mockToolResultCallback).toHaveBeenCalledWith(
-        expect.objectContaining({ tool_use_id: 'toolu_correct_id' })
-      );
-    });
-  });
-
-  describe('Defensive behavior', () => {
-    it('should not throw when no onPlanMode callback is registered', () => {
-      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
-
-      // No callbacks registered
-      expect(() => {
-        handleOutputLine(JSON.stringify({
-          type: 'assistant',
-          message: { content: [{ type: 'tool_use', name: 'EnterPlanMode', id: 'id1', input: {} }] }
-        }));
-        handleOutputLine(JSON.stringify({
-          type: 'assistant',
-          message: { content: [{ type: 'text', text: 'plan' }] }
-        }));
-        handleOutputLine(JSON.stringify({
-          type: 'assistant',
-          message: { content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 'id2', input: {} }] }
-        }));
-      }).not.toThrow();
+  it('suppresses the exit confirmation pseudo-error and forwards correlated success and error results', async () => {
+    const onToolResult = vi.fn();
+    await turn({ onToolResult }, () => {
+      for (const [id, content, isError] of [
+        ['exit-id', 'Exit plan mode?', true], ['read-id', 'File not found', true], ['write-id', 'ok', false],
+      ] as const) {
+        emit({ type: 'user', message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: id, content, is_error: isError },
+        ] } });
+      }
+      expect(onToolResult.mock.calls).toEqual([
+        [expect.objectContaining({ tool_use_id: 'read-id', content: 'File not found', is_error: true })],
+        [expect.objectContaining({ tool_use_id: 'write-id', content: 'ok', is_error: false })],
+      ]);
     });
   });
 });

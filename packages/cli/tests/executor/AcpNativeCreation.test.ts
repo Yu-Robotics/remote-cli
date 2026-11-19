@@ -55,12 +55,23 @@ describe('backend-specific ACP native creation observation', () => {
 
   it('awaits fresh capture and durable observation before prompting, without recapturing reuse', async () => {
     const fixture = create();
-    expect((await fixture.executor.execute('first', {})).success).toBe(true);
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>(resolve => { acknowledge = resolve; });
+    fixture.observe.mockReturnValueOnce(acknowledgement);
+    const first = fixture.executor.execute('first', {});
+    try {
+      await vi.waitFor(() => expect(fixture.observe).toHaveBeenCalledWith(fixture.target));
+      expect(fixture.transport.prompt).not.toHaveBeenCalled();
+    } finally {
+      acknowledge();
+      await first;
+    }
+    expect((await first).success).toBe(true);
+    expect(fixture.transport.prompt).toHaveBeenCalledOnce();
     expect(fixture.capture).toHaveBeenCalledOnce();
-    expect(fixture.observe).toHaveBeenCalledWith(fixture.target);
-    expect(fixture.observe.mock.invocationCallOrder[0]).toBeLessThan(fixture.transport.prompt.mock.invocationCallOrder[0]);
     expect((await fixture.executor.execute('reuse', {})).success).toBe(true);
     expect(fixture.capture).toHaveBeenCalledOnce();
+    expect(fixture.observe).toHaveBeenCalledOnce();
     expect(fixture.failure).not.toHaveBeenCalled();
   });
 

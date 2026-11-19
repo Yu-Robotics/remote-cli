@@ -39,7 +39,7 @@ describe('CodexTaskNotifications', () => {
 
   it.each([
     ['completed', 'completed'], ['errored', 'failed'], ['interrupted', 'stopped'], ['shutdown', 'stopped'],
-  ])('uses agent state %s, rather than the collaboration tool status, for the card', (state, status) => {
+  ])('delivers agent state %s to the originating completion callback', (state, status) => {
     const notify = vi.fn();
     const tracker = new CodexTaskNotifications(vi.fn());
     const spawn = {

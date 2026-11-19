@@ -86,13 +86,25 @@ describe('pending output intent metadata', () => {
     await pending.prepare(request(), { canPrepare: () => true, preparationLease: () => () => true, capturePaths } as any);
     expect(capturePaths.mock.calls[0][0]).toEqual(['first/report.csv', 'second/report.csv']);
   });
-  it('does not guess a basename, retry missing files, or retain unbounded metadata', async () => {
+  it('consumes the exact missing path once without retrying by basename', async () => {
     const pending = new PendingOutputFiles();
     const capturePaths = vi.fn(async () => ({ unavailable: 1 })); const files = { canPrepare: () => true, preparationLease: () => () => true, capturePaths } as any;
     pending.remember(links('exact/missing.csv'), context(), () => true);
     expect(await pending.prepare(request(), files)).toBe(false); expect(await pending.prepare(request(), files)).toBe(false);
+    expect(capturePaths).toHaveBeenCalledOnce();
     expect(capturePaths.mock.calls[0][0]).toEqual(['exact/missing.csv']);
-    for (let i = 0; i < 101; i++) pending.remember(links(), { ...context(), messageId: `message-${i}`, threadId: `thread-${i}` }, () => true);
-    expect((pending as any).intents.size).toBe(100);
+  });
+  it('preserves the first 100 pending selections and admits new work once capacity is available', async () => {
+    const pending = new PendingOutputFiles();
+    const capturePaths = vi.fn(async () => ({ unavailable: 0 }));
+    const files = { canPrepare: () => true, preparationLease: () => () => true, capturePaths } as any;
+    const ids = (i: number) => ({ messageId: `message-${i}`, threadId: `thread-${i}` });
+    for (let i = 0; i <= 100; i++) pending.remember(links(), { ...context(), ...ids(i) }, () => true);
+    expect(await pending.prepare({ ...request(), ...ids(100) }, files)).toBe(false);
+    expect(capturePaths).not.toHaveBeenCalled();
+    for (let i = 0; i < 100; i++) expect(await pending.prepare({ ...request(), ...ids(i) }, files)).toBe(true);
+    pending.remember(links(), { ...context(), ...ids(100) }, () => true);
+    expect(await pending.prepare({ ...request(), ...ids(100) }, files)).toBe(true);
+    expect(capturePaths).toHaveBeenCalledTimes(101);
   });
 });

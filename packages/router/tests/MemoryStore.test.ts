@@ -44,13 +44,11 @@ describe('MemoryStore', () => {
         expiresAt: Date.now() + 5 * 60 * 1000
       };
 
-      store.setBindingCode(code, bindingCode, 300); // 300 seconds TTL
-
-      // Before TTL expires
-      expect(store.getBindingCode(code)).not.toBeNull();
-
-      // After TTL expires
-      vi.advanceTimersByTime(301 * 1000);
+      store.setBindingCode(code, bindingCode, 1);
+      vi.advanceTimersByTime(999);
+      expect(store.getBindingCode(code)).toEqual(bindingCode);
+      vi.advanceTimersByTime(1);
+      expect(store.getStats().bindingCodes).toBe(0);
       expect(store.getBindingCode(code)).toBeNull();
     });
 
@@ -68,6 +66,7 @@ describe('MemoryStore', () => {
       const result = store.getBindingCode(code);
 
       expect(result).toBeNull();
+      expect(store.getStats().bindingCodes).toBe(0);
     });
 
     it('should delete binding code', () => {

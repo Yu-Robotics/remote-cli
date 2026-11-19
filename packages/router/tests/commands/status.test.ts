@@ -2,16 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock dependencies before importing the command
 vi.mock('axios');
-vi.mock('os', () => ({
-  default: { homedir: () => '/mock/home' },
-  homedir: () => '/mock/home'
-}));
 vi.mock('fs/promises');
 vi.mock('../../src/utils/PidManager');
 
 import { statusCommand } from '../../src/commands/status';
 import { PidManager } from '../../src/utils/PidManager';
-import { ConfigManager } from '../../src/config/ConfigManager';
 import axios from 'axios';
 import fs from 'fs/promises';
 
@@ -49,20 +44,14 @@ describe('status command', () => {
   });
 
   describe('when server is not running', () => {
-    it('should report not running status', async () => {
+    it('reports the stopped state and suggests starting the Router without a health probe', async () => {
       mockPidManager.getRunningPid.mockResolvedValue(null);
 
       await statusCommand();
 
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('Not Running'));
-    });
-
-    it('should suggest start command', async () => {
-      mockPidManager.getRunningPid.mockResolvedValue(null);
-
-      await statusCommand();
-
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('remote-cli-router start'));
+      expect(axios.get).not.toHaveBeenCalled();
     });
   });
 
@@ -71,11 +60,11 @@ describe('status command', () => {
       mockPidManager.getRunningPid.mockResolvedValue(12345);
     });
 
-    it('should report running status with PID', async () => {
-      (axios.get as any) = vi.fn().mockResolvedValue({
+    it('reports the running PID and connections from a count-only health response', async () => {
+      vi.mocked(axios.get).mockResolvedValue({
         data: {
           connections: 2,
-          devices: ['dev_1', 'dev_2'],
+          status: 'ok',
           timestamp: Date.now()
         }
       });
@@ -83,34 +72,16 @@ describe('status command', () => {
       await statusCommand();
 
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('Running'));
-      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('12345'));
+      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringMatching(/PID:\s+12345\b/));
+      expect(consoleLogSpy).toHaveBeenCalledWith('Connections: 2');
+      expect(consoleLogSpy).not.toHaveBeenCalledWith(expect.stringContaining('Connected Devices:'));
     });
 
-    it('should show connection count from health endpoint', async () => {
-      (axios.get as any) = vi.fn().mockResolvedValue({
-        data: {
-          connections: 5,
-          devices: ['dev_1'],
-          timestamp: Date.now()
-        }
-      });
-
+    it('lists device identifiers when an older health endpoint supplies them', async () => {
+      vi.mocked(axios.get).mockResolvedValue({ data: {
+        connections: 2, devices: ['dev_device_1', 'dev_device_2'], timestamp: Date.now(),
+      } });
       await statusCommand();
-
-      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('5'));
-    });
-
-    it('should show connected devices', async () => {
-      (axios.get as any) = vi.fn().mockResolvedValue({
-        data: {
-          connections: 2,
-          devices: ['dev_device_1', 'dev_device_2'],
-          timestamp: Date.now()
-        }
-      });
-
-      await statusCommand();
-
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('dev_device_1'));
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('dev_device_2'));
     });

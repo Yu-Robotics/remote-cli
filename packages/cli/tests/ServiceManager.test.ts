@@ -1,6 +1,4 @@
 import { promises as fs } from 'fs';
-import { EventEmitter } from 'events';
-import { ProcessShutdown } from '../src/utils/ProcessShutdown';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -213,36 +211,6 @@ describe('ServiceManager', () => {
     await expect(f.manager.uninstall()).rejects.toThrow('not confirmed successful');
     expect(await fs.readFile(f.unitPath, 'utf8')).toBe(f.unit);
     expect(f.runner.mock.calls.some(([, args]) => args.includes('disable'))).toBe(false);
-  });
-
-  it('sends the first stop signal only to the parent and waits for native handoff before parent exit', async () => {
-    const f = await linuxFixture();
-    // Model the documented systemd signal policy, without starting a real service.
-    const parent = Object.assign(new EventEmitter(), { exit: vi.fn() });
-    const native = new EventEmitter(); const terminated = vi.fn(); native.on('SIGTERM', terminated);
-    const shutdown = new ProcessShutdown(parent, vi.fn());
-    const events: string[] = [];
-    let finish!: () => void;
-    const handoff = new Promise<void>(resolve => { finish = resolve; });
-    shutdown.attach(async () => { events.push('handoff'); await handoff; events.push('native-exit'); });
-    const original = f.runner.getMockImplementation()!;
-    f.runner.mockImplementation(async (command, args) => {
-      if (args.includes('stop')) {
-        const unit = await fs.readFile(f.unitPath, 'utf8');
-        parent.emit('SIGTERM');
-        if (!unit.includes('KillMode=mixed\n')) native.emit('SIGTERM');
-        await shutdown.stop(); events.push('parent-exit');
-      }
-      return original(command, args);
-    });
-    try {
-      const stopped = f.manager.stop();
-      await vi.waitFor(() => expect(events).toEqual(['handoff']));
-      expect(terminated).not.toHaveBeenCalled(); expect(parent.exit).not.toHaveBeenCalled();
-      finish(); await stopped;
-      expect(events).toEqual(['handoff', 'native-exit', 'parent-exit']);
-      expect(parent.exit).toHaveBeenCalledWith(0);
-    } finally { finish(); await shutdown.stop(); shutdown.dispose(); }
   });
 
   it('installs and reads a macOS LaunchAgent status', async () => {

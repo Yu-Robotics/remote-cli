@@ -1,19 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FeishuNotificationAdapter } from '../src/hooks/FeishuNotificationAdapter';
 import { claudeCodeHooks, HookEventType } from '../src/hooks/ClaudeCodeHooks';
-import { WebSocketClient } from '../src/client/WebSocketClient';
-
-// Mock WebSocketClient
-vi.mock('../src/client/WebSocketClient', () => {
-  return {
-    WebSocketClient: vi.fn().mockImplementation(() => ({
-      send: vi.fn(),
-      connect: vi.fn(),
-      disconnect: vi.fn(),
-      isConnected: vi.fn().mockReturnValue(true),
-    })),
-  };
-});
+import type { WebSocketClient } from '../src/client/WebSocketClient';
 
 describe('FeishuNotificationAdapter', () => {
   let adapter: FeishuNotificationAdapter;
@@ -46,11 +34,9 @@ describe('FeishuNotificationAdapter', () => {
       const defaultAdapter = new FeishuNotificationAdapter(mockWsClient);
       const enabled = defaultAdapter.getEnabledNotifications();
 
-      expect(enabled).toContain('task_started');
-      expect(enabled).toContain('task_completed');
-      expect(enabled).toContain('task_failed');
-      expect(enabled).toContain('task_aborted');
-      expect(enabled).toContain('authorization_required');
+      expect(enabled).toEqual(expect.arrayContaining([
+        'task_started', 'task_completed', 'task_failed', 'task_aborted', 'authorization_required',
+      ]));
     });
 
     it('should create adapter with custom enabled notifications', () => {
@@ -66,47 +52,22 @@ describe('FeishuNotificationAdapter', () => {
   });
 
   describe('setCurrentOpenId', () => {
-    it('should set the current open ID', () => {
-      adapter.setCurrentOpenId('user-123');
-      // Verify indirectly by checking notifications work
+    it('routes each event to the current recipient and skips events without one', async () => {
       adapter.register();
-      claudeCodeHooks.emit(HookEventType.TASK_STARTED, {
-        taskId: 'task-1',
-        workingDirectory: '/test',
-        description: 'Test',
-        startTime: Date.now(),
+      const notify = (taskId: string) => claudeCodeHooks.notifyTaskStarted({
+        taskId, workingDirectory: '.', description: 'Fixture task', startTime: 0,
       });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
-    });
-
-    it('should skip notifications when openId is not set', () => {
-      adapter.register();
-      claudeCodeHooks.emit(HookEventType.TASK_STARTED, {
-        taskId: 'task-1',
-        workingDirectory: '/test',
-        description: 'Test',
-        startTime: Date.now(),
-      });
-
-      expect(mockWsClient.send).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('register', () => {
-    it('should register all hook handlers', () => {
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-
-      // Emit a task started event
-      claudeCodeHooks.emit(HookEventType.TASK_STARTED, {
-        taskId: 'task-1',
-        workingDirectory: '/test',
-        description: 'Test',
-        startTime: Date.now(),
-      });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
+      await notify('unbound');
+      adapter.setCurrentOpenId('first-user');
+      await notify('first-task');
+      adapter.setCurrentOpenId('next-user');
+      await notify('next-task');
+      adapter.setCurrentOpenId(undefined);
+      await notify('unbound-again');
+      expect(mockWsClient.send.mock.calls).toEqual([
+        [expect.objectContaining({ openId: 'first-user', message: expect.stringContaining('first-task') })],
+        [expect.objectContaining({ openId: 'next-user', message: expect.stringContaining('next-task') })],
+      ]);
     });
   });
 
@@ -378,10 +339,6 @@ describe('FeishuNotificationAdapter', () => {
       expect(adapter.getEnabledNotifications()).not.toContain('task_started');
     });
 
-    it('should return list of enabled notifications', () => {
-      const enabled = adapter.getEnabledNotifications();
-      expect(Array.isArray(enabled)).toBe(true);
-    });
   });
 
   describe('error handling', () => {

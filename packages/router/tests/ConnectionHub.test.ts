@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { WebSocket } from 'ws';
 import { MessageType } from '../src/types';
@@ -11,6 +11,7 @@ describe('ConnectionHub', () => {
   let mockWs: any;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     hub = new ConnectionHub();
 
     // Create a mock WebSocket with all necessary methods
@@ -23,6 +24,7 @@ describe('ConnectionHub', () => {
       CLOSED: 3
     };
   });
+  afterEach(() => { vi.useRealTimers(); });
 
   describe('registerConnection', () => {
     it('ignores a delayed close from a replaced socket', () => {
@@ -170,13 +172,12 @@ describe('ConnectionHub', () => {
 
       const before = hub.getLastActiveTime(deviceId)!;
 
-      // Wait a bit to ensure time difference
-      await new Promise(resolve => setTimeout(resolve, 10));
+      vi.advanceTimersByTime(10);
 
       await hub.sendToDevice(deviceId, message);
 
       const after = hub.getLastActiveTime(deviceId)!;
-      expect(after).toBeGreaterThanOrEqual(before);
+      expect(after).toBe(before + 10);
     });
   });
 
@@ -321,8 +322,7 @@ describe('ConnectionHub', () => {
 
       const before = hub.getLastActiveTime(deviceId)!;
 
-      // Wait a bit to ensure time difference
-      await new Promise(resolve => setTimeout(resolve, 10));
+      vi.advanceTimersByTime(10);
 
       hub.updateLastActive(deviceId);
 
@@ -336,46 +336,23 @@ describe('ConnectionHub', () => {
       }).not.toThrow();
     });
 
-    it('should prevent cleanup when last active time is updated', async () => {
-      const deviceId = 'dev_test_001';
-
-      hub.registerConnection(deviceId, mockWs);
-
-      // Simulate time passing by updating last active to now
-      hub.updateLastActive(deviceId);
-
-      // Cleanup with 1ms timeout - device should not be cleaned up
-      // because we just updated the last active time
-      hub.cleanupStaleConnections(1);
-
-      expect(hub.isDeviceOnline(deviceId)).toBe(true);
-    });
   });
 
   describe('cleanupStaleConnections', () => {
-    it('should remove connections inactive for longer than timeout', () => {
-      const deviceId = 'dev_test_001';
-
-      hub.registerConnection(deviceId, mockWs);
-
-      // Simulate stale connection by manually setting old timestamp
-      // This would require exposing a test method or waiting for actual timeout
-      // For now, we test the method exists and can be called
-      hub.cleanupStaleConnections(1000); // 1 second timeout
-
-      // Connection should still be there (it's not actually stale yet)
-      expect(hub.isDeviceOnline(deviceId)).toBe(true);
-    });
-
-    it('should not cleanup recently active connections', () => {
-      const deviceId = 'dev_test_001';
-
-      hub.registerConnection(deviceId, mockWs);
-
-      // Cleanup with very long timeout
-      hub.cleanupStaleConnections(60000); // 60 seconds
-
-      expect(hub.isDeviceOnline(deviceId)).toBe(true);
+    it('closes only sockets idle beyond the timeout and retains refreshed siblings', () => {
+      const sibling = { ...mockWs, close: vi.fn() };
+      hub.registerConnection('stale', mockWs, { queueStarted: true });
+      hub.registerConnection('refreshed', sibling);
+      vi.advanceTimersByTime(1000);
+      hub.cleanupStaleConnections(1000);
+      expect(hub.isDeviceOnline('stale')).toBe(true);
+      hub.updateLastActive('refreshed');
+      vi.advanceTimersByTime(1);
+      hub.cleanupStaleConnections(1000);
+      expect(mockWs.close).toHaveBeenCalledOnce();
+      expect(hub.getOnlineDevices()).toEqual(['refreshed']);
+      expect(hub.supportsQueueStarted('stale')).toBe(false);
+      expect(sibling.close).not.toHaveBeenCalled();
     });
   });
 

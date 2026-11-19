@@ -109,12 +109,10 @@ describe('JsonStore serialized atomic persistence', () => {
     await started;
     const flushing = store.flush();
     const second = store.setDeviceToUserMap('device-b', 'user-b');
-    let flushFinished = false;
-    void flushing.then(() => { flushFinished = true; });
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(flushFinished).toBe(false);
+    const atFlush = flushing.then(() => store.getUserByDeviceId('device-b'));
     releaseFirst();
-    await Promise.all([first, second, flushing]);
+    expect(await atFlush).toBe('user-b');
+    await Promise.all([first, second]);
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8'));
     expect(persisted.deviceToUserMap).toMatchObject({ 'device-a': 'user-a', 'device-b': 'user-b' });
   });
@@ -146,11 +144,12 @@ describe('JsonStore serialized atomic persistence', () => {
 
     await expect(store.setDeviceToUserMap('device-a', 'user-a')).rejects.toThrow(/uncertain|reconcil/i);
     expect(() => store.getUserByDeviceId('device-a')).toThrow(/uncertain|reconcil/i);
-    const blocked = store.setDeviceToUserMap('device-b', 'user-b');
-    const flushing = store.flush();
-    await expect(flushing).rejects.toThrow(/uncertain|reconcil/i);
-    expect((store as any).pendingSaves).toHaveLength(0);
-    await expect(blocked).rejects.toThrow(/uncertain|reconcil/i);
+    let blockedError: unknown;
+    const blocked = store.setDeviceToUserMap('device-b', 'user-b').catch(error => { blockedError = error; });
+    await expect(store.flush()).rejects.toThrow(/uncertain|reconcil/i);
+    expect(blockedError).toBeInstanceOf(Error);
+    expect(String(blockedError)).toMatch(/uncertain|reconcil/i);
+    await blocked;
 
     const reloaded = new JsonStore(storePath, 0);
     await reloaded.initialize();

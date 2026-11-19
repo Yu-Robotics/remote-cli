@@ -167,18 +167,17 @@ describe('FileReadDetector', () => {
       expect(injectFileReadHint('')).toBe('')
     })
 
-    it('should append system hint to content', () => {
-      const result = injectFileReadHint('read config.ts')
+    it('preserves the request and appends the mobile preview guidance as a separate paragraph', () => {
+      const content = 'read config.ts\nKeep the comments.'
+      const result = injectFileReadHint(content)
+      const prefix = content + '\n\n'
 
-      expect(result).toContain('read config.ts')
-      expect(result).toContain('[System hint:')
-      expect(result).toContain('50 lines')
-    })
-
-    it('should separate hint with double newline', () => {
-      const result = injectFileReadHint('test content')
-
-      expect(result).toBe('test content\n\n[System hint: For files exceeding 50 lines, show only the first 50 lines by default with a summary of remaining content. Ask the user if they want to see more.]')
+      expect(result.startsWith(prefix)).toBe(true)
+      const hint = result.slice(prefix.length)
+      expect(hint).toMatch(/^\[System hint:/)
+      expect(hint).toMatch(/first 50 lines/i)
+      expect(hint).toMatch(/summar/i)
+      expect(hint).toMatch(/more/i)
     })
   })
 

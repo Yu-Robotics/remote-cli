@@ -1255,13 +1255,14 @@ describe('FeishuLongConnHandler', () => {
     };
 
     it('should not create duplicate continuation messages when updates are concurrent', async () => {
-      // Simulate slow API calls where create takes time to resolve
-      let createResolvers: Array<(value: any) => void> = [];
+      let created!: () => void;
+      const started = new Promise<void>(resolve => { created = resolve; });
+      let release!: (value: unknown) => void;
+      const response = new Promise(resolve => { release = resolve; });
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockImplementation(() => {
-        return new Promise(resolve => {
-          createResolvers.push(resolve);
-        });
+        created();
+        return response;
       });
 
       // Fire two concurrent updates that both exceed the element limit (190 > 180)
@@ -1269,15 +1270,9 @@ describe('FeishuLongConnHandler', () => {
       const update1 = handler.updateStreamingMessage('msg_123', makeElements(190), 'ou_user_123');
       const update2 = handler.updateStreamingMessage('msg_123', makeElements(195), 'ou_user_123');
 
-      // Wait for microtasks so both calls enter the method
-      await new Promise(r => setTimeout(r, 10));
-
-      // Resolve all create calls
-      for (const resolver of createResolvers) {
-        resolver({ data: { message_id: `msg_cont_${createResolvers.indexOf(resolver) + 1}` } });
-      }
-
-      await Promise.all([update1, update2]);
+      await started;
+      release({ data: { message_id: 'continuation' } });
+      expect(await Promise.all([update1, update2])).toEqual([true, true]);
 
       // With serialization, only ONE continuation message should be created
       // The second call should see the chain already has 2 entries and just update
@@ -1285,39 +1280,34 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should serialize finalize after pending update completes', async () => {
-      let patchResolver: ((value: any) => void) | null = null;
-      mockClient.im.message.patch.mockImplementation(() => {
-        return new Promise(resolve => {
-          patchResolver = resolve;
-        });
+      let patchStarted!: () => void;
+      const started = new Promise<void>(resolve => { patchStarted = resolve; });
+      let release!: () => void;
+      const pending = new Promise<void>(resolve => { release = resolve; });
+      mockClient.im.message.patch.mockResolvedValue({}).mockImplementationOnce(async () => {
+        patchStarted();
+        await pending;
+        return {};
       });
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_1' } });
 
       // Start an update that will be slow (patch takes time)
       const elements = [{ tag: 'markdown', content: 'Short content' }];
       const updatePromise = handler.updateStreamingMessage('msg_123', elements, 'ou_user_123');
+      await started;
 
       // Immediately fire finalize while update is still pending
       const finalizePromise = handler.finalizeStreamingMessage('msg_123', elements, 'ABC123', 'ou_user_123');
 
-      // Resolve the first patch
-      await new Promise(r => setTimeout(r, 10));
-      if (patchResolver) {
-        patchResolver({});
-        patchResolver = null;
-      }
-
-      // Wait for update to complete, then finalize's patch should proceed
-      await new Promise(r => setTimeout(r, 10));
-      if (patchResolver) {
-        patchResolver({});
+      try {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+      } finally {
+        release();
       }
 
       expect(await Promise.all([updatePromise, finalizePromise])).toEqual([true, true]);
-
-      // Both should complete successfully without errors
-      // The finalize should wait for the update to finish first
-      expect(mockClient.im.message.patch).toHaveBeenCalled();
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -1375,28 +1365,6 @@ describe('FeishuLongConnHandler', () => {
 
       expect(chunks).toHaveLength(1);
       expect(chunks[0]).toBe('');
-    });
-  });
-
-  describe('setOnStartStreaming', () => {
-    it('should set streaming start callback', () => {
-      const callback = vi.fn();
-
-      handler.setOnStartStreaming(callback);
-
-      // Trigger the callback by simulating a command
-      mockBindingManager.getUserBinding.mockResolvedValue({
-        deviceId: 'dev_123',
-        deviceName: 'Test Device'
-      });
-      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
-      mockConnectionHub.sendToDevice.mockResolvedValue(true);
-      mockClient.im.message.create.mockResolvedValue({
-        data: { message_id: 'msg_123' }
-      });
-
-      // Access private method to trigger callback
-      // This would normally be called via the full flow
     });
   });
 
@@ -2357,67 +2325,16 @@ describe('FeishuLongConnHandler', () => {
       expect(createCallCount2).toBeGreaterThan(createCallCount1);
     });
 
-    it('should not delete excess continuation cards when content shrinks (streaming never deletes)', async () => {
-      const messageId = 'msg_shrink';
-      const openId = 'test_open_id';
-
-      // First update: 250 elements -> 3 cards
-      const elements1 = Array.from({ length: 250 }, (_, i) => ({
-        tag: 'markdown',
-        content: `Element ${i}`,
+    it('keeps the delivered continuation when a streaming reply shrinks to one card', async () => {
+      const elements = Array.from({ length: 250 }, (_, i) => ({
+        tag: 'markdown', content: `Element ${i}`,
       }));
-
       mockClient.im.message.patch.mockResolvedValue({ data: {} });
-      let continuationId = 1;
-      mockClient.im.message.create.mockImplementation(() =>
-        Promise.resolve({ data: { message_id: `msg_continuation_${continuationId++}` } })
-      );
-      mockClient.im.message.delete.mockResolvedValue({ data: {} });
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'continuation' } });
 
-      await handler.updateStreamingMessage(messageId, elements1, openId);
-
-      // Second update: 80 elements -> only 1 card needed
-      const elements2 = Array.from({ length: 80 }, (_, i) => ({
-        tag: 'markdown',
-        content: `Smaller ${i}`,
-      }));
-
-      await handler.updateStreamingMessage(messageId, elements2, openId);
-
-      // Should NOT delete cards during streaming to avoid "message retracted" in Feishu UI
-      expect(mockClient.im.message.delete).not.toHaveBeenCalled();
-    });
-
-    it('should not delete continuation cards even when no longer needed (streaming never deletes)', async () => {
-      const messageId = 'msg_cleanup';
-      const openId = 'test_open_id';
-
-      // First update: 200 elements -> 2-3 cards
-      const elements1 = Array.from({ length: 200 }, (_, i) => ({
-        tag: 'markdown',
-        content: `Element ${i}`,
-      }));
-
-      mockClient.im.message.patch.mockResolvedValue({ data: {} });
-      mockClient.im.message.create.mockResolvedValue({
-        data: { message_id: 'msg_continuation_temp' },
-      });
-      mockClient.im.message.delete.mockResolvedValue({ data: {} });
-
-      await handler.updateStreamingMessage(messageId, elements1, openId);
-
-      // Clear mock to track new calls
-      mockClient.im.message.delete.mockClear();
-
-      // Second update: 50 elements -> only 1 card needed
-      const elements2 = Array.from({ length: 50 }, (_, i) => ({
-        tag: 'markdown',
-        content: `Small ${i}`,
-      }));
-
-      await handler.updateStreamingMessage(messageId, elements2, openId);
-
-      // Should NOT delete cards during streaming to avoid "message retracted" in Feishu UI
+      expect(await handler.updateStreamingMessage('root', elements, 'owner')).toBe(true);
+      expect(mockClient.im.message.create).toHaveBeenCalledOnce();
+      expect(await handler.updateStreamingMessage('root', [elements[0]], 'owner')).toBe(true);
       expect(mockClient.im.message.delete).not.toHaveBeenCalled();
     });
   });

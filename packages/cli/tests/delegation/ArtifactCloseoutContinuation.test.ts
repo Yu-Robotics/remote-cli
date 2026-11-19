@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ArtifactCloseoutContinuation, waitForArtifactCloseout } from '../../src/delegation/ArtifactCloseoutContinuation';
 import type { DelegationCloseoutIssue } from '../../src/delegation/DelegationManager';
+import { getEventListeners } from 'node:events';
 
 const issue = (taskId: string): DelegationCloseoutIssue => ({ taskId, backend: 'codex', status: 'pending' });
 
@@ -28,29 +29,24 @@ describe('artifact closeout continuation pacing', () => {
   it('releases its timer and listener on normal completion', async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
-    const remove = vi.spyOn(controller.signal, 'removeEventListener');
     const waiting = waitForArtifactCloseout(1000, controller.signal);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1000);
     await waiting;
     expect(vi.getTimerCount()).toBe(0);
-    expect(remove).toHaveBeenCalledOnce();
-    controller.abort();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   it.each(['before', 'during'])('settles cancellation %s the wait without leaving a timer', async timing => {
     vi.useFakeTimers();
     const controller = new AbortController();
-    const remove = vi.spyOn(controller.signal, 'removeEventListener');
     if (timing === 'before') controller.abort();
     const waiting = waitForArtifactCloseout(30000, controller.signal);
     const cancelled = expect(waiting).rejects.toThrow('cancelled');
     controller.abort();
     await cancelled;
-    expect(remove).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(60000);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 

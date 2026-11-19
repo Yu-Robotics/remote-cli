@@ -38,7 +38,7 @@ describe('CLI wire compatibility', () => {
       type: 'binding_request',
       messageId: expect.any(String),
       timestamp: expect.any(Number),
-      data: { deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { queueStarted: true, outputAttachmentHintsV1: true, taskRecovery: true, scheduleResultsV1: true, hostSchedulesV1: true, scheduleCardsV1: true, scheduleToolCardsV1: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, workerContextReset: true, streamingContext: true, activityProgress: true, settingsCards: true, modelSpeedSettings: true, directoryCards: true, delegationCards: true, updateNotice: true, subscriptionInspection: true, bankedResetReminder: true } },
+      data: { deviceId: 'device-1', protocolVersion: 1, capabilities: { queueStarted: true, outputAttachmentHintsV1: true, taskRecovery: true, scheduleResultsV1: true, hostSchedulesV1: true, scheduleCardsV1: true, scheduleToolCardsV1: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, workerContextReset: true, streamingContext: true, activityProgress: true, settingsCards: true, modelSpeedSettings: true, directoryCards: true, delegationCards: true, updateNotice: true, subscriptionInspection: true, bankedResetReminder: true } },
     });
   });
 
@@ -55,8 +55,6 @@ describe('CLI wire compatibility', () => {
     client.send(message);
     const sent = JSON.parse(socket.send.mock.calls.at(-1)![0]);
     expect(sent).toEqual(message);
-    expect(sent.toolUse.input).toEqual({ command: 'npm test' });
-    expect(PROTOCOL_VERSION).toBe(1);
   });
   it('omits disabled maintenance capabilities without changing normal legacy traffic', async () => {
     const disabled = new WebSocketClient('ws://localhost:3000', 'device-1', {
@@ -77,10 +75,10 @@ describe('CLI wire compatibility', () => {
     const message = { type: 'update_notice', noticeKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       fromVersion: '1.6.123', toVersion: '1.6.124', page: releasePage(index, '1.6.123', '1.6.124') };
     client.send(message);
-    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual(message);
-    expect(message.page.sections[0]).toEqual({ version: '1.6.124', text: summary, details: '- Technical detail' });
-    expect(message.page.overview).toMatchObject({ totalItems: 1, totalGroups: 1, groups: [{ topic: 'feature' }] });
-    expect(PROTOCOL_VERSION).toBe(1);
+    const sent = JSON.parse(socket.send.mock.calls.at(-1)![0]);
+    expect(sent).toEqual(message);
+    expect(sent.page.sections[0]).toEqual({ version: '1.6.124', text: summary, details: '- Technical detail' });
+    expect(sent.page.overview).toMatchObject({ totalItems: 1, totalGroups: 1, groups: [{ topic: 'feature' }] });
   });
 
   it.each([

@@ -85,9 +85,10 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     expect(gitCalls()).toHaveLength(0);
     const scratch = trackScratchDirectories();
     const first = await ownedFixture();
+    const bootstrapCalls = gitCalls().length;
     const second = await ownedFixture();
     const third = await ownedFixture();
-    expect(gitCalls()).toHaveLength(8);
+    expect(gitCalls()).toHaveLength(bootstrapCalls);
     expect(gitCalls().filter(([, args]) => args?.includes('init'))).toHaveLength(1);
     expect(gitCalls().filter(([, args]) => args?.includes('commit'))).toHaveLength(1);
     expect(scratch).toHaveBeenCalledTimes(4);
@@ -110,7 +111,8 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
   it('shares simultaneous first setup while giving every caller its own writable copy', async () => {
     const scratch = trackScratchDirectories();
     const fixtures = await Promise.all(Array.from({ length: 4 }, () => ownedFixture()));
-    expect(gitCalls()).toHaveLength(8);
+    expect(gitCalls().filter(([, args]) => args?.includes('init'))).toHaveLength(1);
+    const bootstrapCalls = gitCalls().length;
     expect(scratch).toHaveBeenCalledTimes(5);
     expect(new Set(fixtures.map(fixture => fixture.directory)).size).toBe(4);
     expect(new Set(fixtures.map(fixture => fixture.head)).size).toBe(1);
@@ -123,7 +125,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     }
     const next = await ownedFixture();
     expect(await treeBytes(next.root)).toEqual(baseline);
-    expect(gitCalls()).toHaveLength(8);
+    expect(gitCalls()).toHaveLength(bootstrapCalls);
   });
 
   it('keeps files, index, config, HEAD, objects, worktrees and ignored data independent', async () => {
@@ -209,7 +211,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     write.mockRestore();
     vi.mocked(childProcess.spawn).mockClear();
     const fixtures = await Promise.all([ownedFixture(), ownedFixture()]);
-    expect(gitCalls()).toHaveLength(8);
+    expect(gitCalls().filter(([, args]) => args?.includes('init'))).toHaveLength(1);
     expect(fixtures[0].directory).not.toBe(fixtures[1].directory);
     expect(await treeBytes(fixtures[0].root)).toEqual(await treeBytes(fixtures[1].root));
   });

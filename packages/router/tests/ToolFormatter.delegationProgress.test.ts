@@ -133,11 +133,11 @@ describe('delegated worker progress formatting', () => {
     expect(JSON.stringify(elements)).not.toContain('Sensitive internal task prompt');
   });
 
-  it('shows all of a 939-byte snapshot including the newest words', () => {
-    const snapshot = 'A'.repeat(900) + '\nLATEST_UPDATE: now checking the result';
-    expect(Buffer.byteLength(snapshot)).toBe(939);
+  it('shows a complete activity snapshot including the newest words', () => {
+    const prefix = 'A'.repeat(900);
+    const snapshot = prefix + '\nLATEST_UPDATE: now checking the result';
     const elements = render({ latestText: snapshot });
-    expect(workerBodyContent(elements)).toContain('LATEST\\_UPDATE: now checking the result');
+    expect(workerBodyContent(elements)).toContain(prefix + '\nLATEST\\_UPDATE: now checking the result');
     expect(workerBodyContent(elements)).not.toContain('omitted');
   });
 

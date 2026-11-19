@@ -80,16 +80,23 @@ describe('WebSocketClient', () => {
       const connected = client.connect();
       mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
       const message = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1];
-      const order: string[] = [];
-      vi.spyOn((client as any).taskRecovery, 'acknowledge').mockImplementation(() => { order.push('recovery'); });
+      message(JSON.stringify({ type: 'binding_confirm', data: { success: true, capabilities: { taskRecovery: true } } }));
+      client.trackTask({ messageId: 'result', openId: 'owner', threadId: 'thread', threadName: 'Thread',
+        backend: 'codex', cwd: os.tmpdir(), preview: 'Synthetic request' });
+      client.send({ type: 'response', messageId: 'result', success: true });
+      expect(client.hasPendingTaskResults()).toBe(true);
       const raw = vi.fn(); client.onMessage(raw);
-      const remove = client.onTaskResultAck(id => { order.push(id); });
+      const received = vi.fn();
+      const remove = client.onTaskResultAck(id => received(id, client.hasPendingTaskResults()));
       message(Buffer.from(JSON.stringify({ type: 'task_resume_ack', messageId: 'resume' })));
+      expect(received).not.toHaveBeenCalled();
+      expect(client.hasPendingTaskResults()).toBe(true);
       message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId: 'result' })));
-      expect(order).toEqual(['recovery', 'recovery', 'result']);
+      expect(received).toHaveBeenCalledWith('result', false);
       remove(); remove();
       message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId: 'removed' })));
-      expect(order.at(-1)).toBe('recovery'); expect(raw).not.toHaveBeenCalled();
+      expect(received).toHaveBeenCalledOnce();
+      expect(raw).not.toHaveBeenCalled();
     });
 
     it('isolates receipt subscribers, ignores malformed IDs and supports independent removal', async () => {
@@ -614,17 +621,6 @@ describe('WebSocketClient', () => {
   });
 
   describe('cleanup', () => {
-    it('should clean up resources on disconnect', async () => {
-      const connectPromise = client.connect();
-      const openHandler = mockWs.on.mock.calls.find((call: any) => call[0] === 'open')?.[1];
-      openHandler();
-      await connectPromise;
-
-      client.disconnect();
-
-      expect(mockWs.close).toHaveBeenCalled();
-    });
-
     it('should remove all event listeners on disconnect', async () => {
       const messageHandler = vi.fn();
       const errorHandler = vi.fn();

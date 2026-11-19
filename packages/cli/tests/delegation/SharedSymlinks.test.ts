@@ -171,7 +171,7 @@ describe('repository external shared links', { timeout: 60_000 }, () => {
     'preserves the latest %s policy when a stale runtime instance saves an unrelated setting', async kind => {
       const { config, file } = await savedConfig();
       const cached = kind === 'added' ? [] : [grant()];
-      (config as any).config.delegation = { sharedSymlinks: cached };
+      await config.set('delegation.sharedSymlinks', cached);
       const saved = kind === 'added' ? { sharedSymlinks: [grant()] }
         : kind === 'revoked' ? { sharedSymlinks: [] } : { sharedSymlinks: 'synthetic-invalid-policy' };
       if (kind === 'deleted') await fs.unlink(file);
@@ -199,7 +199,7 @@ describe('repository external shared links', { timeout: 60_000 }, () => {
   });
   it('does not resurrect cached grants when current policy cannot be read during an unrelated save', async () => {
     const { config, file } = await savedConfig();
-    (config as any).config.delegation = { sharedSymlinks: [grant()] };
+    await config.set('delegation.sharedSymlinks', [grant()]);
     const bytes = await fs.readFile(file);
     const read = fs.readFile.bind(fs);
     const reading = vi.spyOn(fs, 'readFile').mockImplementation(((name: any, ...args: any[]) => {
