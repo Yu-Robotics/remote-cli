@@ -1077,7 +1077,7 @@ native capability and transport evidence behind the adapter choice.
 
 ### Illustrated Tips
 
-Use `/tips` to browse 27 short Chinese scenario cards, each with its own bundled
+Use `/tips` to browse 30 short Chinese scenario cards, each with its own bundled
 illustration based on the actual settings panels or task cards, a benefit, and a copyable example. Examples are educational text;
 card buttons never execute them or change backend, model, effort, device, or thread.
 Browsing works for bound users even while their CLI is offline.

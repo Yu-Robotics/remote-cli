@@ -27,6 +27,7 @@ const expectedIds = [
   'directory-browser', 'named-project-thread', 'tool-row-details', 'delegation-toggle',
   'delegation-reset-backend', 'codex-model-speed', 'codex-native-goal', 'sandbox-thread-controls',
   'codex-weekly-reset-notice', 'codex-banked-reset-notice',
+  'command-menu-navigation', 'schedule-in-original-thread', 'reply-in-original-thread',
 ];
 const naturalInstructionIds = [
   'cross-backend-review', 'delegation-independent-checks', 'delegation-parallel-changes',
@@ -63,10 +64,10 @@ afterEach(() => {
 });
 
 describe('reviewed illustrated tip catalog', () => {
-  it('exposes 27 stable, frozen definitions with only contract fields', () => {
+  it('exposes 30 stable, frozen definitions with only contract fields', () => {
     expect(TIPS.map(tip => tip.id)).toEqual(expectedIds);
     expect(Object.isFrozen(TIPS)).toBe(true);
-    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(27);
+    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(expectedIds.length);
     expect(validateCatalog(catalog)).toBe(catalog);
     for (const tip of TIPS) {
       expect(Object.isFrozen(tip)).toBe(true);
@@ -87,9 +88,9 @@ describe('reviewed illustrated tip catalog', () => {
       expect(tip.benefit.match(/\u3002/g)).toHaveLength(1);
       expect(tip.image).toBe(`${tip.id}.png`);
     }
-    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(27);
-    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(27);
-    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(27);
+    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(expectedIds.length);
+    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(expectedIds.length);
+    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(expectedIds.length);
   });
 
   it('keeps unsupported commands out while allowing the newly approved thread workflow', () => {
@@ -100,7 +101,7 @@ describe('reviewed illustrated tip catalog', () => {
       const text = JSON.stringify(tip);
       expect(text).not.toMatch(/\/(?:agent|delegate|worker|integrate)(?:\s|["\\])/);
       expect(text).not.toMatch(/\/queue\s+(?:clear|continue)/);
-      if (tip.id !== 'named-project-thread') expect(text).not.toMatch(/\/thread\s+new/);
+      if (!['named-project-thread', 'clear-thread-context'].includes(tip.id)) expect(text).not.toMatch(/\/thread\s+new/);
       expect(text).not.toMatch(/\/backend\s+\d/);
       expect(text).not.toMatch(/https?:\/\/|(?:\d{1,3}\.){3}\d{1,3}|\/home\/|\/Users\//);
     }
@@ -236,7 +237,7 @@ describe('reviewed illustrated tip catalog', () => {
     expect(find('device-selection').example).toBe('/device\n/device <index>');
     expect(find('device-selection').detail).toMatch(/\u4e0d\u4f1a.*\u4efb\u52a1\u3001\u9879\u76ee\u6587\u4ef6\u6216\u4f1a\u8bdd\u5386\u53f2\u8fc1\u79fb/);
     expect(find('clear-thread-context').action).toMatch(/\u9000\u51fa\u5df2\u786e\u8ba4.*\/clear.*\/new/);
-    expect(find('clear-thread-context').detail).toMatch(/1\.6\.177.*\u5168\u90e8\u540e\u7aef\u548c\u6258\u7ba1\u52a9\u624b/);
+    expect(find('clear-thread-context').detail).toMatch(/\u5168\u90e8\u540e\u7aef\u548c\u6258\u7ba1\u52a9\u624b.*CLI \u5b9a\u65f6\u4efb\u52a1/);
     expect(find('clear-thread-context').detail).toMatch(/\u5f52\u6863\u5386\u53f2\u3001\u767b\u5f55\u548c\u8bbe\u7f6e\u4fdd\u7559.*\u5176\u4ed6\u7ebf\u7a0b\u4e0d\u53d7\u5f71\u54cd/);
     expect(find('compact-backend').example).toBe('/compact');
     expect(find('compact-backend').detail).toMatch(/\u539f\u751f\u538b\u7f29\u6216\u6458\u8981\u540e\u91cd\u5f00.*\u4e0d\u4fdd\u8bc1\u4fdd\u7559\u5168\u90e8\u7ec6\u8282/);
@@ -254,7 +255,7 @@ describe('reviewed illustrated tip catalog', () => {
       hashes.add(createHash('sha256').update(image).digest('hex'));
       total += image.length;
     }
-    expect(hashes.size).toBe(27);
+    expect(hashes.size).toBe(expectedIds.length);
     expect(total).toBeLessThan(5 * 1024 * 1024);
   });
 
@@ -362,7 +363,7 @@ describe('reviewed illustrated tip catalog', () => {
   it('packages the JSON and all byte-identical images without a renderer dependency', () => {
     const outputDirectory = makeTemp();
     const result = buildTips({ sourceDirectory: source, outputDirectory });
-    expect(result.count).toBe(27);
+    expect(result.count).toBe(expectedIds.length);
     expect(result.bytes).toBeLessThan(5 * 1024 * 1024);
     expect(JSON.parse(fs.readFileSync(path.join(outputDirectory, 'catalog.zh-CN.json'), 'utf8'))).toEqual(catalog);
     for (const tip of TIPS) expect(fs.readFileSync(path.join(outputDirectory, 'assets', tip.image)))
@@ -407,12 +408,12 @@ describe('reviewed illustrated tip catalog', () => {
     }
   });
 
-  it('provides a 27-tip preview with local images and matching editable SVGs', () => {
+  it('provides a 30-tip preview with local images and matching editable SVGs', () => {
     const svgDirectory = path.join(root, 'docs/tips/svg');
     expect(fs.readdirSync(svgDirectory).sort()).toEqual(TIPS.map(tip => `${tip.id}.svg`).sort());
     const gallery = fs.readFileSync(path.join(root, 'docs/tips-preview.html'), 'utf8');
-    expect(gallery.match(/<article /g)).toHaveLength(27);
-    expect(gallery.match(/<img /g)).toHaveLength(27);
+    expect(gallery.match(/<article /g)).toHaveLength(expectedIds.length);
+    expect(gallery.match(/<img /g)).toHaveLength(expectedIds.length);
     expect(gallery).not.toMatch(/<details(?:\s|>)/);
     expect(gallery).not.toMatch(/https?:\/\/|<script/);
     for (const tip of TIPS) {

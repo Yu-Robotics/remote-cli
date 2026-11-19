@@ -58,7 +58,7 @@ describe('Router-owned Tips', () => {
     now += DAY; await service.tick(); expect(options.create).toHaveBeenCalledTimes(2);
   });
 
-  it.each([[17, 'directory-browser'], [25, 'codex-weekly-reset-notice']] as const)(
+  it.each([[17, 'directory-browser'], [25, 'codex-weekly-reset-notice'], [27, 'command-menu-navigation']] as const)(
     'continues after %i tutorials without losing existing reading progress or opt-outs', async (seenCount, nextId) => {
     options.catalog = TIPS;
     const previous = newTipState('Asia/Shanghai');

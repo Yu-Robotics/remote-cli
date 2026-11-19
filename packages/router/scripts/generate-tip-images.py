@@ -235,12 +235,15 @@ class Canvas:
                         and self.tip['id'] not in ['delegation-toggle', 'delegation-reset-backend']) or self.tip['id'] == 'cross-backend-review'
         automatic = self.tip['id'] in ['codex-weekly-reset-notice', 'codex-banked-reset-notice']
         caption = UI['automatic'] if automatic else UI['interaction'] if self.tip['id'] == 'tool-row-details' else UI['delegation'] if prerequisite else UI['command']
+        if self.tip['id'] == 'reply-in-original-thread':
+            caption = UI['replyGesture']
         self.text(x, 236, caption, 21, '#646a73')
         command = self.tip['example'].split('\n')[0] if self.tip['example'].startswith('/') else '/delegation'
         if len(command) > 25 and self.tip['id'] != 'delegation-reset-backend':
             command = command.split(' ')[0]
         command = {'queue-confirm': UI['queue'], 'file-needs-instruction': UI['file'],
                    'image-with-question': UI['image'],
+                   'schedule-in-original-thread': '/schedule list', 'reply-in-original-thread': UI['replyAction'],
                    'tool-row-details': labels[2], 'codex-weekly-reset-notice': 'Codex Reset',
                    'codex-banked-reset-notice': 'Codex Banked Reset'}.get(self.tip['id'], command)
         self.rect(x, 280, 450, 72, 'white', '#dce2eb', 12)
@@ -373,15 +376,7 @@ def queue_scene(c):
 def command_scene(c, kind):
     request = c.tip['example'].split('\n')[0]
     y = c.task(c.user(request), bottom=690 if kind == 'skills-by-backend' else 954)
-    if kind == 'abort-consequences':
-        y = c.block(98, y, 'Current command has been aborted', 845, 25, bold=True) + 25
-        c.block(98, y, 'Cleared 2 queued messages.', 845, 23)
-    elif kind == 'clear-thread-context':
-        y = c.block(98, y, 'Conversation context cleared for all direct backends and managed workers in this thread.', 845, 24) + 30
-        c.line(98, y, 965)
-        c.text(98, y + 30, 'demo · /workspace/demo', 22, '#646a73')
-        c.text(98, y + 77, 'Model: sonnet · Effort: high (configured)', 20, '#646a73')
-    elif kind == 'compact-backend':
+    if kind == 'compact-backend':
         c.text(98, y, 'Compressing conversation history…', 24, bold=True)
         c.line(98, y + 69, 966)
         c.text(98, y + 100, 'Conversation history compressed', 24)
@@ -395,6 +390,83 @@ def command_scene(c, kind):
         c.block(128, 754, follow_up, 816, 23, '#1f3864', max_lines=3)
         c.highlight(93, y + 49, 810, 102, 1)
         c.highlight(104, 736, 868, 145, 2)
+
+
+def abort_scene(c):
+    y = c.task(c.user('/abort'))
+    c.text(106, y, UI['scheduledRun'], 31, bold=True)
+    for offset, key in [(78, 'confirmedNext'), (142, 'nextRun')]:
+        c.text(123, y + offset, '→', 28, '#368544', True)
+        c.text(178, y + offset, UI[key], 27)
+    c.highlight(100, y - 4, 839, 209, 1)
+    c.line(98, y + 252, 952)
+    c.text(106, y + 302, UI['ordinaryRun'], 31, bold=True)
+    c.text(125, y + 384, UI['queueCleared'], 27, '#646a73')
+    c.highlight(100, y + 298, 839, 150, 2)
+
+
+def clear_scene(c):
+    y = c.task(228)
+    c.text(106, y, UI['beforeClear'], 29, bold=True)
+    for offset, command, key, number in [
+        (110, '/clear  ·  /new', 'afterClear', 1),
+        (338, '/thread new demo-2', 'afterNewThread', 2),
+    ]:
+        c.rect(105, y + offset, 840, 72, '#e1ebff', radius=10)
+        c.text(136, y + offset + 12, command, 30, BLUE, True)
+        c.text(136, y + offset + 96, UI[key], 27)
+        c.highlight(105, y + offset, 840, 72, number)
+
+
+def command_menu_scene(c):
+    y = c.user('/skills')
+    c.rect(64, y, 936, 954 - y, 'white', '#d9dce1', 12)
+    c.text(98, y + 22, 'Remote CLI commands', 30, BLUE, True)
+    c.text(98, y + 87, 'Quick access', 26, bold=True)
+    width = c.button(105, y + 153, 'Scheduled tasks ›', size=24)
+    c.highlight(105, y + 153, width, 47, 1)
+    c.line(98, y + 251, 964)
+    c.text(98, y + 284, '/schedule', 30, BLUE, True)
+    for index, label in enumerate(['list · Scheduled tasks', 'after · Run after a delay',
+                                   'at · Run at a time', 'cron · Recurring task']):
+        x = 105 + (index % 2) * 417
+        row = y + 365 + (index // 2) * 89
+        width = c.button(x, row, label, size=23)
+        if index == 3:
+            c.highlight(x, row, width, 47, 2)
+
+
+def schedule_scene(c):
+    y = c.task(228, thread_name='CI')
+    c.text(103, y, '09:00', 48, BLUE, True)
+    c.text(280, y + 17, UI['beijingTime'], 28)
+    for index, day in enumerate(UI['weekdays']):
+        x = 105 + index * 115
+        active = index < 5
+        c.rect(x, y + 103, 89, 72, '#e1ebff' if active else '#f3f4f5', radius=8)
+        c.text(x + 28, y + 114, day, 31, BLUE if active else '#646a73', active)
+    c.highlight(105, y + 103, 549, 72, 1)
+    c.text(105, y + 217, '0 9 * * 1-5     ·     Asia/Shanghai', 24, '#646a73')
+    c.line(98, y + 300, 962)
+    c.text(105, y + 348, UI['ciReport'], 30, bold=True)
+    c.rect(105, y + 430, 825, 88, '#edf3ff', radius=9)
+    c.text(134, y + 450, UI['ciExample'], 28)
+    c.highlight(105, y + 430, 825, 88, 2)
+
+
+def reply_scene(c):
+    c.rect(64, 228, 936, 726, 'white', '#d9dce1', 12)
+    c.text(101, 260, UI['threadSelected'], 33, BLUE, True)
+    c.rect(105, 372, 830, 101, '#f3f4f5', radius=10)
+    c.rect(108, 384, 5, 76, '#9199a3')
+    c.text(138, 401, UI['resultA'], 28)
+    for y, action, target, number in [(545, 'replyA', 'toA', 1), (772, 'newB', 'toB', 2)]:
+        c.text(123, y, UI[action], 32, bold=True)
+        c.parts.append(f'<path d="M420,{y + 25} h181 m-14,-13 l14,13 -14,13" fill="none" stroke="{BLUE}" stroke-width="4"/>')
+        c.rect(653, y - 15, 258, 83, '#e1ebff', radius=10)
+        c.text(715, y, UI[target], 31, BLUE, True)
+        c.highlight(653, y - 15, 258, 83, number)
+    c.line(98, 677, 962)
 
 
 def device_scene(c):
@@ -563,6 +635,16 @@ def render_svg(tip, number, fixtures):
         file_scene(c)
     elif tip['id'] == 'image-with-question':
         image_scene(c)
+    elif tip['id'] == 'abort-consequences':
+        abort_scene(c)
+    elif tip['id'] == 'clear-thread-context':
+        clear_scene(c)
+    elif tip['id'] == 'command-menu-navigation':
+        command_menu_scene(c)
+    elif tip['id'] == 'schedule-in-original-thread':
+        schedule_scene(c)
+    elif tip['id'] == 'reply-in-original-thread':
+        reply_scene(c)
     else:
         command_scene(c, tip['id'])
     return c.finish()
@@ -617,7 +699,7 @@ def gallery(catalog, portable=False):
 
 def main():
     catalog = json.loads((SOURCE / 'catalog.zh-CN.json').read_text())
-    assert len(catalog) == 27, 'Expected the approved 27-topic catalog'
+    assert len(catalog) == 30, 'Expected the approved 30-topic catalog'
     fixtures = settings_fixtures()
     svg_directory = DOCS / 'svg'
     svg_directory.mkdir(parents=True, exist_ok=True)

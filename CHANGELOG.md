@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.273] - 2026-11-19
+
+### Changed
+- Add illustrated Tips for the command menu, recurring schedules in the originating thread, and direct replies after switching threads. Update the abort and clear illustrations to explain their effects on scheduled work.
+
 ## [1.6.272] - 2026-11-19
 
 ### Fixed

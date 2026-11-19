@@ -14,7 +14,7 @@ function imageName(tip: Pick<TipDefinition, 'id' | 'image'>): string {
 }
 
 const ids = new Set<string>();
-if (!Array.isArray(catalog) || catalog.length !== 27) throw new Error('The tip catalog must contain 27 entries');
+if (!Array.isArray(catalog) || catalog.length !== 30) throw new Error('The tip catalog must contain 30 entries');
 
 /** Only reviewed contract fields leave the resource; illustration data is build-time input. */
 export const TIPS: readonly TipDefinition[] = Object.freeze(catalog.map(entry => {

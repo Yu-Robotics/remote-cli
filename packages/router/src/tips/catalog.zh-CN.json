@@ -232,24 +232,24 @@
   {
     "id": "abort-consequences",
     "topic": "queues",
-    "title": "方向有变，及时停止当前任务",
-    "problem": "当前任务的方向已经改变，继续执行还可能带着旧计划往下处理。",
-    "benefit": "中止当前任务并清掉同线程的等待安排，可以在清理完成后重新布置工作。",
-    "action": "确认当前线程后发送 /abort，等待停止和清理结果，再安排新任务。",
+    "title": "用 /abort 停下正在做的事",
+    "problem": "定时巡检正在跑，你已排好另一个问题；有时却是手动发起的任务走错了方向。",
+    "benefit": "看清当前跑的是哪种任务，就知道中止后要不要重新排队。",
+    "action": "在任务所在的线程发送 /abort，等停止结果。若还要取消以后的定时运行，用 /schedule list 查编号，再发 /schedule cancel <编号>。",
     "example": "/abort",
-    "detail": "会清除本线程已确认和待确认的队列，并取消未完成的委派；已写入的文件不会回滚，其他线程不受影响。",
+    "detail": "停止本次定时运行后，周期计划保留，已确认的聊天继续。停止普通任务会清空本线程已确认和待确认的队列，取消未完成的委派。已写入的文件不会回滚。",
     "image": "abort-consequences.png",
     "illustration": {
       "layout": "abort-consequences",
       "labels": [
-        "确认需要停止的任务",
-        "核对当前线程与工作方向",
-        "发送中止命令",
-        "等清理完成再安排新工作",
-        "文件不会回滚",
-        "本线程旧队列和未完成委派会取消"
+        "定时任务正在运行",
+        "只中止这一次，重复计划仍保留",
+        "普通任务正在运行",
+        "已确认和待确认的消息都会清掉",
+        "先等停止结果",
+        "已经写入的文件不会回滚"
       ],
-      "takeaway": "停止旧计划后再安排新任务，文件修改保留"
+      "takeaway": "定时运行中止后，已确认的聊天接着处理。"
     }
   },
   {
@@ -324,24 +324,24 @@
   {
     "id": "clear-thread-context",
     "topic": "context",
-    "title": "旧讨论干扰新任务，清理当前上下文",
-    "problem": "准备开始新的工作，旧讨论和复用助手的历史却仍可能影响回答。",
-    "benefit": "清理当前线程各后端和托管助手的续聊关联，可以在保留项目文件与设置的情况下重新开始。",
-    "action": "等当前任务、队列和委派助手全部结束且退出已确认后，发送 /clear 或同义命令 /new。",
+    "title": "清理当前线程，还是另开一个？",
+    "problem": "想开始另一件事，但当前线程里还有讨论记录和定时任务。",
+    "benefit": "旧任务还要继续，就另开线程；确实要重置时，再清理当前线程。",
+    "action": "想保留旧讨论和定时计划，发送 /thread new 加上新线程名。要清理当前线程，先用 /schedule list 核对计划，等任务结束、队列清空、助手退出已确认后再发 /clear 或 /new。",
     "example": "/clear\n/new",
-    "detail": "CLI 1.6.177 起重置本线程全部后端和托管助手的续聊关联；文件、Git 产物、归档历史、登录和设置保留，其他线程不受影响。",
+    "detail": "清理会重置本线程全部后端和托管助手的会话，移除 CLI 定时任务和运行记录。项目文件、Git 产物、归档历史、登录和设置保留，其他线程不受影响。",
     "image": "clear-thread-context.png",
     "illustration": {
       "layout": "clear-thread-context",
       "labels": [
-        "等待任务全部结束",
-        "队列清空且助手退出已确认",
-        "清理当前上下文",
-        "当前线程主助手与委派一起重开",
-        "文件与设置保留",
-        "其他线程和归档历史不受影响"
+        "清理当前线程",
+        "/clear 和 /new 的效果相同",
+        "另开线程做新事",
+        "旧讨论可以续聊，定时计划照常",
+        "清理前先检查",
+        "用 /schedule list 核对本线程计划"
       ],
-      "takeaway": "清理续聊关联，保留项目文件与设置"
+      "takeaway": "要保留旧讨论和计划，用 /thread new 加上新线程名。"
     }
   },
   {
@@ -618,6 +618,75 @@
         "首次检测和重启不补发提醒"
       ],
       "takeaway": "这是张数增加通知，不是领卡或用卡入口"
+    }
+  },
+  {
+    "id": "command-menu-navigation",
+    "topic": "capabilities",
+    "title": "从 /skills 菜单找到定时任务",
+    "problem": "想看看有哪些定时任务，或再加一个，却记不清命令。",
+    "benefit": "打开飞书命令菜单，就能找到任务列表和创建表单。",
+    "action": "发送 /skills，在 Quick access 下点 Scheduled tasks ›。点 list 查看列表；要创建任务，点 after、at 或 cron，填好时间和任务内容，再点 Submit。",
+    "example": "/skills",
+    "detail": "after 表示多久后运行一次，at 表示在指定时间运行一次，cron 用于重复执行。设置 cron 时要填时区，例如 Asia/Shanghai。",
+    "image": "command-menu-navigation.png",
+    "illustration": {
+      "layout": "command-menu-navigation",
+      "labels": [
+        "打开命令菜单",
+        "在快捷入口点 Scheduled tasks ›",
+        "选择要做的事",
+        "list 看列表，cron 建重复任务",
+        "填写任务再提交",
+        "定时规则、时区和任务内容都要填"
+      ],
+      "takeaway": "从 /skills 进入定时菜单，可以查任务，也可以创建任务。"
+    }
+  },
+  {
+    "id": "schedule-in-original-thread",
+    "topic": "schedules",
+    "title": "每个工作日九点，把 CI 失败报回原线程",
+    "problem": "每天早上都要手动查看这个项目的持续集成（CI）有没有检查失败。",
+    "benefit": "在项目线程里设好时间，之后每次巡检的结果都会发回这里。",
+    "action": "在能查看项目 CI 的线程里发送下面这句话。创建后用 /schedule list 核对计划和时间，到点时保持这台设备的 CLI 在线。",
+    "example": "每个工作日北京时间上午 9 点，检查这个项目最近一次 CI，把失败项发到这个线程；全部通过就告诉我。",
+    "detail": "示例按北京时间周一到周五 09:00 运行。原线程和会话须可用；CLI 离线时错过的这次不会补跑，上线后从下个计划时间继续。",
+    "image": "schedule-in-original-thread.png",
+    "illustration": {
+      "layout": "schedule-in-original-thread",
+      "labels": [
+        "在项目线程设定时间",
+        "周一至周五 09:00，北京时间",
+        "在原线程收报告",
+        "报告列出哪些 CI 检查失败了",
+        "到点保持 CLI 在线",
+        "发送 /schedule list 核对计划"
+      ],
+      "takeaway": "在哪个线程安排巡检，就在哪个线程收结果。"
+    }
+  },
+  {
+    "id": "reply-in-original-thread",
+    "topic": "threads",
+    "title": "已切到 B，还想追问 A 的结果",
+    "problem": "你已选中线程 B，却想让 A 接着解释刚才的结果。",
+    "benefit": "直接回复那条结果即可在 A 续聊，当前选中的 B 仍然可用。",
+    "action": "在飞书里找到 A 的结果卡片，使用“回复”发出追问。有回复关联的备用文字结果也可以这样追问。要在 B 开始新问题，直接在输入框发新消息。",
+    "example": "回复 A 的结果：是哪项检查失败了？\n直接发新消息：看看下一个任务。",
+    "detail": "适用于同一台当前设备、同一绑定，且结果的线程关联仍有效。若提示关联已过期，用 /thread list 找到并选回 A，再发问题。",
+    "image": "reply-in-original-thread.png",
+    "illustration": {
+      "layout": "reply-in-original-thread",
+      "labels": [
+        "回复 A 的结果",
+        "卡片或带回复关联的备用文字都可以",
+        "直接发新消息",
+        "没有引用结果时，消息进入当前的 B",
+        "先确认设备和绑定",
+        "关联已过期时，重新选回 A"
+      ],
+      "takeaway": "回复看原消息，新消息看当前选中的线程。"
     }
   }
 ]
