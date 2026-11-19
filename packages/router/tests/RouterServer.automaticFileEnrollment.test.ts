@@ -160,7 +160,7 @@ describe('automatic file enrollment over the existing connection', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
-  it('requests once, leaves text dispatch working, approves the exact owner/card, and reconnects signed without another prompt', async () => {
+  it.each([false, true])('enrolls once and routes chat after signed reconnect (retry approval receipt: %s)', async retryReceipt => {
     await start();
     expect((await connect()).data.capabilities.automaticFileEnrollmentV1).toBe(true);
     await waitFor(message => message.type === 'automatic_file_enrollment_status');
@@ -176,11 +176,32 @@ describe('automatic file enrollment over the existing connection', () => {
     // No model task is started by enrollment; ordinary messages continue on the same connection.
     await (server as any).connectionHub.sendToDevice('device', { type: 'command', messageId: 'text-phase', content: 'Synthetic text task' });
     await waitFor(message => message.messageId === 'text-phase');
-    expect((await callback('owner'))?.toast.content).toContain('approved');
+    const enroll = vi.spyOn((server as any).deviceAuth, 'enroll');
+    const filename = path.join(root, 'router', 'automatic-file-enrollment', 'requests.json');
+    if (retryReceipt) {
+      const rename = fs.rename.bind(fs);
+      const disk = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+        if (to === filename) throw new Error('Synthetic receipt failure');
+        return rename(from, to);
+      });
+      expect((await callback('owner'))?.toast.content).toContain('finish saving the approval receipt');
+      disk.mockRestore();
+      expect(JSON.parse(await fs.readFile(filename, 'utf8'))[0].state).toBe('known');
+      expect((await callback('intruder'))?.toast.content).toContain('unavailable');
+      expect((await callback('owner', 'wrong-card'))?.toast.content).toContain('unavailable');
+    }
+    expect((await callback('owner'))?.toast.content).toContain('reconnect securely');
+    expect(JSON.parse(await fs.readFile(filename, 'utf8'))[0].state).toBe('approved');
+    expect(enroll).toHaveBeenCalledTimes(1);
     const authenticated = await waitFor(message => message.type === 'binding_confirm' && message.data.capabilities?.fileTransferV1);
     expect(authenticated.data.capabilities.automaticFileEnrollmentV1).toBeUndefined();
     expect(authenticated.data.capabilities.outputFilesV1).toBe(true);
     expect((await (server as any).deviceAuth.get('device')).publicKey).toBe(saved.publicKey);
+    vi.spyOn(handler, 'sendStreamingStart').mockResolvedValue('follow-up-card');
+    const content = 'Continue after file approval';
+    await (handler as any).handleMessageEvent({ sender: { sender_id: { open_id: 'owner' } },
+      message: { message_id: 'follow-up', message_type: 'text', content: JSON.stringify({ text: content }) } });
+    expect(await waitFor(message => message.type === 'command' && message.content === content)).toMatchObject({ openId: 'owner' });
     expect(create).toHaveBeenCalledTimes(1);
     client!.disconnect(); messages = [];
     expect((await connect()).data.capabilities.fileTransferV1).toBe(true);

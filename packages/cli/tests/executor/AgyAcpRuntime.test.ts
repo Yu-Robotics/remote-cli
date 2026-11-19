@@ -15,6 +15,9 @@ import { createExecutor } from '../../src/executor';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { crashAgyOverlay } from '../scheduling/agyHookCrashFixture';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { MessageHandler } from '../../src/client/MessageHandler';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { ThreadManager } from '../../src/thread/ThreadManager';
 
 const native = vi.hoisted(() => ({
   clients: [] as any[], accept: undefined as any, fault: undefined as any,
@@ -124,7 +127,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
       this.hook('PostToolUse'); this.hook('PostInvocation');
     }
     this.hook('SessionStart'); this.hook('PreInvocation', { initialNumSteps: this.cursor });
-    if (text === 'hold') return new Promise<{ stopReason: string }>(resolve => { this.release = resolve; });
+    if (/(?:^|\n)hold$/.test(text)) return new Promise<{ stopReason: string }>(resolve => { this.release = resolve; });
     if (text === 'missing terminal') return { stopReason: 'end_turn' };
     if (text === 'ask' || text === 'ask again') {
       const args = { questions: [{ question: 'Choose a fixture option.', options: ['First', 'Second'] }] };
@@ -363,7 +366,10 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const { id } = await captureTimedSession();
     expect(() => make().checkHostScheduleSession(id)).toThrow();
     native.exitConfirmed = false;
-    await expect(executor.destroy()).rejects.toThrow('group unconfirmed');
+    await expect(executor.destroy()).rejects.toMatchObject({
+      message: expect.stringContaining('AGY host retirement is unconfirmed'),
+      cause: expect.objectContaining({ message: expect.stringContaining('group unconfirmed') }),
+    });
     expect(() => make().checkHostScheduleSession(id)).toThrow();
     native.exitConfirmed = true; await executor.destroy();
     executor = make();
@@ -906,6 +912,39 @@ describe('review regressions through the AGY executor and runtime', () => {
     const pending = executor.setModel('synthetic-next'); await vi.waitFor(() => expect(last().controls.at(-1)).toEqual(['model', 'synthetic-next']));
     expect(executor.hasPendingSettingsChange()).toBe(false); expect(executor.isBusy()).toBe(true);
     await expect(executor.resetContext()).rejects.toThrow('pending'); release(); await pending;
+  });
+
+  it('routes /abort to an active AGY foreground turn without a settings change', async () => {
+    const threads = await ThreadManager.initialize(home);
+    const threadId = threads.getDefaultThread().id;
+    await threads.updateThread(threadId, { workingDirectory: cwd, delegation: false });
+    const guard = new DirectoryGuard([cwd]);
+    const config = { type: 'agy' as const };
+    const pool = new ThreadExecutorPool(threads, guard, config);
+    const send = vi.fn();
+    const handler = new MessageHandler({ send, trackTask: vi.fn(), isConnected: () => true } as any,
+      pool, threads, guard, { get: (key: string) => key === 'executor' ? config : undefined, getConfigDir: () => home } as any);
+    const command = (content: string, messageId: string) => handler.handleMessage({
+      type: 'command', threadId, messageId, openId: 'synthetic-owner', content, timestamp: Date.now(),
+    });
+    const turn = command('hold', 'foreground');
+    try {
+      await vi.waitFor(() => {
+        const response = send.mock.calls.find(([message]) => message.type === 'response' && message.messageId === 'foreground');
+        expect(response?.[0].error).toBeUndefined();
+        expect(last()?.release).toBeTypeOf('function');
+      });
+      expect(pool.getExecutor(threadId).isBusy?.()).toBe(true);
+      expect(last().controls).toEqual([]);
+      await command('/abort', 'abort');
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'abort',
+        openId: 'synthetic-owner', threadId, success: true, output: expect.stringContaining('AGY foreground cancelled') }));
+      expect(last().cancelled).toBe(true);
+    } finally {
+      last()?.release?.({ stopReason: 'cancelled' });
+      await turn;
+      await handler.destroy();
+    }
   });
 });
 

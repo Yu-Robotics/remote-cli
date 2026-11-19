@@ -198,6 +198,30 @@ describe('DshExecutor', () => {
     expect(current().waitForExit).toHaveBeenCalled();
   });
 
+  it('resumes the original chat after aborting a pending session load', async () => {
+    expect(await executor.execute('establish original')).toMatchObject({ success: true });
+    const original = executor.getSessionId();
+    await executor.destroy();
+    await executor.waitForExit();
+    customize = t => {
+      let rejectLoad!: (error: Error) => void;
+      t.loadSession.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectLoad = reject; }));
+      t.destroy.mockImplementationOnce(() => rejectLoad(new Error('Session load cancelled')));
+    };
+    executor = create();
+    const loading = executor.execute('interrupted request');
+    await vi.waitFor(() => expect(current().loadSession).toHaveBeenCalledWith(original, directory));
+    expect(await executor.abort()).toBe(true);
+    expect(await loading).toMatchObject({ success: false });
+    expect(current().prompt).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(pointer(), 'utf8')).id).toBe(original);
+    customize = undefined;
+    expect(await executor.execute('please continue')).toMatchObject({ success: true, output: 'public answer' });
+    expect(current().loadSession).toHaveBeenCalledWith(original, directory);
+    expect(current().prompt.mock.calls).toEqual([[original, [{ type: 'text', text: 'please continue' }]]]);
+    expect(current().newSession).not.toHaveBeenCalled();
+  });
+
   it('does not reopen a destroyed DSH executor through catalog methods', async () => {
     await executor.destroy();
     await expect(executor.listModels()).rejects.toThrow('destroyed');

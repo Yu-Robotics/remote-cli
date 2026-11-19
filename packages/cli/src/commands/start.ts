@@ -20,6 +20,7 @@ import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand'
 import { backendKeyOf } from '../types/config';
 import { MaintenanceClient } from '../maintenance/MaintenanceClient';
 import path from 'path';
+import fs from 'fs/promises';
 import { kernelGate, type KernelGate } from '../delegation/OwnershipRuntime';
 
 export { isNewerVersion } from '../utils/version';
@@ -205,7 +206,20 @@ export async function startCommand(
 
     // Initialize thread manager (creates default thread if not exists, migrates from single session)
     spinner.text = 'Initializing thread manager...';
-    const threadManager = await ThreadManager.initialize(undefined, { retryDeferredDeletion: true });
+    const threadManager = await ThreadManager.initialize(undefined, { retryDeferredDeletion: true, recovery: {
+      deviceId, serverUrl, allowedDirectories: security.allowedDirectories, workingDirectory: async () => {
+        for (const entry of security.allowedDirectories) {
+          if (!directoryGuard.isSafePath(entry)) continue;
+          try {
+            const directory = await fs.realpath(directoryGuard.resolveWorkingDirectory(entry));
+            if (directoryGuard.isSafePath(directory) && (await fs.stat(directory)).isDirectory()) return directory;
+          } catch (error) {
+            if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          }
+        }
+        throw new Error('No allowed working directory is available for thread recovery.');
+      },
+    } });
 
     // Initialize executor pool (lazily creates executors per thread)
     const threadPool = new ThreadExecutorPool(threadManager, directoryGuard, executorConfig);
@@ -249,7 +263,8 @@ export async function startCommand(
         allConfig.files?.autoEnroll !== false),
     });
 
-    const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
+    const runtimeConfig = threadManager.recoveryDirectory ? config.forThreadRecovery(threadManager.recoveryDirectory) : config;
+    const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, runtimeConfig);
     let shutdown: Promise<void> | undefined;
     closeStartedClient = () => {
       stopping = true;
@@ -270,7 +285,7 @@ export async function startCommand(
     };
     if (options.onShutdownReady?.(closeStartedClient) === false) return interrupted();
     await messageHandler.prepareScheduleStartup();
-    await messageHandler.reconcilePendingDelegatedWorkers();
+    if (!threadManager.recoveryDirectory) await messageHandler.reconcilePendingDelegatedWorkers();
     if (stopping) return interrupted();
     maintenance = new MaintenanceClient(wsClient, config.getConfigDir(), serverUrl, deviceId,
       () => config.get('executor') as ExecutorConfig | undefined, allConfig.maintenance);

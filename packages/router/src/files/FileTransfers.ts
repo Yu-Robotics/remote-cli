@@ -86,7 +86,10 @@ export class FileTransfers {
           this.files.set(id, { record, abort: new AbortController(), offers: 0 });
         } catch { /* Unknown directories are never exposed or recursively removed. */ }
       }
-    })();
+    })().catch(() => {
+      this.loading = undefined;
+      throw new Error('Router attachment storage is unavailable. Please try uploading again.');
+    });
   }
 
   private current(file: LiveFile): boolean {
@@ -127,11 +130,14 @@ export class FileTransfers {
     if (this.stopped) throw new Error('Router file reception stopped.');
     if (!this.enabled) throw new Error('File reception is disabled by the Router administrator (files.enabled=false).');
     const session = this.deps.session(input.deviceId);
-    if (!session || session.openId !== input.openId || !await this.deps.owns(input.openId, input.deviceId)) {
+    if (!session || session.openId !== input.openId || !await this.deps.owns(input.openId, input.deviceId).catch(() => {
+      throw new Error('The Router could not verify attachment ownership. Please try uploading again.');
+    })) {
       throw new Error('Files require an upgraded, authenticated CLI. Run remote-cli files enable locally, approve its /bind code, and reconnect. Text and images remain available to legacy devices.');
     }
     await this.ready();
-    await this.cleanup();
+    try { await this.cleanup(); }
+    catch { throw new Error('Router attachment storage cleanup is incomplete. Please try uploading again.'); }
     if (this.stopped) throw new Error('Router file reception stopped.');
     const id = createHash('sha256').update(JSON.stringify([input.openId, input.messageId, input.fileKey])).digest('hex');
     const duplicate = this.files.get(id);
@@ -173,8 +179,8 @@ export class FileTransfers {
       });
       const start = this.queue[this.queue.length - 1];
       this.drain();
-    } catch (error) {
-      await this.fail(file, error instanceof Error ? error.message : 'File reception failed.');
+    } catch {
+      await this.fail(file, 'The Router could not stage this attachment for delivery. Please send the file again.');
     }
   }
 
@@ -188,7 +194,9 @@ export class FileTransfers {
     const { record } = file;
     const timer = setTimeout(() => { void this.fail(file, 'File transfer timed out.'); }, FILE_TOTAL_MS);
     try {
-      if (!this.current(file) || !await this.deps.owns(record.openId, record.deviceId)) throw new Error('Device or owner changed during transfer.');
+      if (!this.current(file) || !await this.deps.owns(record.openId, record.deviceId)) {
+        await this.fail(file, 'Device or owner changed during transfer.'); return;
+      }
       if (file.abort.signal.aborted) throw new Error('File reception cancelled.');
       record.state = 'downloading'; void this.notify(file);
       const temporary = path.join(this.directory(record.id), 'download.part');
@@ -206,14 +214,19 @@ export class FileTransfers {
           await retryDelay(500 * (attempt + 1), undefined, { signal: file.abort.signal });
         }
       }
-      if (!this.current(file)) throw new Error('Device disconnected during transfer.');
+      if (!this.current(file)) { await this.fail(file, 'Device disconnected during transfer.'); return; }
       await fs.rename(temporary, path.join(this.directory(record.id), 'original'));
       Object.assign(record, saved, { state: 'transferring' });
       await this.persist(file);
       await this.offer(file);
       await file.receipt;
     } catch (error) {
-      await this.fail(file, file.abort.signal.aborted ? 'File transfer cancelled or timed out.' : error instanceof Error ? error.message : 'File download failed.');
+      const limit = `File exceeds the ${this.maxBytes / 1024 / 1024} MiB limit.`;
+      const detail = error instanceof Error ? error.message : '';
+      const safe = [limit, 'File download stalled.', 'File operation timed out.',
+        'Feishu file download failed or timed out. Check bot access to this chat and retry.'];
+      await this.fail(file, file.abort.signal.aborted ? 'File transfer cancelled or timed out.'
+        : safe.includes(detail) ? detail : 'The Router could not transfer this attachment. Please send the file again.');
     } finally { clearTimeout(timer); }
   }
 

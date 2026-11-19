@@ -105,10 +105,12 @@ describe('FeishuLongConnHandler', () => {
       register: vi.fn().mockReturnThis()
     }));
 
+    const queueRoute = { openId: 'ou_123', deviceId: 'device-1', threadId: 't1', queueId: 'q-1',
+      epoch: 'original-generation', expiresAt: Date.now() + 60_000 };
     handler = new FeishuLongConnHandler({
       appId: 'test_app_id',
       appSecret: 'test_app_secret',
-      store: {} as any
+      store: { getCardThread: (id: string) => id === 'card-1' ? queueRoute : undefined } as any
     });
 
     handler.setConnectionHub(mockConnectionHub);
@@ -2957,14 +2959,14 @@ describe('FeishuLongConnHandler', () => {
       try {
         let fail!: (error: Error) => void;
         vi.spyOn(handler as any, 'clickCommandMenu').mockImplementation(() => new Promise((_ok, reject) => { fail = reject; }));
-        const notify = vi.spyOn(handler, 'sendMessage').mockResolvedValue(true);
+        const notify = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
         const click = handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'menu' },
           action: { value: { action: 'command_menu' } } });
         await vi.advanceTimersByTimeAsync(1200);
         expect(await click).toMatchObject({ toast: { content: 'Processing your selection.' } });
         fail(new Error('Selection changed.'));
         await vi.advanceTimersByTimeAsync(0);
-        expect(notify).toHaveBeenCalledWith('owner', 'Selection changed.');
+        expect(notify).toHaveBeenCalledWith('menu', 'Selection changed.');
       } finally { vi.useRealTimers(); }
     });
 
@@ -2998,7 +3000,7 @@ describe('FeishuLongConnHandler', () => {
       expect(await trigger('other', 'menu')).toMatchObject({ toast: { type: 'error' } });
       expect(await trigger('owner', 'copy')).toMatchObject({ toast: { type: 'error' } });
       expect(await trigger('owner', 'menu')).toMatchObject({ toast: { type: 'info' } });
-      expect(pass).toHaveBeenCalledWith('owner', 'menu', '/model', '/model', 'project', 'Project', 'desktop', false, fence);
+      expect(pass).toHaveBeenCalledWith('owner', 'menu', '/model', '/model', 'project', 'Project', 'desktop', false, fence, true);
       handler.setOnValidateSelection(() => false);
       expect(await trigger('owner', 'menu', 1)).toMatchObject({ toast: { type: 'error' } });
       expect(pass).toHaveBeenCalledTimes(1);
@@ -3093,7 +3095,10 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleRegularCommand('ou_123', 'msg_1', 'hello');
 
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Command sending failed'));
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({
+        path: { message_id: 'card_1' }, data: { content: expect.stringContaining('Command was not sent') },
+      }));
+      expect(replySpy).not.toHaveBeenCalled();
     });
 
     it('should handle errors', async () => {
@@ -3275,7 +3280,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should route queue confirmation actions to the CLI callback', async () => {
-      const onQueueAction = vi.fn().mockResolvedValue(undefined);
+      const onQueueAction = vi.fn().mockResolvedValue('sent');
       handler.onQueueAction = onQueueAction;
 
       const result = await handler.handleCardAction({
@@ -3330,7 +3335,7 @@ describe('FeishuLongConnHandler', () => {
         },
       });
       const receipt = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
-      expect(receipt.body.elements[0].content).toContain('Queued');
+      expect(JSON.stringify(receipt)).not.toContain('queue_confirm');
       expect(receipt.body.elements[0].content).toContain('/queue continue');
     });
 
@@ -3402,7 +3407,7 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).not.toHaveBeenCalled();
       sent(true);
       await Promise.all([confirmation, started]);
-      expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('Queued');
+      expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('/queue');
       expect(mockClient.im.message.patch.mock.calls[1][0].data.content).toContain('Running');
     });
 

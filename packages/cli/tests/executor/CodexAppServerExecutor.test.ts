@@ -108,6 +108,7 @@ describe('CodexAppServerExecutor', () => {
   it.each(['final only', 'streamed prefix', 'fully streamed'])('forwards trusted completed assistant text once: %s', async mode => {
     const links = new OutputLinks();
     const onDisplayText = vi.fn((text: string) => links.append(text));
+    const onStream = vi.fn();
     const frames: any[] = [];
     const snapshots = new OutputSnapshots(path.join(tempHome, 'output-snapshots'));
     const files = new OutputFiles(snapshots, 'http://127.0.0.1:3000', frame => frames.push(frame));
@@ -115,7 +116,7 @@ describe('CodexAppServerExecutor', () => {
     await fs.writeFile(path.join(projectDir, 'deliverable.go'), 'package deliverable\n');
     try {
       const text = '[Source deliverable](./deliverable.go "attachment")';
-      const pending = executor.execute('Produce a deliverable', { onDisplayText });
+      const pending = executor.execute('Produce a deliverable', { onDisplayText, onStream, onActivity: vi.fn() });
       await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
       const params = { threadId: 'codex-thread-1', turnId: 'turn-1' };
       transport.emit({ method: 'item/reasoning/summaryTextDelta', params: { ...params, delta: '[private](secret.txt "attachment")' } });
@@ -126,7 +127,8 @@ describe('CodexAppServerExecutor', () => {
       transport.emit({ method: 'item/completed', params: { ...params, item: { id: 'answer', type: 'agentMessage', text } } });
       transport.emit({ method: 'item/completed', params: { ...params, item: { id: 'answer', type: 'agentMessage', text } } });
       transport.emit({ method: 'turn/completed', params: { ...params, turn: { id: 'turn-1', status: 'completed' } } });
-      await expect(pending).resolves.toMatchObject({ success: true });
+      await expect(pending).resolves.toMatchObject({ success: true, output: text });
+      expect(onStream.mock.calls.map(([chunk]) => chunk).join('')).toBe(text);
       expect(onDisplayText.mock.calls.map(([chunk]) => chunk).join('')).toBe(text);
       await files.capture(links, { messageId: 'parent', taskId: 'parent', threadId: 'thread', generation: 0, cwd: projectDir, source: 'workspace' });
       expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
@@ -134,6 +136,20 @@ describe('CodexAppServerExecutor', () => {
       await snapshots.read(snapshots.references()[0].id, async stream => { for await (const chunk of stream) bytes.push(chunk); });
       expect(Buffer.concat(bytes).toString()).toBe('package deliverable\n');
     } finally { await files.destroy(); }
+  });
+
+  it('keeps a completed-only answer after an earlier assistant delta without an item ID', async () => {
+    const onStream = vi.fn();
+    const pending = executor.execute('Continue', { onStream });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const params = { threadId: 'codex-thread-1', turnId: 'turn-1' };
+    transport.emit({ method: 'item/agentMessage/delta', params: { ...params, delta: 'Progress. ' } });
+    for (const [id, text] of [['first', 'Progress. '], ['second', 'Done.']]) {
+      transport.emit({ method: 'item/completed', params: { ...params, item: { id, type: 'agentMessage', text } } });
+    }
+    transport.emit({ method: 'turn/completed', params: { ...params, turn: { id: 'turn-1', status: 'completed' } } });
+    await expect(pending).resolves.toMatchObject({ success: true, output: 'Progress. Done.' });
+    expect(onStream.mock.calls).toEqual([['Progress. '], ['Done.']]);
   });
 
   it('registers scheduling MCP separately from delegation and preserves the native thread on reconfiguration', async () => {
@@ -1571,6 +1587,9 @@ describe('CodexAppServerExecutor', () => {
         threadPool: pool,
         pausedQueues: new Set<string>(),
         abortOperations: new Map(),
+        nativeOccurrenceAborts: new Map(),
+        nativeQueueWakeups: new Map(),
+        activeThreadOperations: new Map(),
         threadQueues: new Map([[threadId, queue]]),
         threadManager: manager,
         messageOpenIds: new Map(),
@@ -1595,6 +1614,27 @@ describe('CodexAppServerExecutor', () => {
     }
   });
 
+  it('reopens the saved thread after a turn/start reply omits its turn ID', async () => {
+    await establishSession();
+    const saved = await fs.readFile(sessionPointer());
+    transport.nextTurnId = '';
+    expect(await executor.execute('first request')).toMatchObject({
+      success: false, error: expect.stringContaining('returned no turn ID'),
+    });
+    expect(await fs.readFile(sessionPointer())).toEqual(saved);
+    transport.nextTurnId = 'retry-turn';
+    const retry = executor.execute('please continue');
+    await vi.waitFor(() => expect(transport.requests.filter(r => r.method === 'turn/start')).toHaveLength(2));
+    const threadId = transport.nextThreadId;
+    expect(transport.requests.filter(r => r.method === 'thread/resume').map(r => r.params.threadId)).toEqual([threadId]);
+    expect(transport.requests.some(r => r.method === 'thread/start')).toBe(false);
+    expect(transport.requests.filter(r => r.method === 'turn/start').map(r => [r.params.threadId, r.params.input[0].text]))
+      .toEqual([[threadId, 'first request'], [threadId, 'please continue']]);
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId, turnId: 'retry-turn', itemId: 'answer', delta: 'Recovered' } });
+    transport.emit({ method: 'turn/completed', params: { threadId, turn: { id: 'retry-turn', status: 'completed' } } });
+    expect(await retry).toMatchObject({ success: true, output: 'Recovered' });
+  });
+
   it('interrupts the active turn and preserves the session id', async () => {
     const running = executor.execute('long task', {});
     await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
@@ -1605,6 +1645,19 @@ describe('CodexAppServerExecutor', () => {
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'interrupted' } } });
     await expect(running).resolves.toMatchObject({ success: false, error: 'Aborted by user' });
     expect(executor.getSessionId()).toBe('codex-thread-1');
+
+    transport.nextTurnId = 'turn-2';
+    const retry = executor.execute('continue after abort');
+    await vi.waitFor(() => expect(transport.requests.filter(r => r.method === 'turn/start')).toHaveLength(2));
+    const threadId = 'codex-thread-1';
+    expect(transport.requests.filter(r => r.method === 'turn/start').at(-1)?.params).toMatchObject({
+      threadId, input: [expect.objectContaining({ type: 'text', text: 'continue after abort' })],
+    });
+    transport.emit({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-1', status: 'interrupted' } } });
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId, turnId: 'turn-2', itemId: 'reply', delta: 'Recovered' } });
+    transport.emit({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-2', status: 'completed' } } });
+    expect(await retry).toMatchObject({ success: true, output: 'Recovered' });
+    expect(transport.requests.filter(r => r.method === 'thread/start')).toHaveLength(1);
   });
 
   it.each([

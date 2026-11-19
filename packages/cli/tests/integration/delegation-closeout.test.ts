@@ -36,8 +36,9 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
   let taskId: string;
 
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'fixture-owner', timestamp: Date.now() });
-  const response = () => socket.send.mock.calls.map(([value]: any[]) => value).reverse()
-    .find((value: any) => value.type === 'response' && value.messageId === 'parent');
+  const frames = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value)
+    .filter((value: any) => value.messageId === id);
+  const response = (id = 'parent') => frames(id).reverse().find((value: any) => value.type === 'response');
   const artifactPath = (id = taskId) => path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'artifacts', `${id}.json`);
   const artifact = async (id = taskId) => JSON.parse(await fs.readFile(artifactPath(id), 'utf8'));
   const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -258,6 +259,84 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
   });
 
+  describe('Feishu recovery after both worker and coordinator throw', () => {
+    let threadId: string;
+    let card: { laneId: string; generation: number };
+    let ownerNotice: string;
+
+    beforeEach(async () => {
+      threadId = (await threads.createThread('review', fixture.root)).id;
+      await handler.handleMessage({ type: 'binding_confirm', data: { success: true,
+        capabilities: { delegationProgress: true, workerContextReset: true } } } as any);
+      workerWork = async cwd => {
+        await fs.writeFile(path.join(cwd, 'source.txt'), 'partial worker edit\n');
+        throw new Error('Fixture worker stopped');
+      };
+      main.execute.mockReset().mockImplementationOnce(async () => {
+        await delegate();
+        throw new Error('Fixture coordinator stopped');
+      });
+      await handler.handleMessage({ ...message('parent', 'Prepare a change'), threadId });
+      const replies = frames('parent');
+      expect(response()).toMatchObject({ success: false, error: 'Fixture coordinator stopped',
+        openId: 'fixture-owner', threadId });
+      const terminal = replies.find((frame: any) => frame.delegationProgress?.phase === 'failed');
+      expect(terminal).toMatchObject({ type: 'stream', streamType: 'delegation_progress',
+        openId: 'fixture-owner', threadId, delegationProgress: { taskId, error: 'Fixture worker stopped',
+          workerContext: { laneId: expect.any(String), generation: expect.any(Number) } } });
+      card = terminal.delegationProgress.workerContext;
+      expect(await artifact()).toMatchObject({ successful: false, disposition: 'retained', threadId, laneId: card.laneId });
+      const ownerReplies = replies.filter((frame: any) => frame.openId === 'fixture-owner' && frame.threadId === threadId);
+      ownerNotice = ownerReplies.flatMap((frame: any) => [frame.chunk, frame.output, frame.error,
+        frame.delegationProgress?.summary, frame.delegationProgress?.error]).filter(Boolean).join('\n');
+      expect(ownerNotice).toContain(taskId);
+      expect(ownerNotice).toContain('Fixture worker stopped');
+    });
+
+    it('tells the owner that the partial changes were retained and accepts ordinary chat immediately', async () => {
+      expect(ownerNotice).toMatch(/(?:retained|preserved|kept|saved)/i);
+      expect(ownerNotice).toContain('inspect this task in the same thread');
+      main.execute.mockResolvedValueOnce({ success: true, output: 'Follow-up answer' });
+      await handler.handleMessage({ ...message('follow-up', 'Continue the conversation'), threadId });
+      expect(response('follow-up')).toMatchObject({ success: true, openId: 'fixture-owner', threadId });
+      expect(main.execute.mock.lastCall[0]).toContain('Continue the conversation');
+      expect(main.resetContext).not.toHaveBeenCalled();
+      expect(workerExecutions).toBe(1);
+      expect(await artifact()).toMatchObject({ threadId, disposition: 'retained' });
+    });
+
+    it('clears only the addressed Worker card and keeps its partial output available on the next request', async () => {
+      const clear = (id: string, target: string) => handler.handleMessage({
+        type: 'worker_context_reset', messageId: id, threadId: target, ...card, timestamp: Date.now(),
+      } as any);
+      const lanePath = path.join(fixture.directory, '.remote-cli', 'delegation-workers', card.laneId + '.json');
+      const readLane = async () => JSON.parse(await fs.readFile(lanePath, 'utf8'));
+      const before = await readLane();
+      await clear('wrong-thread', threads.getDefaultThread().id);
+      expect(frames('wrong-thread')).toEqual([expect.objectContaining({ type: 'worker_context_reset_result',
+        success: false, error: 'This Worker card has expired. Use the latest Worker card.' })]);
+      expect(await readLane()).toEqual(before);
+      await clear('owner-clear', threadId);
+      expect(frames('owner-clear')).toEqual([expect.objectContaining({ type: 'worker_context_reset_result', success: true })]);
+      expect(await readLane()).toMatchObject({ threadId, contextGeneration: card.generation + 1,
+        lastClearedGeneration: card.generation });
+      expect(main.resetContext).not.toHaveBeenCalled();
+      main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+        const view = await call('remote_cli_integrate', { taskId, action: 'inspect' });
+        options.onStream?.(`Worker output: ${view.disposition} (${view.taskId})`);
+        return { success: true };
+      });
+      await handler.handleMessage({ ...message('follow-up', `Check the saved output for ${taskId}`), threadId });
+      expect(response('follow-up')).toMatchObject({ success: true, openId: 'fixture-owner', threadId });
+      expect(frames('follow-up')).toContainEqual(expect.objectContaining({ streamType: 'text', openId: 'fixture-owner',
+        threadId, chunk: `Worker output: retained (${taskId})` }));
+      expect(workerExecutions).toBe(1);
+      const saved = await artifact();
+      expect(await gitText(fixture.root, ['show', `${saved.output}:source.txt`])).toBe('partial worker edit');
+      expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
+    });
+  });
+
   it('keeps the request launch budget across closeout rounds and new workers', async () => {
     vi.spyOn(closeout, 'waitForArtifactCloseout').mockResolvedValue(undefined);
     const ids: string[] = [];
@@ -365,12 +444,28 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(await artifact()).toMatchObject({ disposition: 'retained' });
   });
 
-  it('does not add closeout turns after coordinator failure', async () => {
+  it('lets the original user retain pending work in a new request after coordinator closeout fails', async () => {
+    const threadId = threads.getDefaultThread().id;
     main.execute.mockResolvedValueOnce({ success: false, error: 'Fixture coordinator failure' });
     await run();
     expect(main.execute).toHaveBeenCalledTimes(2);
-    expect(response()).toMatchObject({ success: false, error: 'Fixture coordinator failure' });
+    expect(response()).toMatchObject({ success: false, error: 'Fixture coordinator failure', openId: 'fixture-owner', threadId });
     expect(await artifact()).toMatchObject({ disposition: 'pending' });
+    const request = 'Keep the previous worker changes without applying them.';
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      const result = await retain(taskId);
+      options.onStream?.(`Worker output: ${result.disposition} (${result.taskId})`);
+      return { success: true };
+    });
+    await handler.handleMessage({ ...message('keep', request), threadId });
+    expect(main.execute.mock.lastCall?.[0]).toContain(request);
+    expect(response('keep')).toMatchObject({ success: true, threadId, openId: 'fixture-owner' });
+    expect(frames('keep')).toContainEqual(expect.objectContaining({ streamType: 'text', threadId, openId: 'fixture-owner',
+      chunk: `Worker output: retained (${taskId})` }));
+    expect(await artifact()).toMatchObject({ disposition: 'retained', threadId });
+    expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
+    expect(main.execute).toHaveBeenCalledTimes(3);
+    expect(workerExecutions).toBe(1);
   });
 
   it.each(['abort', 'shutdown'])('stops closeout on %s and keeps pending artifacts', async action => {

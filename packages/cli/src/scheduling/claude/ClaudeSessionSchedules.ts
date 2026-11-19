@@ -30,8 +30,12 @@ interface Pending {
   preserveOccurrences?: true;
   resolve(text: string): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout>;
 }
-interface Occurrence { admissible?: boolean; id: string; job?: Job; terminal?: string }
+interface Occurrence { admissible?: boolean; id: string; session?: string; job?: Job; terminal?: string; terminalSession?: string }
 interface NativeBatch { occurrences: Occurrence[]; result?: Frame; ended?: boolean }
+export interface ScheduledInterruptTarget {
+  ids: string[];
+  outcome(): 'cancelled' | 'finished' | 'ambiguous' | undefined;
+}
 export const SCHEDULE_HOOK = 'remote-cli-session-schedules';
 export const SCHEDULE_HOOKS = {
   PreToolUse: [{ matcher: '.*', hookCallbackIds: [SCHEDULE_HOOK], timeout: 10 }],
@@ -94,6 +98,21 @@ export class ClaudeSessionSchedules {
   }) {}
 
   get busy(): boolean { return !!this.batch || !!this.submitted; }
+  /** A captured batch stays identifiable after completion and across subsequent wakes. */
+  captureInterruptTarget(session: string): ScheduledInterruptTarget | undefined {
+    const batch = this.batch;
+    if (!batch || batch.result || batch.ended || this.foregroundId || this.closed
+      || batch.occurrences.some(item => item.session !== session || item.terminal)) return;
+    const ids = batch.occurrences.map(item => item.id);
+    return { ids, outcome: () => {
+      if (!batch.result || !batch.occurrences.every(item => item.terminal)) return;
+      if (batch.occurrences.length !== ids.length || batch.result.session_id !== session
+        || batch.occurrences.some(item => item.terminalSession !== session)) return 'ambiguous';
+      if (batch.result.is_error === true && batch.occurrences.every(item => item.terminal === 'cancelled')) return 'cancelled';
+      if (batch.occurrences.every(item => item.terminal === 'completed')) return 'finished';
+      return 'ambiguous';
+    } };
+  }
   /** Completed mutations remain in scope.mutations for foreground-abort cleanup.
    * They are not unsettled receipts after fresh inventory has confirmed absence. */
   get cleanupRetirementReady(): boolean {
@@ -496,7 +515,7 @@ export class ClaudeSessionSchedules {
         if (!this.foregroundId || !joined && !(unjoined && (this.foregroundStarted || sessionFailure))) return true;
       }
     }
-    if (frame.type === 'command_lifecycle') {
+    if (frame.type === 'command_lifecycle' && !frame.parent_tool_use_id) {
       if (['completed', 'cancelled', 'discarded', 'refused'].includes(frame.state)) {
         this.cleanupTerminals.get(frame.command_uuid)?.resolve();
         this.cleanupTerminals.delete(frame.command_uuid);
@@ -510,14 +529,17 @@ export class ClaudeSessionSchedules {
         // Native headless mode can batch several same-priority cron prompts.
         // startBatch emits their lifecycle IDs in prompt concatenation order.
         if (batch.occurrences.length >= 100) { this.failPending('Native schedule batch limit reached.'); return true; }
-        batch.occurrences.push({ id: frame.command_uuid, admissible: this.jobs.size > 0 });
+        batch.occurrences.push({ id: frame.command_uuid, session: frame.session_id, admissible: this.jobs.size > 0 });
         if (this.submitted) { this.bind([this.submitted]); this.submitted = undefined; }
         return true;
       }
       const occurrence = this.batch?.occurrences.find(item => item.id === frame.command_uuid);
       if (occurrence && ['completed', 'cancelled', 'discarded', 'refused'].includes(frame.state)) {
         // Keep failed terminals sticky even if a conflicting late receipt arrives.
-        if (!occurrence.terminal || frame.state !== 'completed') occurrence.terminal = frame.state;
+        if (!occurrence.terminal || frame.state !== 'completed') {
+          occurrence.terminal = frame.state;
+          occurrence.terminalSession = frame.session_id;
+        }
         if (this.batch!.occurrences.every(item => item.terminal)) this.endInvocation(this.batch);
         this.completeOccurrence(); return true;
       }

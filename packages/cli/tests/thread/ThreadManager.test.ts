@@ -396,7 +396,7 @@ describe('ThreadManager', () => {
       await fs.writeFile(pointer, JSON.stringify(session));
       const history = path.join(tmpDir, '.remote-cli', 'agy-homes', thread.id, 'history');
       await fs.mkdir(path.dirname(history), { recursive: true }); await fs.writeFile(history, 'native history');
-      await expect(manager.deleteThread(thread.id)).rejects.toThrow('retirement is unconfirmed');
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow(/retirement is unconfirmed.*\/clear in the target thread.*retry \/thread delete/);
       await manager.clearBackendSessionPointers(thread.id);
       await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
       const archive = pointer + '.detached-acp';
@@ -413,7 +413,12 @@ describe('ThreadManager', () => {
       const pointer = path.join(directory, `${thread.id}.json`);
       await fs.writeFile(pointer, JSON.stringify({ id: 'synthetic-session', transport: 'acp' }));
       await fs.writeFile(pointer + '.native-schedules', JSON.stringify({ sessionId: 'synthetic-session', hostId: 'synthetic-host', retired: true }));
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow(/Schedule ownership was retained.*device operator/);
+      expect(manager.getThread(thread.id)).toBeDefined();
       await expect(manager.clearBackendSessionPointers(thread.id)).rejects.toThrow('schedule ownership');
+      await fs.writeFile(pointer + '.native-schedules', 'synthetic invalid JSON');
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow(/ownership is ambiguous.*device operator/);
+      expect(await fs.readFile(pointer + '.native-schedules', 'utf8')).toBe('synthetic invalid JSON');
       expect(await fs.stat(pointer)).toBeDefined();
     });
 
@@ -538,6 +543,22 @@ describe('ThreadManager', () => {
   });
 
   describe('concurrent persist safety', () => {
+    it('recovers concurrent catalog updates and reserved IDs from the last committed snapshot', async () => {
+      const file = path.join(tmpDir, '.remote-cli', 'threads.json');
+      const reserved = '00000000-0000-4000-8000-000000000001';
+      const catalog = JSON.parse(await fs.readFile(file, 'utf8'));
+      catalog.deferredAgyDeletions = { [reserved]: { version: 1, threadId: reserved, completed: true } };
+      await fs.writeFile(file, JSON.stringify(catalog));
+      const other = await ThreadManager.initialize(tmpDir);
+      const [first, second] = await Promise.all([
+        manager.createThread('first', tmpDir), other.createThread('second', tmpDir),
+      ]);
+      await fs.writeFile(file, '{');
+      const restored = await ThreadManager.initialize(tmpDir);
+      expect(restored.getThread(first.id)).toEqual(first);
+      expect(restored.getThread(second.id)).toEqual(second);
+      expect(JSON.parse(await fs.readFile(file, 'utf8')).deferredAgyDeletions).toEqual(catalog.deferredAgyDeletions);
+    });
     it('persists all threads when multiple createThread calls fire simultaneously', async () => {
       // Fire 4 createThread calls concurrently — without a write queue the last
       // writeFile wins and earlier writes are silently dropped.
@@ -643,6 +664,7 @@ describe('ThreadManager', () => {
       // Remove threads.json so initialize sees a clean state
       const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
       await fs.rm(threadsFile, { force: true });
+      await fs.rm(threadsFile + '.bak', { force: true });
 
       const freshManager = await ThreadManager.initialize(tmpDir);
       const defaultThread = freshManager.getDefaultThread();
@@ -656,6 +678,7 @@ describe('ThreadManager', () => {
 
       const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
       await fs.rm(threadsFile, { force: true });
+      await fs.rm(threadsFile + '.bak', { force: true });
 
       const freshManager = await ThreadManager.initialize(tmpDir);
       expect(freshManager.getDefaultThread().sessionId).toBeNull();
@@ -663,9 +686,30 @@ describe('ThreadManager', () => {
   });
 
   describe('initialization edge cases', () => {
+    it('refuses a recovery catalog copied from another device and keeps the primary untouched', async () => {
+      const file = path.join(tmpDir, '.remote-cli', 'threads.json');
+      await fs.rm(file + '.bak');
+      await fs.writeFile(file, '{');
+      const open = (deviceId: string, allowedDirectories = [tmpDir]) => ThreadManager.initialize(tmpDir, { recovery: {
+        deviceId, serverUrl: 'https://router.example.com', allowedDirectories, workingDirectory: () => allowedDirectories[0],
+      } });
+      const first = await open('first');
+      const second = await open('second');
+      const narrowed = await open('first', [path.join(tmpDir, 'projects')]);
+      expect(narrowed.getThread(first.getDefaultThread().id)).toBeUndefined();
+      const firstFile = path.join(first.recoveryDirectory!, 'threads.json');
+      const secondFile = path.join(second.recoveryDirectory!, 'threads.json');
+      expect(first.getDefaultThread().id).not.toBe(second.getDefaultThread().id);
+      await fs.rm(secondFile + '.bak');
+      await fs.copyFile(firstFile, secondFile);
+      await expect(open('second')).rejects.toThrow('Damaged threads.json');
+      expect(await fs.readFile(file, 'utf8')).toBe('{');
+    });
+
     it('preserves corrupt catalog bytes and fails closed on unknown UUID reservations', async () => {
       const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
       await fs.mkdir(path.join(tmpDir, '.remote-cli'), { recursive: true });
+      await fs.rm(threadsFile + '.bak');
       await fs.writeFile(threadsFile, '{ invalid json !!!');
 
       await expect(ThreadManager.initialize(tmpDir)).rejects.toThrow(/threads\.json.*restore/i);

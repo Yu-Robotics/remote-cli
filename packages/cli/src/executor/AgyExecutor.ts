@@ -1,5 +1,5 @@
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
-import { agyHostScheduleHistory, assertAgySelectionResettable, detachAgySelection } from './agy/AgySessionSelection';
+import { agyHostScheduleHistory, agyOwnershipReview, agySavedSelectionDeletion, assertAgySelectionResettable, detachAgySelection } from './agy/AgySessionSelection';
 import { createHash, randomUUID } from 'crypto';
 import { syncDirectory } from '../delegation/OwnershipRuntime';
 import { execFile } from 'child_process';
@@ -209,11 +209,14 @@ export class AgyExecutor implements IExecutor {
     if (this.acp?.hasJobs || this.scheduleOwner) throw new Error('AGY native notifications remain owned and unconfirmed. Settings and transport changes are unavailable; inspect /schedule list.');
   }
   private assertScheduleResettable(allowOwnedRetirement = false, detachSelection = false): void {
-    if (this.allocationUnconfirmed || fs.existsSync(this.sessionFilePath + '.allocation-unconfirmed')) throw new Error('AGY allocation ownership is unconfirmed; retain its evidence.');
-    if (fs.existsSync(this.sessionFilePath + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');
-    if (this.acpLeaseUnconfirmed && !this.acp && !detachSelection) throw new Error('Saved AGY ACP host retirement is unconfirmed; keep the original history.');
-    if (this.scheduleOwner && this.scheduleOwner.sessionId !== this.conversationId) throw new Error('AGY schedule owner does not match the original conversation.');
-    if (this.scheduleOwner && !this.scheduleOwner.retired && !(allowOwnedRetirement && this.acp?.canRetireForContextReset)) throw new Error('AGY native notifications have unresolved ownership; use a new thread.');
+    if (this.allocationUnconfirmed || fs.existsSync(this.sessionFilePath + '.allocation-unconfirmed')) throw new Error(`AGY allocation ownership is unconfirmed. ${agyOwnershipReview}`);
+    if (fs.existsSync(this.sessionFilePath + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed. Retry after it finishes. If it stays blocked, ask the device operator to inspect the checkpoint.');
+    if (this.acpLeaseUnconfirmed && !this.acp && !detachSelection) {
+      if (this.scheduleOwner || fs.existsSync(this.sessionFilePath + '.native-schedules')) throw new Error(`Saved AGY host retirement is unconfirmed and schedule ownership remains. ${agyOwnershipReview}`);
+      throw new Error(agySavedSelectionDeletion);
+    }
+    if (this.scheduleOwner && this.scheduleOwner.sessionId !== this.conversationId) throw new Error(`AGY schedule owner does not match the original conversation. ${agyOwnershipReview}`);
+    if (this.scheduleOwner && !this.scheduleOwner.retired && !(allowOwnedRetirement && this.acp?.canRetireForContextReset)) throw new Error(`AGY native notifications have unresolved ownership. ${agyOwnershipReview}`);
   }
   private async runtime(legacyNativeScheduling = false): Promise<AgyAcpRuntime> {
     if (this.acp) return this.acp;
@@ -500,7 +503,17 @@ export class AgyExecutor implements IExecutor {
       if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
     } finally { this.transitioning = false; }
   }
-  async stopForContextReset(): Promise<void> { if (this.acp) await this.acp.close(); }
+  async stopForContextReset(): Promise<void> {
+    if (!this.acp) return;
+    // Keep admission fenced until close joins the original runtime's process group.
+    this.shutdownUncertain = true;
+    try { await this.acp.close(); }
+    catch (cause) {
+      if (this.delegationWorker) throw cause;
+      throw new Error('AGY host retirement is unconfirmed. To reset this conversation, retry /clear in the original thread once the host can exit. Its native history is retained.', { cause });
+    }
+    this.shutdownUncertain = false;
+  }
   async abort(): Promise<boolean> { return await this.acp?.abort() ?? false; }
   abortStatusMessage(): string {
     return this.acp?.hasJobs ? 'AGY foreground interrupted; native timers may still queue reminders and dispatch is blocked. Inspect /schedule list. No work is replayed.'
@@ -508,8 +521,7 @@ export class AgyExecutor implements IExecutor {
   }
   async destroy(): Promise<void> {
     this.isDestroyed = true;
-    try { await this.acp?.close(); this.shutdownUncertain = false; }
-    catch (error) { this.shutdownUncertain = true; throw error; }
+    await this.stopForContextReset();
   }
   async waitForExit(): Promise<void> { if (this.isDestroyed) await this.destroy(); }
   async waitForManagedProcessGroupExit(): Promise<void> {

@@ -150,6 +150,13 @@ describe('PiExecutor native session adoption', () => {
     expect((await run()).error).toContain('different session');
     expect(latest().prompts()).toBe(0);
     expect(pointer().id).toBe(NATIVE_ID);
+
+    latest().reportedId = undefined;
+    expect(await run('retry the original conversation')).toMatchObject({ success: true, output: 'done' });
+    expect(latest().launch.sessionFile).toBe(nativeFile);
+    expect(latest().request.mock.calls.filter(([call]) => call.type === 'prompt'))
+      .toEqual([[{ type: 'prompt', message: 'retry the original conversation' }]]);
+    expect(pointer()).toMatchObject({ id: NATIVE_ID, sessionFile: nativeFile, adopted: true });
   });
 
   it('reserves a preparing turn and cancels reset before any prompt is sent', async () => {

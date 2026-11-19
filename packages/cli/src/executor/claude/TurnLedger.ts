@@ -76,6 +76,13 @@ export class TurnLedger {
     this.changed();
   }
   settled(id: string): boolean { const turn = this.turns.get(id); return !!turn?.result && turn.terminal; }
+  canInterruptSchedule(ids: readonly string[], pid: number | undefined): boolean {
+    // Claude treats oversized lists and malformed UUIDs as an unscoped interrupt.
+    return this.supported(pid) && ids.length > 0 && ids.length <= 8
+      && ids.every(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
+      && !!this.active && ids.includes(this.active)
+      && [...this.inputs].every(id => this.settled(id) && !ids.includes(id));
+  }
   joined(frame: Record<string, any>, id: string | undefined): boolean {
     return !!id && (frame.user_message_uuid === id || Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.includes(id));
   }

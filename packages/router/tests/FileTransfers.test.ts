@@ -7,6 +7,9 @@ import os from 'os';
 import { Readable, PassThrough } from 'stream';
 import { randomUUID } from 'crypto';
 import { FileTransfers } from '../src/files/FileTransfers';
+import { BindingManager } from '../src/binding/BindingManager';
+import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
+import { JsonStore } from '../src/storage/JsonStore';
 
 describe('Router transfer deadlines and quotas', () => {
   let root: string; let router: FileTransfers; let notices: any[]; let messages: any[];
@@ -51,6 +54,73 @@ describe('Router transfer deadlines and quotas', () => {
     expect(context.get).not.toHaveBeenCalled();
     await expect(fs.access(directory)).rejects.toMatchObject({ code: 'ENOENT' });
     await disabled.destroy();
+  });
+  it.each(['unauthenticated', 'storage denied'])('replies to a rejected file (%s) and forwards the next text on the same owned thread', async fault => {
+    const store = new JsonStore(path.join(root, 'bindings.json'), 1);
+    await store.initialize();
+    await new BindingManager(store).bindUser('owner', 'device', 'Fixture');
+    const handler = new FeishuLongConnHandler({ appId: 'fixture', appSecret: 'fixture', store });
+    const forward = vi.fn(async (_device: string, _frame: object) => true);
+    handler.setConnectionHub({ isDeviceOnline: () => true, sendToDevice: forward } as any);
+    handler.setOnResolveThread(async (id, owner) => id === 'parent' && owner === 'owner'
+      ? { deviceId: 'device', threadId: 'thread' } : undefined);
+    handler.onFileMessage = input => router.receive(input);
+    const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+    vi.spyOn(handler, 'sendStreamingStart').mockResolvedValue('card');
+    const event = (id: string, type: string, content: object) => ({
+      sender: { sender_id: { open_id: 'owner' } },
+      message: { message_id: id, parent_id: 'parent', message_type: type, content: JSON.stringify(content) },
+    });
+    try {
+      const scan = fs.readdir.bind(fs);
+      const read = vi.spyOn(fs, 'readdir');
+      if (fault === 'unauthenticated') session = undefined;
+      else read.mockImplementationOnce(async (...args) => {
+        if (args[0] === root) throw Object.assign(new Error('Permission denied: ' + root), { code: 'EACCES' });
+        return scan(...args);
+      });
+      await (handler as any).handleMessageEvent(event('upload', 'file', { file_key: 'key', file_name: 'report.txt' }));
+      expect(reply).toHaveBeenCalledOnce();
+      expect(reply).toHaveBeenCalledWith('upload', expect.stringContaining(fault === 'unauthenticated'
+        ? 'File not received: Files require an upgraded, authenticated CLI'
+        : 'File not received: Router attachment storage is unavailable.'));
+      expect(reply.mock.calls[0][1]).not.toContain(root);
+      expect(download).not.toHaveBeenCalled();
+      expect(forward).not.toHaveBeenCalled();
+      await (handler as any).handleMessageEvent(event('next', 'text', { text: 'Continue the conversation' }));
+      expect(forward).toHaveBeenCalledOnce();
+      expect(forward).toHaveBeenCalledWith('device', expect.objectContaining({
+        type: 'command', content: 'Continue the conversation', openId: 'owner', threadId: 'thread',
+      }));
+      expect(forward.mock.lastCall?.[1]).not.toHaveProperty('fileIds');
+      if (fault === 'storage denied') await offer();
+    } finally {
+      vi.restoreAllMocks();
+      await handler.stop();
+      await store.flush();
+    }
+  });
+  it('keeps spool paths out of transfer failure cards, CLI status and saved metadata', async () => {
+    const rename = fs.rename.bind(fs);
+    const fault = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (path.basename(String(from)) === 'download.part') {
+        throw Object.assign(new Error('Permission denied: ' + from), { code: 'EACCES' });
+      }
+      return rename(from, to);
+    });
+    try {
+      await upload();
+      await vi.waitFor(() => expect(notices.some(record => record.state === 'failed')).toBe(true));
+      const failed = notices.find(record => record.state === 'failed');
+      expect(failed.detail).toMatch(/send the file again/i);
+      expect(failed.detail).not.toContain(root);
+      expect(messages).toContainEqual(expect.objectContaining({ type: 'file_failed', fileId: failed.id, detail: failed.detail }));
+      const stored = JSON.parse(await fs.readFile(path.join(root, failed.id, 'metadata.json'), 'utf8'));
+      expect(stored).toMatchObject({ state: 'failed', detail: failed.detail });
+      expect(messages.some(message => message.type === 'file_available')).toBe(false);
+      fault.mockRestore();
+      await offer();
+    } finally { fault.mockRestore(); }
   });
   it('holds the per-device slot until a verified saved acknowledgement, not just HTTP offer', async () => {
     const first = await offer(); await upload(); expect(download).toHaveBeenCalledTimes(1);

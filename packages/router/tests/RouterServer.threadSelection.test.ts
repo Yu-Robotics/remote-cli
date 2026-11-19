@@ -227,6 +227,44 @@ describe('Router durable selected-thread integration', () => {
     expect(context.feishu.replyToMessage).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('expired'));
   });
 
+  it.each(['missing active device', 'incomplete key enrollment'] as const)(
+    'restores chat on another bound device through /device after %s', async fault => {
+      const initial = await createRouter();
+      await initial.bindings.bindUser('user-a', 'device-a', 'A');
+      await initial.bindings.bindUser('user-a', 'device-b', 'B');
+      await initial.store.flush();
+      const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
+      const binding = raw.userBindings['user-a'];
+      binding.devices[0].selectedThreadId = { unknown: 'preserved' };
+      binding.devices[1].selectedThreadId = 'thread-b';
+      if (fault === 'missing active device') binding.activeDeviceId = 'retired-device';
+      else binding.devices[0].requiresDeviceAuth = true;
+      await fs.writeFile(storePath, JSON.stringify(raw));
+
+      const context = await createRouter();
+      const a = await startLegacy(context.server, 'device-a');
+      const b = await startLegacy(context.server, 'device-b');
+      if (fault === 'incomplete key enrollment') {
+        expect(a.sent).toContainEqual(expect.objectContaining({ type: 'error', data: expect.objectContaining({ code: 'DEVICE_AUTH_REQUIRED' }) }));
+      }
+      await text(context, 'blocked message');
+      expect(context.feishu.replyToMessage).toHaveBeenLastCalledWith(expect.any(String),
+        expect.stringContaining(fault === 'missing active device' ? 'No active device' : 'offline'));
+      await text(context, '/device list');
+      expect(context.feishu.replyToMessage).toHaveBeenLastCalledWith(expect.any(String), expect.stringContaining('2. **B**'));
+      await text(context, '/device 2');
+      expect(context.feishu.replyToMessage).toHaveBeenLastCalledWith(expect.any(String), expect.stringContaining('Switched to device: **B**'));
+      await text(context, 'continue on B');
+
+      expect(commands(a)).toEqual([]);
+      expect(commands(b)).toEqual([expect.objectContaining({ content: 'continue on B', threadId: 'thread-b', openId: 'user-a' })]);
+      const saved = JSON.parse(await fs.readFile(storePath, 'utf8')).userBindings['user-a'];
+      expect(saved.activeDeviceId).toBe('device-b');
+      expect(saved.devices[0]).toMatchObject({ deviceId: 'device-a', selectedThreadId: { unknown: 'preserved' } });
+      if (fault === 'incomplete key enrollment') expect(saved.devices[0].requiresDeviceAuth).toBe(true);
+    },
+  );
+
   it('resets only on exact current missing-thread confirmation and never replays', async () => {
     const context = await createRouter();
     await context.bindings.bindUser('user-a', 'device-a', 'A');
@@ -289,7 +327,9 @@ describe('Router durable selected-thread integration', () => {
     await pending;
     expect(commands(socket)).toHaveLength(0);
     expect((context.server as any).streamingMessages.size).toBe(0);
-    expect(context.feishu.replyToMessage).toHaveBeenCalled();
+    const [card, elements] = context.feishu.finalizeStreamingMessage.mock.lastCall!;
+    expect(card).toBe('slow-card');
+    expect(elements).toEqual([{ tag: 'markdown', content: expect.stringContaining('Command was not sent') }]);
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('selected-thread');
   });
 
@@ -632,6 +672,38 @@ describe('Router durable selected-thread integration', () => {
     expect(missing.toast.content).toContain('no longer exists');
     expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
     expect(commands(socket)).toHaveLength(0);
+    await text(restored, 'continue after missing target');
+    expect(commands(socket)).toEqual([expect.objectContaining({ content: 'continue after missing target' })]);
+    expect(commands(socket)[0].threadId).toBeUndefined();
+  });
+
+  it('keeps the last saved route on a failed card switch and accepts an explicit retry', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await select(context, 'original-card', 'device-a', 'previous');
+    const socket = await startLegacy(context.server);
+    const threads = [
+      { id: 'default-id', name: 'default', status: 'idle' },
+      { id: 'previous', name: 'Previous', status: 'idle' },
+      { id: 'next', name: 'Next', status: 'idle' },
+    ];
+    await text(context, '/thread list');
+    const request = socket.sent.find(message => message.type === 'status');
+    await socket.receive({ type: 'status', messageId: request.messageId, status: { threads } });
+    const card = context.feishu.finalizeStreamingMessage.mock.calls.at(-1)[0];
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Synthetic write failure'));
+    try {
+      expect((await click(context, socket, card, 'next', threads)).toast.type).toBe('error');
+      expect(rename).toHaveBeenCalledWith(expect.any(String), storePath);
+    } finally { rename.mockRestore(); }
+    expect(JSON.parse(await fs.readFile(storePath, 'utf8')).userBindings['user-a'].devices[0].selectedThreadId).toBe('previous');
+    await text(context, 'before retry');
+    expect((await click(context, socket, card, 'next', threads)).toast.type).toBe('success');
+    await text(context, 'after retry');
+    expect(commands(socket).map(({ content, threadId }) => [content, threadId])).toEqual([
+      ['before retry', 'previous'], ['after retry', 'next'],
+    ]);
+    expect(JSON.parse(await fs.readFile(storePath, 'utf8')).userBindings['user-a'].devices[0].selectedThreadId).toBe('next');
   });
 
   it.each(['switch', 'unbind', 'unbind-all', 'revoke', 'enroll'])('keeps %s invalidation across Router recreation', async action => {
@@ -1054,6 +1126,11 @@ describe('Router durable selected-thread integration', () => {
     await expect(context.store.flush()).rejects.toThrow('uncertain');
     const restored = await createRouter();
     expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+    const reconnected = await startLegacy(restored.server);
+    await text(restored, 'continue after storage reconciliation');
+    expect(commands(reconnected)).toEqual([
+      expect.objectContaining({ openId: 'user-a', content: 'continue after storage reconciliation', threadId: 'target' }),
+    ]);
   });
 
 });

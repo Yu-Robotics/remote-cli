@@ -371,9 +371,21 @@ describe('MessageHandler schedule management and delivery', () => {
     const running = dispatch();
     await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
     expect(await dispatch()).toBeUndefined();
+    await f.send('Continue this conversation', 'thread-a', { isSlashCommand: false });
+    const confirmation = f.responses().at(-1)?.queueConfirmation;
+    expect(confirmation?.id).toEqual(expect.any(String));
+    await f.send(`/queue confirm ${confirmation.id} queued-owner-chat`);
+    expect(f.responses().at(-1)).toMatchObject({ success: true, openId: 'owner', threadId: 'thread-a' });
+    await f.send('/abort', 'thread-a', { openId: 'other-owner' });
+    expect(f.responses().at(-1)).toMatchObject({ success: false });
+    expect(f.executor.abort).not.toHaveBeenCalled();
     await f.send('/abort');
     expect(await running).toMatchObject({ success: false, abortedByUser: true, output: 'Partial answer', error: expect.stringContaining('/abort') });
-    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('occurrence') });
+    expect(f.responses()).toContainEqual(expect.objectContaining({ success: true, output: expect.stringContaining('occurrence'), openId: 'owner', threadId: 'thread-a' }));
+    await vi.waitFor(() => expect(f.responses()).toContainEqual(expect.objectContaining({
+      messageId: 'queued-owner-chat', success: true, openId: 'owner', threadId: 'thread-a',
+    })));
+    expect(f.executor.execute).toHaveBeenCalledTimes(2);
     expect(f.executor.abort).toHaveBeenCalledOnce();
     expect(f.handler.tryBeginAutomaticUpdate()).toBe(true);
   });

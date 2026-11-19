@@ -122,6 +122,7 @@ describe('RouterServer', () => {
       setOnResolveActiveThread: vi.fn(),
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendMessageWithReceipt: vi.fn().mockResolvedValue('delivered-text'),
       sendStreamingStart: vi.fn().mockResolvedValue('execution-card'),
       markQueueCardStarted: vi.fn().mockResolvedValue(undefined),
       updateStreamingMessage: vi.fn().mockResolvedValue(true),
@@ -1044,7 +1045,7 @@ describe('RouterServer', () => {
       expect(intro).toContain('/workspace/project');
       expect(intro).toContain('Remaining: 2');
       expect(intro).toContain("<text_tag color='blue'>Running</text_tag>");
-      expect(mockFeishuHandler.markQueueCardStarted).toHaveBeenCalledWith('receipt-card');
+      expect(mockFeishuHandler.markQueueCardStarted).toHaveBeenCalledWith('receipt-card', expect.any(Function));
       const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
       expect(await resolveThread('execution-card', 'user-1')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
       expect(await mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0]('user-1', 'device-1')).toBeUndefined();
@@ -1056,6 +1057,32 @@ describe('RouterServer', () => {
         'thread-2', started.threads, 'thread-1', undefined, undefined, true,
         expect.objectContaining({ onDelivered: expect.any(Function) }),
       );
+    });
+
+    it('refuses a late queue start from a previous binding of the same device', async () => {
+      const send = await connect();
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('queued-1', 'user-1', null, 'device-1', 'thread-1', false, 'receipt-card');
+      mockBindingManager.getCardThreadEpoch.mockReturnValue('00000000-0000-4000-8000-000000000002');
+      await send(started);
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
+      expect(mockFeishuHandler.markQueueCardStarted).not.toHaveBeenCalled();
+    });
+
+    it('associates only the actual button page with the queue request on the original thread', async () => {
+      const send = await connect();
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('request', 'user-1', 'root', 'device-1', 'thread-1');
+      const response = { type: 'response', messageId: 'request', openId: 'user-1', success: false,
+        queueConfirmation: { id: 'queued', threadId: 'thread-1' } };
+      await send({ ...response, threadId: 'other-thread' });
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      mockFeishuHandler.finalizeStreamingMessage.mockImplementationOnce(async (...args: any[]) => {
+        await args.at(-1).onDelivered(['root', 'buttons'], 'buttons');
+        return true;
+      });
+      await send(response);
+      expect(store.getCardThread('buttons')).toMatchObject({ deviceId: 'device-1', openId: 'user-1', threadId: 'thread-1',
+        epoch: store.getCardThreadEpoch('user-1', 'device-1'), queueId: 'queued' });
+      expect(store.getCardThread('root')?.queueId).toBeUndefined();
     });
 
     it('holds early output and completion until card creation finishes without blocking another thread', async () => {
@@ -1195,8 +1222,8 @@ describe('RouterServer', () => {
       await send(started);
       await send({ type: 'stream', messageId: 'queued-1', openId: 'user-1', chunk: 'Recovered text' });
       await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: false, error: 'Task failed' });
-      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', expect.stringContaining('Recovered text'));
-      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', expect.stringContaining('Task failed'));
+      expect(mockFeishuHandler.sendMessageWithReceipt).toHaveBeenCalledWith('user-1', expect.stringContaining('Recovered text'));
+      expect(mockFeishuHandler.sendMessageWithReceipt).toHaveBeenCalledWith('user-1', expect.stringContaining('Task failed'));
     });
 
     it('reconstructs a missing streaming session and survives a failed receipt update', async () => {

@@ -20,6 +20,7 @@ export interface EnrollmentAuthority { readonly openId: string; readonly epoch: 
 /** Pending requests never authenticate a device. Only the exact owner's card can enroll its key. */
 export class AutomaticFileEnrollment {
   private records: Request[] = [];
+  private readonly pendingReceiptEpochs = new WeakMap<Request, string>();
   private loading?: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private healthy = true;
@@ -173,15 +174,23 @@ export class AutomaticFileEnrollment {
       const id = (payload as any)?.id;
       const request = this.records.find(item => item.id === id && item.openId === openId && item.cardId === cardId);
       if (!request || !['known', 'approved'].includes(request.state) || request.expires <= Date.now()) return 'This approval is unavailable or expired.';
-      await this.deps.bindings.approveExistingDeviceKey(openId, request.deviceId, request.epoch, async () => {
+      const receiptEpoch = this.pendingReceiptEpochs.get(request);
+      await this.deps.bindings.approveExistingDeviceKey(openId, request.deviceId, receiptEpoch ?? request.epoch, async () => {
         const enrolled = await this.deps.auth.get(request.deviceId);
         if (enrolled) {
-          if (!enrolled.revoked && enrolled.openId === openId && enrolled.publicKey === request.publicKey) return;
-          throw new Error('Device key changed.');
+          if (enrolled.revoked || enrolled.openId !== openId || enrolled.publicKey !== request.publicKey) throw new Error('Device key changed.');
+        } else {
+          if (request.state === 'approved') throw new Error('Device key changed.');
+          await this.deps.approve(openId, request.deviceId, request.publicKey);
+          // Enrollment can rotate the epoch. Capture its successor under the binding lock
+          // so a receipt retry cannot follow a later unbind, rebind or key replacement.
+          this.pendingReceiptEpochs.set(request, this.deps.bindings.getCardThreadEpoch(openId, request.deviceId));
         }
-        await this.deps.approve(openId, request.deviceId, request.publicKey);
       });
-      request.state = 'approved'; await this.save();
+      request.state = 'approved';
+      try { await durableJson(this.filename, this.records); }
+      catch { return 'File access approved. Click this card again to finish saving the approval receipt.'; }
+      this.pendingReceiptEpochs.delete(request);
       return 'File access approved. The CLI will reconnect securely.';
     });
   }

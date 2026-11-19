@@ -4,69 +4,58 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
-// Mock fs and os modules
-vi.mock('fs/promises');
-vi.mock('os');
+import * as catalogFile from '../src/config/CatalogFile';
 
 describe('ConfigManager', () => {
   let configManager: ConfigManager;
-  const mockHomeDir = '/mock/home';
-  const mockConfigDir = path.join(mockHomeDir, '.remote-cli');
-  const mockConfigFile = path.join(mockConfigDir, 'config.json');
+  let home: string, mockConfigDir: string, mockConfigFile: string;
+  const readConfig = async () => JSON.parse(await fs.readFile(mockConfigFile, 'utf8'));
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    (os.homedir as any) = vi.fn().mockReturnValue(mockHomeDir);
+  beforeEach(async () => {
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'config-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    mockConfigDir = path.join(home, '.remote-cli');
+    mockConfigFile = path.join(mockConfigDir, 'config.json');
+    await fs.mkdir(mockConfigDir);
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(home, { recursive: true, force: true });
   });
 
   describe('initialization', () => {
     it('should create config directory if not exists', async () => {
-      (fs.access as any) = vi.fn().mockRejectedValue(new Error('ENOENT'));
-      (fs.mkdir as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockRejectedValue(new Error('ENOENT'));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      await fs.rmdir(mockConfigDir);
 
       configManager = await ConfigManager.initialize();
 
-      expect(fs.mkdir).toHaveBeenCalledWith(mockConfigDir, { recursive: true });
+      expect((await fs.stat(mockConfigDir)).isDirectory()).toBe(true);
     });
 
     it('should create default config file if not exists', async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockRejectedValue(new Error('ENOENT'));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
 
       configManager = await ConfigManager.initialize();
 
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        mockConfigFile,
-        expect.stringContaining('allowedDirectories'),
-        'utf-8'
-      );
+      expect((await readConfig()).security.allowedDirectories).toEqual([]);
     });
 
     it('defaults session sharing to disabled without migrating thread metadata', async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({ security: { allowedDirectories: ['~/projects'] } }));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      await fs.writeFile(mockConfigFile, JSON.stringify({ security: { allowedDirectories: ['~/projects'] } }));
+      const bytes = await fs.readFile(mockConfigFile);
       const config = await ConfigManager.initialize();
       expect(config.get('sessionSharing.enabled')).toBe(false);
-      expect(fs.writeFile).not.toHaveBeenCalled();
+      expect(await fs.readFile(mockConfigFile)).toEqual(bytes);
     });
 
     it('preserves malformed session-sharing opt-in for fail-closed validation without resetting unrelated values', async () => {
       const existing = { deviceId: 'synthetic-device', sessionSharing: { enabled: 'true' }, security: { allowedDirectories: ['~/projects'] } };
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existing));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      await fs.writeFile(mockConfigFile, JSON.stringify(existing));
+      const bytes = await fs.readFile(mockConfigFile);
       const config = await ConfigManager.initialize();
       expect(config.get('deviceId')).toBe(existing.deviceId);
       expect(config.get('sessionSharing')).toEqual(existing.sessionSharing);
-      expect(fs.writeFile).not.toHaveBeenCalled();
+      expect(await fs.readFile(mockConfigFile)).toEqual(bytes);
     });
 
     it('should load existing config file', async () => {
@@ -83,8 +72,7 @@ describe('ConfigManager', () => {
         }
       };
 
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existingConfig));
+      await fs.writeFile(mockConfigFile, JSON.stringify(existingConfig));
 
       configManager = await ConfigManager.initialize();
       const config = configManager.getConfig();
@@ -111,9 +99,7 @@ describe('ConfigManager', () => {
         }
       };
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existingConfig));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      await fs.writeFile(mockConfigFile, JSON.stringify(existingConfig));
 
       configManager = await ConfigManager.initialize();
 
@@ -121,7 +107,7 @@ describe('ConfigManager', () => {
         type: 'claude-persistent',
         codex: { model: 'gpt-5.2-codex' }
       });
-      const persisted = JSON.parse((fs.writeFile as any).mock.calls[0][1]);
+      const persisted = await readConfig();
       expect(persisted.executor).toEqual({
         type: 'claude-persistent',
         codex: { model: 'gpt-5.2-codex' }
@@ -150,9 +136,8 @@ describe('ConfigManager', () => {
         executor: { type: 'claude-spawn' }
       };
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existingConfig));
-      (fs.writeFile as any) = vi.fn().mockRejectedValue(new Error('read only'));
+      await fs.writeFile(mockConfigFile, JSON.stringify(existingConfig));
+      vi.spyOn(catalogFile, 'writeCatalog').mockRejectedValueOnce(new Error('read only'));
 
       configManager = await ConfigManager.initialize();
 
@@ -165,21 +150,16 @@ describe('ConfigManager', () => {
     });
 
     it('should handle malformed config file gracefully', async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue('invalid json');
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      await fs.writeFile(mockConfigFile, 'invalid json');
 
-      configManager = await ConfigManager.initialize();
-
-      // Should create default config
-      expect(fs.writeFile).toHaveBeenCalled();
+      await expect(ConfigManager.initialize()).rejects.toThrow('Damaged config.json');
+      expect(await fs.readFile(mockConfigFile, 'utf8')).toBe('invalid json');
     });
   });
 
   describe('config management', () => {
     beforeEach(async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({
+      await fs.writeFile(mockConfigFile, JSON.stringify({
         security: {
           allowedDirectories: ['~/projects'],
           deniedCommands: [],
@@ -191,7 +171,6 @@ describe('ConfigManager', () => {
           heartbeatInterval: 30000
         }
       }));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
 
       configManager = await ConfigManager.initialize();
     });
@@ -204,12 +183,32 @@ describe('ConfigManager', () => {
       expect(config.security).toHaveProperty('allowedDirectories');
     });
 
+    it('retains independent updates by concurrent managers in the recovered snapshot', async () => {
+      const other = await ConfigManager.initialize();
+      await Promise.all([configManager.set('deviceId', 'fixture-device'), other.set('executor.type', 'codex')]);
+      await fs.writeFile(mockConfigFile, '{');
+      const restored = await ConfigManager.initialize();
+      expect(restored.getConfig()).toMatchObject({ deviceId: 'fixture-device', executor: { type: 'codex' } });
+    });
+
+    it.each(['previous file', 'modified payload'])('refuses a %s backup after a directory grant is revoked', async kind => {
+      await configManager.addAllowedDirectory('~/temporary');
+      const backupFile = mockConfigFile + '.bak';
+      const previous = JSON.parse(await fs.readFile(backupFile, 'utf8'));
+      await configManager.removeAllowedDirectory('~/temporary');
+      const current = JSON.parse(await fs.readFile(backupFile, 'utf8'));
+      await fs.writeFile(backupFile, JSON.stringify(kind === 'previous file' ? previous : { ...current, data: previous.data }));
+      await fs.writeFile(mockConfigFile, 'damaged');
+      await expect(ConfigManager.initialize()).rejects.toThrow('Damaged config.json');
+      expect(await fs.readFile(mockConfigFile, 'utf8')).toBe('damaged');
+    });
+
     it('should add allowed directory', async () => {
       await configManager.addAllowedDirectory('~/new-project');
 
       const config = configManager.getConfig();
       expect(config.security.allowedDirectories).toContain('~/new-project');
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
 
     it('should not add duplicate directory', async () => {
@@ -226,7 +225,7 @@ describe('ConfigManager', () => {
 
       const config = configManager.getConfig();
       expect(config.security.allowedDirectories).not.toContain('~/temp');
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
 
     it('should add denied command', async () => {
@@ -234,7 +233,7 @@ describe('ConfigManager', () => {
 
       const config = configManager.getConfig();
       expect(config.security.deniedCommands).toContain('sudo rm');
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
 
     it('should remove denied command', async () => {
@@ -250,7 +249,7 @@ describe('ConfigManager', () => {
 
       const config = configManager.getConfig();
       expect(config.server.url).toBe('wss://new-server.com');
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
 
     it('should update max concurrent tasks', async () => {
@@ -258,14 +257,13 @@ describe('ConfigManager', () => {
 
       const config = configManager.getConfig();
       expect(config.security.maxConcurrentTasks).toBe(3);
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
   });
 
   describe('validation', () => {
     beforeEach(async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({
+      await fs.writeFile(mockConfigFile, JSON.stringify({
         security: {
           allowedDirectories: ['~/projects'],
           deniedCommands: [],
@@ -277,7 +275,6 @@ describe('ConfigManager', () => {
           heartbeatInterval: 30000
         }
       }));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
 
       configManager = await ConfigManager.initialize();
     });
@@ -313,8 +310,7 @@ describe('ConfigManager', () => {
 
   describe('config path utilities', () => {
     beforeEach(async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({
+      await fs.writeFile(mockConfigFile, JSON.stringify({
         security: {
           allowedDirectories: ['~/projects'],
           deniedCommands: [],
@@ -343,8 +339,7 @@ describe('ConfigManager', () => {
 
   describe('reset configuration', () => {
     beforeEach(async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({
+      await fs.writeFile(mockConfigFile, JSON.stringify({
         security: {
           allowedDirectories: ['~/projects', '~/work'],
           deniedCommands: ['rm -rf /'],
@@ -356,7 +351,6 @@ describe('ConfigManager', () => {
           heartbeatInterval: 60000
         }
       }));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
 
       configManager = await ConfigManager.initialize();
     });
@@ -367,14 +361,13 @@ describe('ConfigManager', () => {
       const config = configManager.getConfig();
       expect(config.security.maxConcurrentTasks).toBe(1);
       expect(config.server.reconnectInterval).toBe(5000);
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
   });
 
   describe('export and import', () => {
     beforeEach(async () => {
-      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
-      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({
+      await fs.writeFile(mockConfigFile, JSON.stringify({
         security: {
           allowedDirectories: ['~/projects'],
           deniedCommands: [],
@@ -386,7 +379,6 @@ describe('ConfigManager', () => {
           heartbeatInterval: 30000
         }
       }));
-      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
 
       configManager = await ConfigManager.initialize();
     });
@@ -424,7 +416,7 @@ describe('ConfigManager', () => {
       const config = configManager.getConfig();
       expect(config.security.allowedDirectories).toEqual(newConfig.security.allowedDirectories);
       expect(config.server.url).toBe(newConfig.server.url);
-      expect(fs.writeFile).toHaveBeenCalled();
+      expect(await readConfig()).toEqual(config);
     });
 
     it('should reject invalid imported config', async () => {

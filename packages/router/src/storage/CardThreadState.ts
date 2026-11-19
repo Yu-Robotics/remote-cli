@@ -11,6 +11,7 @@ export interface CardThreadAssociation {
   openId: string;
   epoch: string;
   expiresAt: number;
+  queueId?: string;
 }
 
 export interface CardThreadState {
@@ -27,7 +28,8 @@ const epoch = (value: unknown): value is string => typeof value === 'string' && 
 export function validCardThread(cardId: string, value: unknown, now = Date.now()): value is CardThreadAssociation {
   return identifier(cardId) && record(value) && identifier(value.threadId) && identifier(value.deviceId)
     && identifier(value.openId) && epoch(value.epoch) && Number.isSafeInteger(value.expiresAt)
-    && value.expiresAt > now && value.expiresAt <= now + CARD_THREAD_TTL_MS;
+    && value.expiresAt > now && value.expiresAt <= now + CARD_THREAD_TTL_MS
+    && (value.queueId === undefined || (identifier(value.queueId) && !/\s/.test(value.queueId)));
 }
 
 /** Optional routing metadata is disposable; malformed authority is never reconstructed from cards. */
@@ -65,8 +67,9 @@ export function reconcileCardThreads(raw: unknown, bindings: Record<string, User
       if (!owner || owner.openId !== entry.openId || owner.epoch !== entry.epoch || count >= MAX_DEVICE_CARD_THREADS) continue;
       if (total >= MAX_CARD_THREADS) break;
       total++;
-      cards[id] = Object.keys(entry).length === 5 ? entry : { threadId: entry.threadId, deviceId: entry.deviceId,
-        openId: entry.openId, epoch: entry.epoch, expiresAt: entry.expiresAt };
+      cards[id] = Object.keys(entry).length === (entry.queueId === undefined ? 5 : 6) ? entry : {
+        threadId: entry.threadId, deviceId: entry.deviceId, openId: entry.openId, epoch: entry.epoch,
+        expiresAt: entry.expiresAt, ...(entry.queueId === undefined ? {} : { queueId: entry.queueId }) };
       counts.set(entry.deviceId, count + 1);
     }
   }

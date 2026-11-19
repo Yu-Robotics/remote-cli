@@ -369,14 +369,14 @@ describe.skipIf(!DatabaseSync)('ZCode exclusive history ownership', () => {
     await expect(executor.waitForManagedProcessGroupExit()).rejects.toThrow('unconfirmed');
   });
 
-  it('preserves ordinary resume fallback while refusing arbitrary managed resume failures', async () => {
+  it('creates a fresh ordinary session after confirmed absence while refusing a transient managed load failure', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const managed = fake(); managed.loadSession = vi.fn(async () => { throw new Error('Synthetic transport failure'); });
     const managedCreate = managed.newSession;
     const worker = executorWith(managed); worker.observeNativeSessionCreation(async () => {}, async () => {});
     expect((await worker.execute('synthetic prompt')).success).toBe(false);
     expect(managedCreate).not.toHaveBeenCalled();
-    const ordinary = fake(); ordinary.loadSession = managed.loadSession;
+    const ordinary = fake(); ordinary.loadSession = vi.fn(async () => { throw new Error('Session not found'); });
     fs.writeFileSync(path.join(pointerRoot, 'ordinary.json'), JSON.stringify({ id: 'sess_ordinary', cwd }));
     const executor = new ZCodeExecutor(new DirectoryGuard([home]), { threadId: 'ordinary', initialWorkingDirectory: cwd,
       sessionBaseDir: pointerRoot, clientFactory: () => ordinary });

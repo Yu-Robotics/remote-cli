@@ -457,16 +457,26 @@ describe('settings cards command integration', () => {
     expect((await changing).success).toBe(true);
   });
 
-  it('does not persist a rejected native change or claim success after persistence failure', async () => {
+  it.each(['native', 'persistence'] as const)('admits the next foreground chat on the original thread after a %s model change failure', async failure => {
     const menu = await f.open('model');
-    f.executor.setModel.mockResolvedValueOnce({ success: false });
-    expect((await f.action(menu)).success).toBe(false);
-    expect(f.manager.updateThread).not.toHaveBeenCalled();
-    const fresh = await f.open('model');
-    f.manager.updateThread.mockRejectedValueOnce(new Error('Private persistence details'));
-    const result = await f.action(fresh);
+    if (failure === 'native') f.executor.setModel.mockResolvedValueOnce({ success: false });
+    else f.manager.updateThread.mockRejectedValueOnce(new Error('Private persistence details'));
+    const result = await f.action(menu);
     expect(result.success).toBe(false);
+    expect(f.executor.setModel).toHaveBeenCalledWith('model-a', undefined);
+    if (failure === 'native') expect(f.manager.updateThread).not.toHaveBeenCalled();
+    else expect(f.manager.updateThread).toHaveBeenCalledWith(menu.threadId, expect.objectContaining({ models: expect.objectContaining({ codex: 'model-a' }) }));
     expect(JSON.stringify(result)).not.toContain('Private persistence details');
+    expect(f.threads[0].models?.codex).toBe('saved-codex');
+
+    const prompt = 'Continue with the current settings';
+    const responsesBeforeChat = f.responses().length;
+    await f.send(prompt, menu.threadId);
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+    expect(f.executor.execute).toHaveBeenCalledWith(prompt, expect.anything());
+    expect(f.responses().slice(responsesBeforeChat)).toEqual([
+      expect.objectContaining({ threadId: menu.threadId, success: true }),
+    ]);
   });
 
   it('holds commands behind a settings mutation and deduplicates concurrent retries', async () => {

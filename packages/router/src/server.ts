@@ -66,6 +66,7 @@ interface StreamingMessageState {
   inlineRecoveryHeld?: boolean;
   openId: string;
   feishuMessageId: string | null;
+  fallbackReceipt?: Promise<string | null>;
   /** Includes continuation routes until this execution completes. */
   deliveredCardIds?: Set<string>;
   elements: FeishuCardElement[];
@@ -386,6 +387,15 @@ export class RouterServer {
       : this.maintenanceCards.reply(openId, id, cardId, action);
 
     // Register callback for streaming message start
+    this.feishuLongConnHandler.onCommandNotSent = async messageId => {
+      const session = this.streamingMessages.get(messageId);
+      if (!session) return;
+      this.streamingMessages.delete(messageId);
+      this.clearDelegationProgressTimers(session);
+      this.cancelImageReply(messageId);
+      this.lastStreamUpdateTime.delete(messageId);
+      await Promise.all(this.removeActiveCardRoutes(session));
+    };
     this.feishuLongConnHandler.setOnCaptureSelection((openId, deviceId) => this.selections.capture(openId, deviceId));
     this.feishuLongConnHandler.setOnValidateSelection(fence => this.selections.isCurrent(fence));
     this.feishuLongConnHandler.setOnStartStreaming(async (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => {
@@ -1213,9 +1223,9 @@ export class RouterServer {
               const cwd = message.cwd || message.data?.cwd || this.streamingMessages.get(message.messageId)?.queueStarted?.cwd
                 || this.streamingMessages.get(message.messageId)?.recoveryCwd
                 || this.streamingMessages.get(message.messageId)?.cwd;
-              const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
+              const responseThreadId = message.threadId || message.data?.threadId || queueConfirmation?.threadId;
               const executionMetadata = parseExecutionMetadata(message.executionMetadata ?? message.data?.executionMetadata);
               // Interactive settings menus only from a capable CLI on this connection;
               // the menu is bound to the original streaming session, never to a
@@ -1227,6 +1237,8 @@ export class RouterServer {
                 || (candidateSettingsMenu?.kind === 'directory' && !directoryCardsEnabled) ? undefined : candidateSettingsMenu;
 
               const responseSession = responseMessageId ? this.streamingMessages.get(responseMessageId) : undefined;
+              if (queueConfirmation && (!responseSession || queueConfirmation.threadId !== responseThreadId
+                || (responseSession.threadId && responseSession.threadId !== responseThreadId))) break;
               const requestedMenu = message.scheduleMenu ?? message.data?.scheduleMenu;
               if (requestedMenu && (!responseSession || responseSession.threadId !== responseThreadId
                 || !scheduleBindingCurrent(responseOpenId))) break;
@@ -1240,9 +1252,9 @@ export class RouterServer {
               let selectionWarning: string | undefined;
               if (responseSession) {
                 if (responseThreadId) {
-                  if (responseSession.feishuMessageId && responseSession.threadId !== responseThreadId) {
+                  if (responseSession.threadId !== responseThreadId) {
                     responseSession.threadId = responseThreadId;
-                    await this.registerCardThread(responseSession.feishuMessageId, { threadId: responseThreadId, deviceId: responseSession.deviceId, openId: responseSession.openId, epoch: responseSession.selectionFence?.epoch ?? this.selections.capture(responseSession.openId, responseSession.deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+                    if (responseSession.feishuMessageId) await this.registerCardThread(responseSession.feishuMessageId, { threadId: responseThreadId, deviceId: responseSession.deviceId, openId: responseSession.openId, epoch: responseSession.selectionFence?.epoch ?? this.selections.capture(responseSession.openId, responseSession.deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
                       () => this.streamingMessages.get(responseMessageId) === responseSession && imageCurrent());
                   }
                   if (responseThreads) {
@@ -1286,7 +1298,8 @@ export class RouterServer {
                 if (requestedMenu && (!menuOwned || !await menuOwned()
                   || this.streamingMessages.get(responseMessageId) !== responseSession)) break;
                 // Check if this was a streaming message (stream chunks were sent)
-                if (this.streamingMessages.has(responseMessageId)) {
+                if (responseSession) {
+                  if (this.streamingMessages.get(responseMessageId) !== responseSession) break;
                   const delivered = await this.finalizeStreamingMessage(
                     responseMessageId,
                     message.success ?? message.data?.success,
@@ -1300,7 +1313,7 @@ export class RouterServer {
                     scheduleMenu,
                     menuOwned,
                   );
-                  if (menuOwned && (!delivered || !await menuOwned())) break;
+                  if (!delivered || (menuOwned && !await menuOwned())) break;
                 } else {
                   // No streaming session found - session should have been created when command was sent
                   // This might happen if there was an error. Just send the result as plain text.
@@ -1541,6 +1554,12 @@ export class RouterServer {
       if (originalRoute && this.imageReplies.get(messageId) !== originalRoute) return false;
       const stream = this.streamingMessages.get(messageId);
       if (stream && (stream.deviceId !== deviceId || stream.openId !== openId)) return false;
+      if (stream?.selectionFence && !this.selections.isOwnershipCurrent(openId, deviceId, stream.selectionFence.epoch)) return false;
+      if (stream && !stream.feishuMessageId && !stream.pendingNewThread) {
+        const threadId = message.threadId ?? message.data?.threadId;
+        if (stream.threadId && threadId && stream.threadId !== threadId) return false;
+        if (!stream.threadId && message.type === 'stream' && typeof threadId === 'string' && threadId) stream.threadId = threadId;
+      }
       const route = this.imageReplies.get(messageId);
       if (route && (route.deviceId !== deviceId || route.openId !== openId)) return false;
       if (stream) stream.currentConnection = isCurrent;
@@ -1553,6 +1572,7 @@ export class RouterServer {
     if (this.streamingMessages.get(messageId) !== stream || (current && !current())) return false;
     const binding = await this.bindingManager.getDeviceBinding(stream.deviceId);
     return this.streamingMessages.get(messageId) === stream && binding?.openId === stream.openId
+      && (!stream.selectionFence || this.selections.isOwnershipCurrent(stream.openId, stream.deviceId, stream.selectionFence.epoch))
       && (!current || current());
   }
 
@@ -2481,9 +2501,9 @@ export class RouterServer {
     await this.admitInlineParent(messageId, true).catch(() => {});
     if (hints) await this.inlineFileCards.hints(deviceId, { ...hints, messageId, threadId }, this.attachmentHintStatus.get(deviceId)!).catch(() => {});
     if (info.state !== 'running') {
-      await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd,
+      const delivered = await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd,
         undefined, parseExecutionMetadata(info.executionMetadata));
-      if (!isCurrent()) return false;
+      if (!delivered || !isCurrent()) return false;
       this.rememberCompletedTask(messageId, deviceId);
     }
     return true;
@@ -2518,6 +2538,7 @@ export class RouterServer {
     const previous = this.streamingMessages.get(messageId);
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return;
+    if (previous?.queueCardId && previous.selectionFence?.epoch !== selectionFence.epoch) return;
     if (previous && (info.source === 'schedule' || previous.queueStarted?.source === 'schedule')
       && (previous.queueStarted?.source !== info.source || previous.queueStarted?.scheduleId !== info.scheduleId
         || previous.queueStarted?.backend !== info.backend || previous.cwd !== info.cwd
@@ -2544,6 +2565,7 @@ export class RouterServer {
 Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
       let cardId: string | null = null;
       const current = () => isCurrent() && this.selections.isOwnershipCurrent(openId, deviceId, selectionFence.epoch);
+      if (previous?.queueCardId && !current()) return;
       const owned = this.scheduleOwnerCheck(openId, deviceId, info.bindingEpoch ?? selectionFence.epoch, isCurrent, !!info.bindingEpoch);
       if (info.source === 'schedule' && !await owned()) return;
       try {
@@ -2553,7 +2575,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
         deliveryEvent('queued_card_create_failed', { task: taskCorrelation(messageId), ...safeCardError(error) });
       }
       if (info.source === 'schedule' && !await owned()) return;
-      if (!isCurrent() || (imageRoute && this.imageReplies.get(messageId) !== imageRoute)) return;
+      if (!isCurrent() || (previous?.queueCardId && !current()) || (imageRoute && this.imageReplies.get(messageId) !== imageRoute)) return;
       const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
       if (previous && this.streamingMessages.get(messageId) === previous) {
         this.clearDelegationProgressTimers(previous);
@@ -2590,7 +2612,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
           if (!isCurrent()) return;
           if (!oldCard || oldCard === cardId) continue;
           try {
-            await this.feishuLongConnHandler.markQueueCardStarted(oldCard);
+            await this.feishuLongConnHandler.markQueueCardStarted(oldCard, current);
           } catch (error) {
             // The new execution card remains usable if its old receipt expired.
             deliveryEvent('queue_receipt_failed', safeCardError(error));
@@ -2683,7 +2705,8 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     return done;
   }
 
-  private async registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[]): Promise<void> {
+  private async registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[],
+    queueCardId?: string, queueId?: string): Promise<void> {
     if (!streamData.threadId || this.streamingMessages.get(messageId) !== streamData) return;
     const fence = streamData.selectionFence;
     if (streamData.currentConnection && !streamData.currentConnection()) return;
@@ -2696,7 +2719,8 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     for (const cardId of delivered) streamData.deliveredCardIds.add(cardId);
     for (const cardId of delivered) {
       await this.registerCardThread(cardId, { threadId: streamData.threadId, deviceId: streamData.deviceId,
-        openId: streamData.openId, epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+        openId: streamData.openId, epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
+        ...(cardId === queueCardId && queueId ? { queueId } : {}) },
         () => this.streamingMessages.get(messageId) === streamData && (!streamData.currentConnection || streamData.currentConnection()));
     }
   }
@@ -2802,7 +2826,8 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             queueConfirmation,
             executionMetadata,
             true,
-            { current: deliveryCurrent, onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+            { current: deliveryCurrent, onDelivered: (ids, queueCard) =>
+              this.registerDeliveredThreadCards(messageId, streamData, ids, queueCard, queueConfirmation?.id) }
           );
           if (finalized === false) throw new Error('Failed to finalize task card');
         } else {
@@ -2824,27 +2849,38 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             queueConfirmation,
             executionMetadata,
             false,
-            { current: deliveryCurrent, onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+            { current: deliveryCurrent, onDelivered: (ids, queueCard) =>
+              this.registerDeliveredThreadCards(messageId, streamData, ids, queueCard, queueConfirmation?.id) }
           );
           if (finalized === false) throw new Error('Failed to finalize task card');
         }
-      } else if (streamData.queueStarted) {
-        if (streamData.queueStarted.source === 'schedule') {
+      } else {
+        if (streamData.queueStarted?.source === 'schedule') {
           // An unthreaded plain message would lose the original reply route.
           // Leave this occurrence in the CLI outbox for a fresh card attempt.
           throw new Error('Scheduled result card is unavailable');
         }
-        // If card creation failed after session recovery, retain a text result
-        // rather than silently losing the completed queued task's output.
-        const text = streamData.elements
+        const parts = streamData.elements
           .filter((element) => element.tag === 'markdown')
           .map((element) => element.content)
-          .concat(streamData.currentTextContent, output || '')
-          .filter(Boolean)
-          .join('\n\n');
-        const delivered = await this.feishuLongConnHandler.sendMessage(openId,
-          `${text}\n\n${success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`}`);
-        if (delivered === false) throw new Error('Failed to deliver task result');
+          .concat(streamData.currentTextContent)
+          .filter(Boolean);
+        if (output && !parts.includes(output)) parts.push(output);
+        if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
+        const receipt = streamData.fallbackReceipt ??= this.feishuLongConnHandler.sendMessageWithReceipt(openId,
+          [...parts, success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`].join('\n\n'));
+        const deliveredId = await receipt;
+        if (!deliveredId) {
+          if (streamData.fallbackReceipt === receipt) streamData.fallbackReceipt = undefined;
+          return false;
+        }
+        if (streamData.threadId) {
+          await this.registerDeliveredThreadCards(messageId, streamData, [deliveredId]);
+          const route = this.store.getCardThread(deliveredId);
+          if (route?.threadId !== streamData.threadId || route.deviceId !== streamData.deviceId || route.openId !== openId
+            || !this.selections.isOwnershipCurrent(openId, streamData.deviceId, route.epoch)) return false;
+        }
+        if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
       }
 
       deliveryEvent('task_finalization_complete', { task });

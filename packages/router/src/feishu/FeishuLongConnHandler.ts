@@ -46,6 +46,12 @@ interface ToolPageRemainder {
   elements: any[];
 }
 
+interface CardDeliveryOptions {
+  bare?: boolean;
+  current?: () => Promise<boolean>;
+  onDelivered?: (cardIds: string[], queueCardId?: string) => void | Promise<void>;
+}
+
 function escapeCardText(value: unknown): string {
   return String(value ?? '')
     .replace(/[\x00-\x1f\x7f]/g, ' ')
@@ -72,6 +78,7 @@ export class FeishuLongConnHandler {
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
   private bindingManager: BindingManager;
+  private readonly store: JsonStore;
   private connectionHub: ConnectionHub | null = null;
   private appId: string;
   private appSecret: string;
@@ -100,7 +107,7 @@ export class FeishuLongConnHandler {
   private messageLocks: Map<string, Promise<any>> = new Map();
   private queueCardDecisions = new Map<string, Promise<void>>();
   // Prevent repeated clicks on the same queue confirmation card from sending duplicate commands.
-  private queueActionStates = new Map<string, { action: 'confirm' | 'cancel'; processedAt: number }>();
+  private queueActionStates = new Map<string, { sent: Promise<void>; processedAt: number }>();
   private readonly QUEUE_ACTION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
   // Pattern to match tool use separator lines
   private readonly TOOL_USE_PATTERN = /─+ TOOL USE ─+/;
@@ -113,6 +120,7 @@ export class FeishuLongConnHandler {
   constructor(config: FeishuLongConnHandlerConfig) {
     this.appId = config.appId;
     this.appSecret = config.appSecret;
+    this.store = config.store;
     this.bindingManager = new BindingManager(config.store);
 
     // Initialize Feishu SDK client for API calls
@@ -211,6 +219,7 @@ export class FeishuLongConnHandler {
    */
   private onResolveActiveThread?: (openId: string, deviceId: string) => Promise<{ threadId: string; threadName: string } | undefined>;
   onRecoverThreads?: (openId: string, deviceId: string, messageId: string, fence?: SelectionFence) => Promise<boolean>;
+  onCommandNotSent?: (messageId: string) => Promise<void>;
 
   /**
    * Set active thread resolution callback
@@ -475,17 +484,18 @@ export class FeishuLongConnHandler {
     threadName?: string,
     sourceDeviceId?: string,
     useActiveThread = false,
-    originalFence?: SelectionFence
-  ): Promise<void> {
+    originalFence?: SelectionFence,
+    fromMenu = false
+  ): Promise<string | void> {
+    const fail = async (message: string) => {
+      if (fromMenu) return message;
+      await this.replyToMessage(messageId, message);
+    };
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
       if (!binding) {
-        await this.replyToMessage(
-          messageId,
-          '❌ You have not bound a device yet, please send /bind <binding-code> to bind first'
-        );
-        return;
+        return fail('❌ You have not bound a device yet, please send /bind <binding-code> to bind first');
       }
 
       // Resolve the destination and selection together.
@@ -493,26 +503,17 @@ export class FeishuLongConnHandler {
         ? binding.devices.find((device: any) => device.deviceId === sourceDeviceId)
         : await this.bindingManager.getActiveDevice(openId);
       if (!activeDevice) {
-        await this.replyToMessage(
-          messageId,
-          '❌ No active device found. Please use /device list to view your devices'
-        );
-        return;
+        return fail('❌ No active device found. Please use /device list to view your devices');
       }
 
       // Check if ConnectionHub is available
       if (!this.connectionHub) {
-        await this.replyToMessage(messageId, '❌ Server error: ConnectionHub not initialized');
-        return;
+        return fail('❌ Server error: ConnectionHub not initialized');
       }
 
       // Check if device is online
       if (!this.connectionHub.isDeviceOnline(activeDevice.deviceId)) {
-        await this.replyToMessage(
-          messageId,
-          `❌ Device ${activeDevice.deviceName} is currently offline, please ensure the device is started and connected to the server`
-        );
-        return;
+        return fail(`❌ Device ${activeDevice.deviceName} is currently offline, please ensure the device is started and connected to the server`);
       }
 
       if (useActiveThread && (content.trim() === '/thread' || content.trim() === '/thread list')
@@ -525,8 +526,7 @@ export class FeishuLongConnHandler {
           threadName = selected?.threadName;
         } catch (error) {
           if (error instanceof Error && error.message.startsWith('Saved thread selection is invalid')) {
-            await this.replyToMessage(messageId, `❌ ${error.message}`);
-            return;
+            return fail(`❌ ${error.message}`);
           }
           throw error;
         }
@@ -534,8 +534,7 @@ export class FeishuLongConnHandler {
 
       const selectionFence = originalFence ?? this.onCaptureSelection?.(openId, activeDevice.deviceId);
       if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
-        await this.replyToMessage(messageId, 'The device or thread selection changed. Reopen /skills.');
-        return;
+        return fail('The device or thread selection changed. Reopen /skills.');
       }
 
       console.log(`[FeishuHandler] Passing through slash command: ${command}${threadId ? ` (threadId=${threadId})` : ''}`);
@@ -547,10 +546,10 @@ export class FeishuLongConnHandler {
       const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`, threadName, undefined, commandMessageId);
       const currentBinding = await this.bindingManager.getUserBinding(openId);
       if (!currentBinding?.devices.some((device: any) => device.deviceId === activeDevice.deviceId)) {
-        throw new Error('Device ownership changed before the command could be sent.');
+        return fail('Device ownership changed before the command could be sent. Reopen /skills.');
       }
       if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
-        throw new Error('This command was superseded or the device changed before it could be sent.');
+        return fail('This command was superseded or the device changed before it could be sent. Reopen /skills.');
       }
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for slash command ${commandMessageId}`);
       if (this.onStartStreaming) {
@@ -558,7 +557,7 @@ export class FeishuLongConnHandler {
       }
 
       if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
-        throw new Error('This command was superseded or the device changed before it could be sent.');
+        return fail('This command was superseded or the device changed before it could be sent. Reopen /skills.');
       }
       // Send slash command to device - the client will execute it locally
       const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
@@ -572,11 +571,11 @@ export class FeishuLongConnHandler {
       });
 
       if (!success) {
-        await this.replyToMessage(messageId, '❌ Command sending failed, please try again later');
+        return fail('❌ Command sending failed, please try again later');
       }
     } catch (error) {
       console.error('Error handling slash command passthrough:', error);
-      await this.replyToMessage(messageId, '❌ Error processing command, please try again later');
+      return fail('❌ Error processing command, please try again later');
     }
   }
 
@@ -916,15 +915,22 @@ export class FeishuLongConnHandler {
     form: unknown): Promise<string> {
     const state = this.commandMenus.get(cardId);
     if (!state || state.openId !== openId || state.expires <= Date.now()) throw new Error('Reopen /skills for a fresh menu.');
+    const validate = () => {
+      if (this.commandMenus.get(cardId) !== state || state.expires <= Date.now()) throw new Error('Reopen /skills for a fresh menu.');
+      if (state.fence && !this.onValidateSelection?.(state.fence)) throw new Error('Selection changed. Reopen /skills.');
+    };
+    validate();
     return state.menu.click(action, form, async elements => {
+      validate();
       const result = await this.client.im.message.patch({ path: { message_id: cardId },
         data: { content: JSON.stringify({ schema: '2.0', header: commandMenuHeader, body: { elements } }) } });
       if (result.code) throw new Error('Menu update failed.');
     }, async content => {
       const [command, operation, target] = content.split(/\s+/);
-      if (state.fence && !this.onValidateSelection?.(state.fence)) throw new Error('Selection changed. Reopen /skills.');
+      validate();
       if (command === '/device' && (operation === 'switch' || operation === 'unbind')) {
         const binding = await this.bindingManager.getUserBinding(openId);
+        validate();
         const epoch = state.deviceEpochs.get(target);
         if (!binding || !epoch || this.bindingManager.getCardThreadEpoch(openId, target) !== epoch
           || !binding.devices.some(device => device.deviceId === target)) throw new Error('Device binding changed. Reopen /skills.');
@@ -939,8 +945,9 @@ export class FeishuLongConnHandler {
       if (!state.deviceId) throw new Error('Bind a device and reopen /skills.');
       if (command === '/thread' && content === '/thread list' && state.topLevel
         && await this.onRecoverThreads?.(openId, state.deviceId, cardId, state.fence)) return;
-      await this.handleSlashCommandPassthrough(openId, cardId, content, command, state.threadId, state.threadName,
-        state.deviceId, false, state.fence);
+      const failure = await this.handleSlashCommandPassthrough(openId, cardId, content, command, state.threadId, state.threadName,
+        state.deviceId, false, state.fence, true);
+      if (failure) throw new Error(failure);
     });
   }
 
@@ -1004,6 +1011,7 @@ Examples:
    * Handle regular command (non-slash commands)
    */
   private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[], fileReference?: { id: string; deviceId: string }, sourceDeviceId?: string, useActiveThread = false, selectionIntent?: SelectionFence): Promise<void> {
+    let unsent: { commandId: string; cardId: string | null } | undefined;
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -1068,6 +1076,7 @@ Examples:
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
       const feishuMessageId = await this.sendStreamingStart(openId, attachments ? '🖼️ Processing image...' : '🤔 Processing...', threadName, undefined, commandMessageId);
+      unsent = { commandId: commandMessageId, cardId: feishuMessageId };
       const currentBinding = await this.bindingManager.getUserBinding(openId);
       if (!currentBinding?.devices.some((device: any) => device.deviceId === activeDevice.deviceId)) {
         throw new Error('Device ownership changed before the command could be sent.');
@@ -1095,15 +1104,18 @@ Examples:
         threadId, // Forward threadId to CLI for per-thread routing
       });
 
-      if (!success) {
-        // Send failed - delete the streaming session and notify user
-        if (this.onStartStreaming) {
-          // We need a way to clean up, for now just send error as new message
-          await this.replyToMessage(messageId, '❌ Command sending failed, please try again later');
-        }
-      }
+      if (!success) throw new Error('Command sending failed.');
     } catch (error) {
       console.error('Error handling regular command:', error);
+      if (unsent) {
+        const notice = 'Command was not sent. Check the device and thread, then resend your message.';
+        try { await this.onCommandNotSent?.(unsent.commandId); }
+        catch (failure) { deliveryEvent('unsent_command_cleanup_failed', safeCardError(failure)); }
+        if (unsent.cardId && await this.finalizeStreamingMessage(unsent.cardId, [{ tag: 'markdown', content: notice }],
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, false, { bare: true })) return;
+        await this.replyToMessage(messageId, notice);
+        return;
+      }
       await this.replyToMessage(messageId, '❌ Error processing command, please try again later');
     }
   }
@@ -1208,8 +1220,12 @@ Examples:
    * Send message to user
    */
   async sendMessage(openId: string, text: string): Promise<boolean> {
+    return !!await this.sendMessageWithReceipt(openId, text);
+  }
+
+  async sendMessageWithReceipt(openId: string, text: string): Promise<string | null> {
     try {
-      await this.client.im.message.create({
+      const receipt = await this.client.im.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
           receive_id: openId,
@@ -1217,10 +1233,12 @@ Examples:
           content: JSON.stringify({ text }),
         },
       });
-      return true;
+      const id = receipt?.data?.message_id;
+      if (receipt?.code || typeof id !== 'string' || !id.trim()) throw new Error('Feishu text delivery was not confirmed.');
+      return id;
     } catch (error: any) {
       deliveryEvent('text_message_failed', safeCardError(error));
-      return false;
+      return null;
     }
   }
 
@@ -1244,7 +1262,7 @@ Examples:
           content,
         },
       }));
-      return result?.data?.message_id || null;
+      return result?.code ? null : result?.data?.message_id || null;
     } catch (error: any) {
       // Actual request failures are already aggregated at the send boundary.
       if (!attempted) deliveryEvent('card_preparation_failed', safeCardError(error));
@@ -1950,11 +1968,11 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; current?: () => Promise<boolean>; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: CardDeliveryOptions): Promise<boolean> {
     return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success, options));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; current?: () => Promise<boolean>; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: CardDeliveryOptions): Promise<boolean> {
     try {
       const shell = this.activityShells.get(messageId);
       if (shell) shell.finishedAt = Date.now();
@@ -1975,9 +1993,8 @@ Examples:
       if (metadataElement) footerElements.push(metadataElement);
       finalElements.push(...elements, ...footerElements);
 
-      if (queueConfirmation) {
-        finalElements.push(...this.createQueueConfirmationElements(queueConfirmation));
-      }
+      const queueElements = queueConfirmation ? this.createQueueConfirmationElements(queueConfirmation) : [];
+      finalElements.push(...queueElements);
 
       // Append thread switch buttons when at least one thread exists
       let threadSwitchElements: any[] = [];
@@ -2013,7 +2030,14 @@ Examples:
       // card IDs before any callback can arrive.
       if (options?.onDelivered) {
         const delivered = this.messageChains.get(messageId);
-        if (delivered && delivered.length > 0) await options.onDelivered([...delivered]);
+        if (delivered?.length) {
+          if (queueElements.length) {
+            const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements, undefined,
+              keepCompletionWithBody, this.inlineFiles?.hasRoot(messageId));
+            const page = chunks.findIndex(chunk => chunk.includes(queueElements.at(-1)));
+            await options.onDelivered([...delivered], delivered[page]);
+          } else await options.onDelivered([...delivered]);
+        }
       }
 
       if (!bare && this.inlineFiles) {
@@ -2277,7 +2301,7 @@ Examples:
         })]);
         if (toast) return { toast };
         void click.then(result => {
-          if (result.type === 'error') return this.sendMessage(openId, result.content);
+          if (result.type === 'error') return this.replyToMessage(data.context.open_message_id, result.content);
         }).catch(() => {});
         return { toast: { type: 'info', content: 'Processing your selection.' } };
       } finally { clearTimeout(timer); }
@@ -2416,10 +2440,11 @@ Examples:
         if (queueActionResult === 'already_processed') {
           return { toast: { type: 'info', content: 'This queue request was already processed' } };
         }
-        return { toast: { type: 'success', content: parsed.action === 'queue_confirm' ? 'Queue confirmation sent' : 'Queue request cancelled' } };
+        if (queueActionResult !== 'sent') throw new Error('Queue action unavailable.');
+        return { toast: { type: 'info', content: parsed.action === 'queue_confirm' ? 'Queue confirmation sent' : 'Queue cancellation sent' } };
       } catch (error) {
         deliveryEvent('card_queue_action_failed', safeCardError(error));
-        return { toast: { type: 'error', content: 'Queue action failed' } };
+        return { toast: { type: 'error', content: 'Queue action failed. Check /queue on the original device.' } };
       }
     }
   }
@@ -2438,80 +2463,76 @@ Examples:
 
   /** Register confirmed work; capable clients request a card when execution starts. */
   async sendQueueActionFromCardAction(openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string): Promise<'sent' | 'already_processed'> {
+    const route = cardMessageId && this.store.getCardThread(cardMessageId);
+    if (!cardMessageId || !route || route.queueId !== queueId || route.openId !== openId || route.threadId !== threadId) {
+      throw new Error('This queue card has expired. Use /queue on the original device.');
+    }
+    const { deviceId, epoch } = route;
+    const fence = this.onCaptureSelection?.(openId, deviceId);
+    const current = () => this.store.getCardThread(cardMessageId) === route
+      && (!fence || (fence.epoch === epoch && this.onValidateSelection?.(fence) === true));
+    const device = await this.bindingManager.getActiveDevice(openId);
+    const hub = this.connectionHub;
+    if (!current() || device?.deviceId !== deviceId || !hub?.isDeviceOnline(deviceId)) {
+      throw new Error('The original device changed or is offline.');
+    }
+
     this.removeExpiredQueueActionStates();
-    const previousAction = this.queueActionStates.get(queueId);
-    if (previousAction) {
+    const key = JSON.stringify([openId, deviceId, epoch, threadId, queueId]);
+    const previous = this.queueActionStates.get(key);
+    if (previous) {
+      await previous.sent;
       return 'already_processed';
     }
 
-    this.queueActionStates.set(queueId, { action, processedAt: Date.now() });
-    const binding = await this.bindingManager.getUserBinding(openId);
-    const activeDevice = binding ? await this.bindingManager.getActiveDevice(openId) : null;
-    if (!activeDevice || !this.connectionHub?.isDeviceOnline(activeDevice.deviceId)) {
-      this.queueActionStates.delete(queueId);
-      throw new Error('No active online device found');
-    }
-
-    const selectionFence = this.onCaptureSelection?.(openId, activeDevice.deviceId);
-    let executionMessageId: string | undefined;
-    if (action === 'confirm') {
-      executionMessageId = uuidv4();
-      const feishuMessageId = this.connectionHub!.supportsQueueStarted(activeDevice.deviceId)
-        ? null
-        : await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...', undefined, undefined, executionMessageId);
-      try {
-        await this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, cardMessageId, undefined, selectionFence);
-      } catch (error) {
-        // No command was sent. A failed durable route must not consume the confirmation.
-        this.queueActionStates.delete(queueId);
-        throw error;
+    const send = async () => {
+      let executionId: string | undefined;
+      if (action === 'confirm') {
+        executionId = uuidv4();
+        const placeholder = hub.supportsQueueStarted(deviceId) ? null
+          : await this.sendStreamingStart(openId, 'Requesting queue confirmation...', undefined, undefined, executionId);
+        await this.onStartStreaming?.(executionId, openId, placeholder, deviceId, threadId, false, cardMessageId, undefined, fence);
       }
-    }
-
-    if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
-      this.queueActionStates.delete(queueId);
-      throw new Error('This queue action was superseded or the device changed before it could be sent.');
-    }
-    const controlMessageId = uuidv4();
-    const suffix = executionMessageId ? ` ${executionMessageId}` : '';
-    // An idle thread can start immediately. Its receipt must not be patched
-    // back to "waiting" after the start event has already arrived.
-    let finishDecision!: () => void;
-    const decision = new Promise<void>((resolve) => { finishDecision = resolve; });
-    if (cardMessageId) this.queueCardDecisions.set(cardMessageId, decision);
-    try {
-      const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
-        type: MessageType.COMMAND,
-        messageId: controlMessageId,
-        timestamp: Date.now(),
-        content: `/queue ${action} ${queueId}${suffix}`,
-        openId,
-        threadId,
+      if (!current()) throw new Error('The device changed before the queue action could be sent.');
+      const suffix = executionId ? ` ${executionId}` : '';
+      const sent = await hub.sendToDevice(deviceId, {
+        type: MessageType.COMMAND, messageId: uuidv4(), timestamp: Date.now(),
+        content: `/queue ${action} ${queueId}${suffix}`, openId, threadId,
       });
-      if (!success) throw new Error('Failed to send queue action to device');
-      if (cardMessageId) await this.updateQueueConfirmationCard(cardMessageId, action);
+      if (!sent) throw new Error('Failed to send queue action to device');
+      await this.updateQueueConfirmationCard(cardMessageId, action, current);
+    };
+    const sent = Promise.resolve().then(send);
+    this.queueActionStates.set(key, { sent, processedAt: Date.now() });
+    // An idle thread can start before the send promise settles.
+    this.queueCardDecisions.set(cardMessageId, sent);
+    try {
+      await sent;
       return 'sent';
     } catch (error) {
-      this.queueActionStates.delete(queueId);
+      this.queueActionStates.delete(key);
       throw error;
     } finally {
-      finishDecision();
-      if (cardMessageId) this.queueCardDecisions.delete(cardMessageId);
+      this.queueCardDecisions.delete(cardMessageId);
     }
   }
 
   /** Leave a historical queue receipt after output moves to a new card. */
-  async markQueueCardStarted(cardMessageId: string): Promise<void> {
+  async markQueueCardStarted(cardMessageId: string, current: () => boolean = () => true): Promise<void> {
     await this.queueCardDecisions.get(cardMessageId);
-    await this.withMessageLock(cardMessageId, () => this.client.im.message.patch({
-      path: { message_id: cardMessageId },
-      data: {
-        content: JSON.stringify({
-          schema: '2.0',
-          body: { elements: [{ tag: 'markdown', content: "<text_tag color='blue'>Running</text_tag>\n\nThe queued message is now running. Follow progress in the new execution card." }] },
-        }),
-      },
-    }));
+    await this.withMessageLock(cardMessageId, async () => {
+      if (!current()) return;
+      const result = await this.client.im.message.patch({
+        path: { message_id: cardMessageId },
+        data: {
+          content: JSON.stringify({
+            schema: '2.0',
+            body: { elements: [{ tag: 'markdown', content: "<text_tag color='blue'>Running</text_tag>\n\nThe queued message is now running. Follow progress in the new execution card." }] },
+          }),
+        },
+      });
+      if (result?.code) throw new Error('Queue start card update failed.');
+    });
   }
 
   private removeExpiredQueueActionStates(): void {
@@ -2523,14 +2544,15 @@ Examples:
     }
   }
 
-  private async updateQueueConfirmationCard(cardMessageId: string, action: 'confirm' | 'cancel'): Promise<void> {
+  private async updateQueueConfirmationCard(cardMessageId: string, action: 'confirm' | 'cancel', current: () => boolean): Promise<void> {
     const content = action === 'confirm'
-      ? "<text_tag color='green'>Queued</text_tag>\n\nThis message was accepted into the thread queue. Use /queue to check its status. If the queue is paused, use /queue continue to resume."
-      : "<text_tag color='grey'>Cancelled</text_tag>\n\nThis message was not added to the thread queue.";
+      ? "Queue confirmation sent. See the CLI response or use /queue to check its status. If the queue is paused, use /queue continue to resume."
+      : "Queue cancellation sent. See the CLI response or use /queue to check its status.";
 
     try {
       await this.withMessageLock(cardMessageId, async () => {
-        await this.client.im.message.patch({
+        if (!current()) return;
+        const result = await this.client.im.message.patch({
           path: { message_id: cardMessageId },
           data: {
             content: JSON.stringify({
@@ -2539,6 +2561,7 @@ Examples:
             }),
           },
         });
+        if (result?.code) throw new Error('Queue confirmation card update failed.');
       });
     } catch (error: any) {
       deliveryEvent('card_queue_update_failed', safeCardError(error));

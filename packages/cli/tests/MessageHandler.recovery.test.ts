@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { ThreadManager } from '../src/thread/ThreadManager';
+import { MAX_THREADS } from '../src/thread/types';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { detachAgySelection } from '../src/executor/agy/AgySessionSelection';
 import { AgyExecutor } from '../src/executor/AgyExecutor';
@@ -68,13 +69,77 @@ describe('managed conversation recovery', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
-  const command = async (content: string, id = content) => handler.handleMessage({ type: 'command', messageId: id, content, threadId });
+  const command = async (content: string, id = content, targetId = threadId) =>
+    handler.handleMessage({ type: 'command', messageId: id, content, threadId: targetId });
   const response = (id: string) => send.mock.calls.map(([value]) => value).find(value => value.type === 'response' && value.messageId === id);
 
   function stubDeletionPreflight(check = vi.fn(async (_id: string, _options: { allowCurrentAgySession: boolean }) => {})) {
     Object.assign(manager, { assertThreadDeletionAllowed: check });
     return check;
   }
+
+  async function expectChat(targetId: string, messageId: string) {
+    const prompt = 'Continue the conversation after ' + messageId;
+    const calls = vi.mocked(executor.execute).mock.calls.length;
+    await command(prompt, messageId, targetId);
+    expect(response(messageId)).toMatchObject({ success: true, threadId: targetId });
+    expect(executor.execute).toHaveBeenCalledTimes(calls + 1);
+    expect(executor.execute).toHaveBeenLastCalledWith(expect.stringContaining(prompt), expect.any(Object));
+  }
+
+  it('continues chat in the same thread after a blocked self-delete, retry and quota rejection', async () => {
+    const target = await manager.createThread('retained', home, 'codex');
+    const sessions = path.join(home, '.remote-cli', 'agy-sessions');
+    await fs.mkdir(sessions, { recursive: true });
+    const pointer = path.join(sessions, target.id + '.json');
+    await fs.writeFile(pointer, JSON.stringify({ id: 'previous-main', transport: 'acp' }));
+    expect(detachAgySelection(pointer)).toBe(true);
+    const archive = pointer + '.detached-acp';
+    const [entry] = await fs.readdir(archive);
+    const evidence = await fs.readFile(path.join(archive, entry));
+    const blocker = pointer + '.allocation-unconfirmed';
+    await fs.writeFile(blocker, '{}');
+    for (let i = 2; i < MAX_THREADS; i++) await manager.createThread('sibling-' + i, home);
+
+    for (const id of ['delete', 'retry-delete']) {
+      await command('/thread delete retained', id, target.id);
+      expect(response(id)).toMatchObject({ success: false, threadId: target.id, error: expect.stringContaining('allocation ownership') });
+    }
+    await expectChat(target.id, 'blocked-delete');
+    await command('/thread new overflow', 'create', target.id);
+    expect(response('create')).toMatchObject({ success: false, threadId: target.id, error: expect.stringContaining(`Maximum ${MAX_THREADS}`) });
+    await expectChat(target.id, 'quota-rejection');
+    expect(manager.getThreadByName('retained')?.id).toBe(target.id);
+    expect(manager.getThreadByName('overflow')).toBeUndefined();
+    expect(await fs.readFile(blocker, 'utf8')).toBe('{}');
+    expect(await fs.readFile(path.join(archive, entry))).toEqual(evidence);
+  });
+
+  it('continues chat in the caller when attachment removal fails after catalog deletion', async () => {
+    const target = await manager.createThread('with-attachment', home, 'codex');
+    (handler as any).config.get.mockImplementation((key: string) => key === 'serverUrl' ? 'https://router.example.com' : undefined);
+    const binding = { type: 'binding_confirm', data: { success: true, capabilities: { fileTransferV1: true } } };
+    await handler.handleMessage(binding);
+    const fileId = 'a'.repeat(64);
+    const pending = { type: 'file_pending', fileId, name: 'fixture.txt', threadId: target.id, openId: 'owner' };
+    await handler.handleMessage(pending);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'file_status', fileId, status: 'admitted', threadId: target.id }));
+    const remove = fs.rm.bind(fs);
+    vi.spyOn(fs, 'rm').mockImplementation(async (file, options) => {
+      if (typeof file === 'string' && path.basename(file) === fileId) throw new Error('Attachment directory is busy');
+      return remove(file, options);
+    });
+
+    await command('/thread delete with-attachment', 'delete');
+    const result = response('delete');
+    expect(result).toMatchObject({ threadId });
+    expect([result.output, result.error].join(' ')).toMatch(/attachment/i);
+    expect((await ThreadManager.initialize(home)).getThread(target.id)).toBeUndefined();
+    await expectChat(threadId, 'attachment-error');
+    await command('/thread delete with-attachment', 'retry-delete');
+    expect(response('retry-delete')).toMatchObject({ success: false, threadId, error: 'Thread "with-attachment" not found.' });
+    await expectChat(threadId, 'missing-thread');
+  });
 
   it('deletes a thread with two detached main sessions and preserves its isolated history through restart', async () => {
     const target = await manager.createThread('archived', home, 'agy');

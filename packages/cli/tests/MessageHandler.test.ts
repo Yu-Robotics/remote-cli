@@ -9,6 +9,7 @@ import os from 'os';
 import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
+import type { ExecuteOptions } from '../src/executor/IExecutor';
 import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import { TaskRecovery } from '../src/client/TaskRecovery';
@@ -1619,6 +1620,76 @@ describe('MessageHandler', () => {
   });
 
   describe('approval cards', () => {
+    describe('after a disconnected foreground turn fails with an unresolved approval', () => {
+      const threadId = 'default-thread-id';
+      const openId = 'owner';
+      const binding = { type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } };
+      const reply = (messageId: string, taskMessageId: string) => ({
+        type: 'approval_response', messageId, taskMessageId, threadId, openId, action: 'approve', timestamp: 1,
+      });
+      const command = (messageId: string, content: string) => ({
+        type: 'command' as const, messageId, content, threadId, openId, timestamp: 1,
+      });
+      const approval = (requestId: string) => ({ requestId, kind: 'command' as const, description: 'Run checks', canRemember: false });
+
+      beforeEach(async () => {
+        ctx.mockConfig.getConfigDir.mockReturnValue(path.join(ctx.workingDirectory, 'config'));
+        const { handler, mockExecutor, mockWsClient } = ctx;
+        mockWsClient.send.mockImplementation(() => mockWsClient.isConnected());
+        await handler.handleMessage(binding as any);
+        mockExecutor.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+          options.onApprovalRequest!(approval('old-request'));
+          mockWsClient.isConnected.mockReturnValue(false);
+          for (const [close] of mockWsClient.onClose.mock.calls) close(1006, 'Connection lost');
+          throw new Error('Synthetic terminal failure');
+        });
+        await handler.handleMessage(command('failed-task', 'Start work'));
+        expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'approval_request', messageId: 'old-request', taskMessageId: 'failed-task', threadId, openId,
+        }));
+        expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'response', messageId: 'failed-task', threadId, success: false, error: 'Synthetic terminal failure',
+        }));
+
+        mockWsClient.send.mockClear();
+        mockWsClient.isConnected.mockReturnValue(true);
+        await handler.handleMessage(binding as any);
+        mockExecutor.respondToApproval = vi.fn((id: string) => id === 'new-request');
+        mockExecutor.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+          options.onApprovalRequest!(approval('new-request'));
+          await handler.handleMessage(reply('old-request', 'failed-task') as any);
+          await handler.handleMessage(reply('new-request', 'next-task') as any);
+          return { success: true };
+        });
+        await handler.handleMessage(command('next-task', 'Continue working'));
+      });
+
+      it('executes the next chat once on the same thread and accepts its fresh approval', () => {
+        expect(ctx.mockExecutor.execute.mock.calls.map(([prompt]: [string]) => prompt)).toEqual(['Start work', 'Continue working']);
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'approval_request', messageId: 'new-request', taskMessageId: 'next-task', threadId, openId,
+        }));
+        expect(ctx.mockExecutor.respondToApproval).toHaveBeenCalledWith('new-request', 'approve');
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'approval_resolved', messageId: 'new-request', status: 'approved', threadId, openId,
+        }));
+        const responses = ctx.mockWsClient.send.mock.calls.filter(([frame]: any[]) => frame.type === 'response');
+        expect(responses).toEqual([
+          [expect.objectContaining({ messageId: 'next-task', threadId, openId, success: true })],
+        ]);
+      });
+
+      it('omits the failed task approval from reconnect replay', () => {
+        expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({
+          type: 'approval_request', messageId: 'old-request', taskMessageId: 'failed-task',
+        }));
+      });
+
+      it('discards a late reply for the failed task before it reaches the executor', () => {
+        expect(ctx.mockExecutor.respondToApproval).not.toHaveBeenCalledWith('old-request', 'approve');
+      });
+    });
+
     it('negotiates cards, keeps replies bound to the original task, and replays pending requests on reconnect', async () => {
       await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
       let options: any;
@@ -1989,6 +2060,83 @@ describe('MessageHandler', () => {
   });
 
   describe('per-thread queue confirmation', () => {
+    it.each([
+      ['bookkeeping', 'original', 'one'], ['preparation', 'original', 'one'],
+      ['bookkeeping', 'new-owner', 'two'], ['preparation', 'original', 'two'],
+    ])('rechecks a confirmed queue after %s when reconnecting as %s epoch %s', async (stage, owner, epoch) => {
+      ctx.mockConfig.get.mockImplementation((key: string) => key === 'deviceId' ? 'device' : undefined);
+      vi.spyOn(ctx.handler as any, 'loadScheduleCatalog').mockResolvedValue(undefined);
+      const register = (openId: string, generation: string) => ctx.handler.handleMessage({
+        type: 'binding_confirm', data: { success: true, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true },
+          scheduleBinding: { deviceId: 'device', openId, epoch: generation } },
+      } as any);
+      await register('original', 'one');
+      let busy = true;
+      ctx.mockThreadPool.isThreadBusy.mockImplementation(() => busy);
+      ctx.mockThreadPool.setThreadBusy.mockImplementation((_id, value) => { busy = value; });
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+      const send = (messageId: string, content: string, openId = 'original') => ctx.handler.handleMessage({
+        type: 'command', messageId, content, openId, timestamp: Date.now(),
+      });
+      await send('pending', 'Original private task');
+      const id = ctx.mockWsClient.send.mock.calls.map(([frame]) => frame).find(frame => frame.queueConfirmation).queueConfirmation.id;
+      const inbox = { initialize: vi.fn(), claim: vi.fn(), moveClaim: vi.fn(), release: vi.fn(), disconnect: vi.fn(),
+        mark: vi.fn(), hasClaim: vi.fn(() => false), destroy: vi.fn() };
+      (ctx.handler as any).fileInbox = inbox;
+      ctx.mockWsClient.send.mockClear();
+      let release!: () => void;
+      const hold = new Promise<void>(resolve => { release = resolve; });
+      const boundary = stage === 'bookkeeping' ? vi.mocked(ctx.mockThreadManager.updateThread)
+        : vi.spyOn((ctx.handler as any).delegation, 'assertExecutionSafe');
+      boundary.mockImplementationOnce(() => hold as any);
+      busy = false;
+      await send('confirm', `/queue confirm ${id} run`);
+      await vi.waitFor(() => expect(boundary).toHaveBeenCalled());
+      ctx.mockWsClient.onClose.mock.calls[0][0]();
+      if (epoch !== 'one') await register(owner, epoch);
+      release();
+      await vi.waitFor(() => expect(busy).toBe(false));
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.trackTask).not.toHaveBeenCalled();
+      expect(JSON.stringify(ctx.mockWsClient.send.mock.calls)).not.toContain('Original private task');
+      if (epoch === 'one') {
+        await register(owner, epoch);
+        await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1));
+        expect(ctx.mockExecutor.execute.mock.calls[0][0]).toContain('Original private task');
+        expect(ctx.mockWsClient.send.mock.calls.filter(([f]) => f.type === 'queue_started')).toHaveLength(1);
+      } else {
+        expect(inbox.release).toHaveBeenCalledWith('run', false);
+        await send('list', '/queue', owner);
+        expect(JSON.stringify(ctx.mockWsClient.send.mock.calls)).not.toContain('Original private task');
+        expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      }
+      await vi.waitFor(() => expect(busy).toBe(false));
+      await send('next', 'Fresh task', owner);
+      expect(ctx.mockExecutor.execute.mock.lastCall[0]).toContain('Fresh task');
+    });
+
+    it('drops legacy queue claims on disconnect and only polls while a native occurrence is active', async () => {
+      ctx.mockThreadPool.isThreadBusy.mockReturnValue(true);
+      ctx.mockExecutor.abortNativeScheduledOccurrence = vi.fn();
+      ctx.mockExecutor.hasActiveNativeScheduledOccurrence = vi.fn().mockReturnValue(false);
+      const send = (id: string, content: string) => ctx.handler.handleMessage({
+        type: 'command', messageId: id, content, openId: 'owner', timestamp: Date.now(),
+      });
+      await send('old', 'Legacy queued task');
+      const id = ctx.mockWsClient.send.mock.calls.map(([frame]) => frame).find(frame => frame.queueConfirmation).queueConfirmation.id;
+      await send('confirm', `/queue confirm ${id} old-run`);
+      expect((ctx.handler as any).nativeQueueWakeups.size).toBe(0);
+      ctx.mockExecutor.hasActiveNativeScheduledOccurrence.mockReturnValue(true);
+      await send('continue', '/queue continue');
+      expect((ctx.handler as any).nativeQueueWakeups.size).toBe(1);
+      ctx.mockWsClient.onClose.mock.calls[0][0]();
+      ctx.mockThreadPool.isThreadBusy.mockReturnValue(false);
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true } } as any);
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+      await send('new', 'Fresh legacy task');
+      expect(ctx.mockExecutor.execute.mock.calls.map(([prompt]) => prompt)).toEqual(['Fresh legacy task']);
+    });
+
     it('discards queued work when /new starts a fresh conversation', async () => {
       (ctx.handler as any).threadQueues.set('default-thread-id', [{
         messageId: 'msg-queued',

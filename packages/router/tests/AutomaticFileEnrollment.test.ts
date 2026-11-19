@@ -319,13 +319,31 @@ describe('durable automatic file approval', () => {
     await expect(service.request('device', proof())).rejects.toThrow('unavailable');
   });
 
-  it('recovers an enrolled key after approval acknowledgement persistence failed without another notification', async () => {
+  it('keeps the enrolled key across restart after an approval receipt write fails', async () => {
     const request = proof(); await service.request('device', request);
     const disk = vi.spyOn(durable, 'durableJson').mockRejectedValueOnce(new Error('synthetic disk error'));
-    await expect(service.click('owner', 'approval-card', action())).rejects.toThrow('saved');
+    expect(await service.click('owner', 'approval-card', action())).toContain('finish saving the approval receipt');
     await service.destroy(); disk.mockRestore(); restart();
     expect(await service.request('device', request)).toBe('already-enrolled');
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['revoked', 'replaced', 'missing', 'rebound'])('refuses receipt retry after the key or binding changes: %s', async change => {
+    const request = proof();
+    await service.request('device', request);
+    vi.spyOn(durable, 'durableJson').mockRejectedValueOnce(new Error('Synthetic receipt failure'));
+    expect(await service.click('owner', 'approval-card', action())).toContain('finish saving the approval receipt');
+    if (change === 'revoked') await auth.revoke('device');
+    if (change === 'replaced') await auth.enroll('device', 'owner', keys().publicKey);
+    if (change === 'missing') vi.spyOn(auth, 'get').mockResolvedValueOnce(undefined);
+    if (change === 'rebound') {
+      await bindings.unbindDevice('owner', 'device');
+      await bindings.bindUser('owner', 'device', 'Rebound device');
+    }
+    await expect(service.click('owner', 'approval-card', action())).rejects.toThrow(/changed/i);
+    expect((await record()).state).toBe('known');
+    expect(approve).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledOnce();
   });
 
   it('refuses an independently replaced or revoked key during approval', async () => {

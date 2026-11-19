@@ -41,7 +41,7 @@ describe('ClaudePersistentExecutor', () => {
   const mockFsModule = fsModule as any;
   let mockChildProcess: any;
 
-  beforeEach(() => {
+  function setUpExecutor() {
     vi.useFakeTimers();
     vi.clearAllMocks();
 
@@ -70,7 +70,8 @@ describe('ClaudePersistentExecutor', () => {
     mockSpawn.mockReturnValue(mockChildProcess);
 
     executor = new ClaudePersistentExecutor(directoryGuard);
-  });
+  }
+  beforeEach(setUpExecutor);
 
   afterEach(async () => {
     if (!vi.isFakeTimers()) vi.useFakeTimers();
@@ -368,6 +369,34 @@ describe('ClaudePersistentExecutor', () => {
       mockChildProcess.emit('exit', 7, null);
       mockChildProcess.emit('close', 7, null);
       await expect(turn).rejects.toThrow(expected);
+    });
+
+    it('releases chat admission on child close and resumes the original session on retry', async () => {
+      const first = executor.execute('initial request');
+      await advanceStartup();
+      emit({ type: 'system', subtype: 'init', session_id: 'original-session' });
+      mockChildProcess.stderr.emit('data', Buffer.from('network failure'));
+      mockChildProcess.emit('exit', 7, null);
+      mockChildProcess.emit('close', 7, null);
+      await expect(first).rejects.toThrow(/network connection error/i);
+      expect(executor.getSessionId()).toBe('original-session');
+      expect(executor.isBusy()).toBe(false);
+
+      mockChildProcess = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(), stderr: new EventEmitter(),
+        stdin: { write: vi.fn(), end: vi.fn() }, kill: vi.fn(), pid: 12346,
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      const retry = executor.execute('please continue');
+      await advanceStartup();
+      const args = mockSpawn.mock.calls.at(-1)[1];
+      expect(args).toContain('--resume');
+      expect(args[args.indexOf('--resume') + 1]).toBe('original-session');
+      expect(mockChildProcess.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line))
+        .filter((packet: any) => packet.type === 'user').map((packet: any) => packet.message.content)).toEqual(['please continue']);
+      assistant('reply', [{ type: 'text', text: 'Recovered answer' }]);
+      emit({ type: 'result', subtype: 'success' });
+      await expect(retry).resolves.toMatchObject({ success: true, output: 'Recovered answer' });
     });
 
     const modelDiagnostics = ['sdk', 'generate_session_title'].map(source => ({ source,

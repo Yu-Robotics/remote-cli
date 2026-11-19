@@ -110,8 +110,7 @@ export class ScheduleCards {
     if (!Number.isSafeInteger(payload.rev) || (payload.rev as number) < 1 || (payload.rev as number) > state.revision) throw new Error('Invalid schedule card revision.');
     if (state.pending) {
       if (payload.op === 'retry' && state.pending.timedOut) {
-        await this.send(state);
-        return 'Retrying confirmation of the original schedule action.';
+        return this.send(state);
       }
       return state.pending.timedOut ? 'The outcome is unknown. Retry confirmation.' : 'Waiting for CLI confirmation.';
     }
@@ -141,11 +140,10 @@ export class ScheduleCards {
       threadId: state.menu.threadId, snapshotId: state.menu.snapshotId, operation: payload.op === 'confirm' ? 'cancel' : 'refresh',
       ...(payload.op === 'confirm' ? { value: state.confirm } : {}), timestamp: Date.now() };
     state.pending = { request, timedOut: false }; state.confirm = undefined; state.notice = undefined;
-    await this.send(state);
-    return 'Waiting for CLI confirmation.';
+    return this.send(state);
   }
 
-  private async send(state: State): Promise<void> {
+  private async send(state: State): Promise<string> {
     const pending = state.pending!;
     clearTimeout(pending.timer);
     pending.timedOut = false;
@@ -162,6 +160,9 @@ export class ScheduleCards {
         clearTimeout(pending.timer); pending.timedOut = true; this.changed(state);
       }
     }
+    if (!this.active(state)) throw new Error('This schedule card has expired. Use /schedule list.');
+    if (state.pending !== pending) return state.notice ?? 'Check the latest schedule card.';
+    return pending.timedOut ? 'The outcome is unknown. Retry confirmation.' : 'Waiting for CLI confirmation.';
   }
 
   async resolve(deviceId: string, message: ScheduleActionResult): Promise<void> {

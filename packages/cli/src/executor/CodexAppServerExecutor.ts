@@ -1512,15 +1512,9 @@ export class CodexAppServerExecutor implements IExecutor {
         break;
       case 'item/agentMessage/delta':
         if (this.activeTurn && typeof params.delta === 'string') {
-          this.activeTurn.output.push(params.delta);
           const itemId = typeof params.itemId === 'string' ? params.itemId : '';
           this.activeTurn.assistantText.set(itemId, (this.activeTurn.assistantText.get(itemId) ?? '') + params.delta);
-          if (goalRun && this.activeTurn.output.reduce((size, part) => size + part.length, 0) > 65_536) {
-            this.activeTurn.output = ['[Earlier native goal output omitted from this diagnostic buffer]\n',
-              this.activeTurn.output.join('').slice(-65_536)];
-          }
-          this.activeTurn.options.onStream?.(params.delta);
-          this.activeTurn.options.onDisplayText?.(params.delta);
+          this.emitAssistantText(this.activeTurn, params.delta);
           const phase = params.itemId ? this.activeTurn.itemPhases.get(params.itemId) : undefined;
           if (phase === 'commentary') {
             this.activityTracker.emitPublicText(params.delta);
@@ -1703,6 +1697,16 @@ export class CodexAppServerExecutor implements IExecutor {
     }
   }
 
+  private emitAssistantText(active: ActiveTurn, text: string): void {
+    active.output.push(text);
+    if (this.goalRun && active.output.reduce((size, part) => size + part.length, 0) > 65_536) {
+      active.output = ['[Earlier native goal output omitted from this diagnostic buffer]\n',
+        active.output.join('').slice(-65_536)];
+    }
+    active.options.onStream?.(text);
+    active.options.onDisplayText?.(text);
+  }
+
   private handleItemCompleted(item: any): void {
     if (this.compactWaiter && item?.type === 'contextCompaction') {
       this.completeCompact({ success: true });
@@ -1720,8 +1724,9 @@ export class CodexAppServerExecutor implements IExecutor {
         const displayed = active.assistantText.get(id) ?? active.assistantText.get('') ?? '';
         if (typeof item.text === 'string' && item.text.startsWith(displayed)) {
           const suffix = item.text.slice(displayed.length);
-          if (suffix) active.options.onDisplayText?.(suffix);
+          if (!active.assistantText.has(id)) active.assistantText.delete('');
           active.assistantText.set(id, item.text);
+          if (suffix) this.emitAssistantText(active, suffix);
         }
         break;
       }

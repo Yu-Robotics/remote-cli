@@ -1,7 +1,7 @@
 import { constants, promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   Thread,
   ThreadStore,
@@ -13,10 +13,34 @@ import type { BackendKey } from '../types/config';
 import { assertAgySelectionResettable, detachAgySelection } from '../executor/agy/AgySessionSelection';
 import { ThreadContextReset } from './ThreadContextReset';
 import { auxiliaryFiles, collectDetachedDeletion, inspectAgyDeletion, observeDetachedDeletion, threadUuid, type DetachedDeletion } from './DetachedAgyDeletion';
-import { replaceAtomicFile } from '../delegation/AtomicFile';
+import { DamagedCatalog, readCatalog, UnreadableCatalog, withCatalogLock, writeCatalog } from '../config/CatalogFile';
 import { syncDirectory } from '../delegation/OwnershipRuntime';
 
-interface Catalog extends ThreadStore { deferredAgyDeletions?: Record<string, DetachedDeletion> }
+interface Catalog extends ThreadStore { deferredAgyDeletions?: Record<string, DetachedDeletion>; recoveryNamespace?: string }
+
+function parseCatalog(text: string, recoveryDirectory?: string): Catalog {
+  const store = JSON.parse(text) as Catalog;
+  const object = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const validId = (id: string) => threadUuid.test(id) && (!recoveryDirectory || id[14] === '8');
+  if (!object(store?.threads) || store.recoveryNamespace !== (recoveryDirectory && path.basename(recoveryDirectory))
+    || (store.deferredAgyDeletions !== undefined && !object(store.deferredAgyDeletions))) {
+    throw new DamagedCatalog('Invalid thread catalog.');
+  }
+  const names = new Set<string>();
+  for (const [id, thread] of Object.entries(store.threads)) {
+    if (!validId(id) || thread?.id !== id || typeof thread.name !== 'string' || !THREAD_NAME_REGEX.test(thread.name)
+      || names.has(thread.name) || typeof thread.workingDirectory !== 'string'
+      || (thread.sessionId !== null && typeof thread.sessionId !== 'string')
+      || !Number.isFinite(thread.createdAt) || !Number.isFinite(thread.lastActiveAt)) throw new DamagedCatalog('Invalid thread identity.');
+    names.add(thread.name);
+  }
+  for (const [id, record] of Object.entries(store.deferredAgyDeletions ?? {})) {
+    if (!validId(id) || record?.threadId !== id || record.version !== 1 || store.threads[id]) {
+      throw new DamagedCatalog('Conflicting or invalid retained thread identity.');
+    }
+  }
+  return store;
+}
 
 /**
  * Manages thread lifecycle: create, list, update, delete.
@@ -31,7 +55,7 @@ export class ThreadManager {
   private sessionsDir: string;
   private persistQueue: Promise<void> = Promise.resolve();
 
-  private constructor(storePath: string, sessionsDir: string, store: Catalog) {
+  private constructor(storePath: string, sessionsDir: string, store: Catalog, readonly recoveryDirectory?: string) {
     this.storePath = storePath;
     this.sessionsDir = sessionsDir;
     this.store = store;
@@ -44,7 +68,8 @@ export class ThreadManager {
    *
    * @param configDir Base config directory (defaults to ~/.remote-cli)
    */
-  static async initialize(configDir?: string, options: { retryDeferredDeletion?: boolean } = {}): Promise<ThreadManager> {
+  static async initialize(configDir?: string, options: { retryDeferredDeletion?: boolean;
+    recovery?: { deviceId: string; serverUrl: string; allowedDirectories: string[]; workingDirectory: () => string | Promise<string> } } = {}): Promise<ThreadManager> {
     const baseDir = configDir
       ? path.join(configDir, '.remote-cli')
       : path.join(process.env.HOME || require('os').homedir(), '.remote-cli');
@@ -55,46 +80,39 @@ export class ThreadManager {
     await fs.mkdir(baseDir, { recursive: true });
     await fs.mkdir(sessionsDir, { recursive: true });
 
-    let store: Catalog = { threads: {} };
-
-    try {
-      const raw = await fs.readFile(storePath, 'utf-8');
-      store = JSON.parse(raw) as Catalog;
-      if (!store?.threads || typeof store.threads !== 'object' || Array.isArray(store.threads)
-        || (store.deferredAgyDeletions !== undefined && (!store.deferredAgyDeletions
-          || typeof store.deferredAgyDeletions !== 'object' || Array.isArray(store.deferredAgyDeletions)))) {
-        throw new Error('Invalid thread catalog; retained thread identities cannot be verified.');
-      }
-      for (const [id, record] of Object.entries(store.deferredAgyDeletions ?? {})) {
-        if (!threadUuid.test(id) || record?.threadId !== id || record.version !== 1 || store.threads[id]) {
-          throw new Error('Conflicting or invalid retained thread identity.');
-        }
-      }
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        throw new Error('The thread catalog (threads.json) could not be parsed. Restore an intact copy from backup and restart the CLI.');
-      }
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-
-    const manager = new ThreadManager(storePath, sessionsDir, store);
-
-    // Ensure default thread always exists
-    if (!Object.values(store.threads).some(thread => thread.name === DEFAULT_THREAD_NAME)) {
-      const sessionId = await manager.readLegacySessionId(baseDir);
+    const open = (file: string, recoveryDirectory?: string) => withCatalogLock(file, async () => {
+      const existing = await readCatalog(file, text => parseCatalog(text, recoveryDirectory));
+      const store: Catalog = existing ?? { threads: {}, ...(recoveryDirectory && { recoveryNamespace: path.basename(recoveryDirectory) }) };
+      const manager = new ThreadManager(file, sessionsDir, store, recoveryDirectory);
+      if (Object.values(store.threads).some(thread => thread.name === DEFAULT_THREAD_NAME)) return manager;
+      const sessionId = existing || recoveryDirectory ? null : await manager.readLegacySessionId(baseDir);
       const defaultThread: Thread = {
         id: manager.newId(store),
         name: DEFAULT_THREAD_NAME,
         sessionId,
-        workingDirectory: process.cwd(),
+        workingDirectory: recoveryDirectory ? await options.recovery!.workingDirectory() : process.cwd(),
         delegationWorkspaceGeneration: 0,
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
       };
-      await manager.commit(next => { next.threads[defaultThread.id] = defaultThread; });
+      if (recoveryDirectory) defaultThread.delegation = false;
+      store.threads[defaultThread.id] = defaultThread;
+      await writeCatalog(file, JSON.stringify(store, null, 2));
+      return manager;
+    });
+    let manager: ThreadManager;
+    try { manager = await open(storePath); }
+    catch (error) {
+      if (!(error instanceof DamagedCatalog || error instanceof UnreadableCatalog) || !options.recovery) throw error;
+      const { deviceId, serverUrl, allowedDirectories } = options.recovery;
+      const owner = createHash('sha256').update(JSON.stringify([deviceId, serverUrl, [...allowedDirectories].sort()])).digest('hex');
+      const directory = path.join(await fs.realpath(baseDir), 'thread-recovery-' + owner);
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      if (await fs.realpath(directory) !== directory) throw new Error('Unsafe thread recovery directory.');
+      manager = await open(path.join(directory, 'threads.json'), directory);
     }
 
-    if (options.retryDeferredDeletion) await manager.retryDeferredDeletion();
+    if (options.retryDeferredDeletion && !manager.recoveryDirectory) await manager.retryDeferredDeletion();
     return manager;
   }
 
@@ -132,6 +150,7 @@ export class ThreadManager {
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
         ...(backend ? { backend } : {}),
+        ...(this.recoveryDirectory && { delegation: false }),
       };
 
       store.threads[thread.id] = thread;
@@ -140,8 +159,12 @@ export class ThreadManager {
   }
 
   private newId(store: Catalog): string {
-    let id = randomUUID();
-    while (store.threads[id] || store.deferredAgyDeletions?.[id]) id = randomUUID();
+    let id: string;
+    do {
+      id = randomUUID();
+      // Historical thread IDs are v4. Keep recovery IDs disjoint even with unknown reservations.
+      if (this.recoveryDirectory) id = id.slice(0, 14) + '8' + id.slice(15);
+    } while (store.threads[id] || store.deferredAgyDeletions?.[id]);
     return id;
   }
 
@@ -149,6 +172,7 @@ export class ThreadManager {
    * Get a thread by ID.
    */
   getThread(id: string): Thread | undefined {
+    if (!Object.hasOwn(this.store.threads, id)) return undefined;
     const thread = this.store.threads[id];
     if (!thread) return undefined;
     const generation = this.contextResets.generation(id, thread.delegationWorkspaceGeneration);
@@ -210,8 +234,8 @@ export class ThreadManager {
     await auxiliaryFiles(await fs.realpath(path.dirname(this.storePath)), root, id);
   }
 
-  private async inspectDeletion(root: string, id: string, allowCurrent = false): Promise<string[]> {
-    const thread = this.store.threads[id];
+  private async inspectDeletion(root: string, id: string, allowCurrent = false, store = this.store): Promise<string[]> {
+    const thread = store.threads[id];
     if (!thread) throw new Error(`Thread not found: ${id}`);
     if (thread.id !== id) throw new Error('Invalid thread catalog identity.');
     if (thread.name === DEFAULT_THREAD_NAME) throw new Error('Cannot delete the default thread.');
@@ -223,7 +247,7 @@ export class ThreadManager {
     await this.commit(async store => {
       const dataDir = await fs.realpath(path.dirname(this.storePath));
       const root = await this.agyRoot();
-      const archived = await this.inspectDeletion(root, id);
+      const archived = await this.inspectDeletion(root, id, false, store);
       const auxiliary = await auxiliaryFiles(dataDir, root, id);
       const pointer = path.join(root, 'agy-sessions', id + '.json');
       if (archived.length) {
@@ -335,20 +359,13 @@ export class ThreadManager {
 
   /** Publish the catalog and its UUID reservations in one atomic replacement. */
   private commit<T>(update: (next: Catalog) => T | Promise<T>): Promise<T> {
-    const result = this.persistQueue.then(async () => {
-      const next = { ...this.store, threads: { ...this.store.threads } };
+    const result = this.persistQueue.then(() => withCatalogLock(this.storePath, async () => {
+      const next = parseCatalog(await fs.readFile(this.storePath, 'utf8'), this.recoveryDirectory);
       const value = await update(next);
-      const temporary = this.storePath + '.' + randomUUID() + '.tmp';
-      const file = await fs.open(temporary, 'wx', 0o600);
-      try {
-        try { await file.writeFile(JSON.stringify(next, null, 2)); await file.sync(); }
-        finally { await file.close(); }
-        await replaceAtomicFile(temporary, this.storePath);
-        this.store = next;
-        syncDirectory(path.dirname(this.storePath));
-      } finally { await fs.rm(temporary, { force: true }); }
+      await writeCatalog(this.storePath, JSON.stringify(next, null, 2));
+      this.store = next;
       return value;
-    });
+    }));
     this.persistQueue = result.then(() => undefined, () => undefined);
     return result;
   }

@@ -1036,9 +1036,12 @@ notifications retain their existing delivery flow; these management cards do not
 add task-start notifications or interactive tool approvals.
 
 Use `/schedule cancel <id>` to cancel future firings. Results from occurrences
-already tracked as running remain deliverable after cancellation. `/abort` controls
-an active foreground request; it does not independently stop an autonomous scheduled
-turn. Aborting a foreground request may also interrupt shared-session work. Cancel
+already tracked as running remain deliverable after cancellation. For a CLI-timed
+run, `/abort` interrupts that occurrence and confirmed chat resumes in the original
+thread. On a verified Claude native host, it can also interrupt the active native
+scheduled batch. The CLI waits for the matching interrupt and terminal evidence
+before reporting a stop. Future recurring jobs and confirmed chat remain available.
+Aborting a foreground request may also interrupt shared-session work. Cancel
 active schedules before clearing the conversation, changing its directory or
 sandbox, or deleting the thread. Merely selecting another thread leaves its
 executor and schedules running; switching backends or recycling the native
@@ -1789,9 +1792,13 @@ From CLI 1.6.255, per-thread AGY environments also link the native login file `~
 
 With a CLI and Router that support queue-start notifications, confirming a message keeps a static queue receipt. When the task actually starts, a new execution card appears at the bottom of the chat with its thread, working directory, task preview, and remaining queue count. Progress and results stay on that new card, and the old receipt points to it. Older clients retain the waiting-card behavior. Queued work remains in memory; this does not make queues persistent across service restarts.
 
-`/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。`/thread list` 和 `/thread new` 不受 thread 忙碌状态影响，因为它们不触碰该 thread 的执行上下文，所以即使 default thread 正在运行，卡片上的 **+ New** 按钮也能正常创建新 thread。当前任务结束后，即使它因模型容量等 backend 错误而失败，也会开始执行第一条已确认的排队消息。如果从队列中取出的任务失败，该 thread 的剩余队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
+`/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。`/thread list` 和 `/thread new` 不受 thread 忙碌状态影响，因为它们不触碰该 thread 的执行上下文，所以即使 default thread 正在运行，卡片上的 **+ New** 按钮也能正常创建新 thread。当前任务结束后，即使它因模型容量等 backend 错误而失败，也会开始执行第一条已确认的排队消息。如果从队列中取出的任务失败，该 thread 的剩余队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
 New messages cannot bypass confirmed work already waiting in a thread queue, even when the executor is idle. They require queue confirmation and join behind the existing work. If a queued task fails, its error card explicitly reports that the remaining queue is paused, with confirmed and awaiting-confirmation counts. Use `/queue continue` to resume in order, or `/queue clear` to discard pending work. A failure with nothing left waiting does not pause future messages. Queue positions count confirmed waiting messages, excluding the running task; the confirmation card shows the count before the new message is added.
+
+Interrupting a scheduled occurrence preserves confirmed chat. Queue buttons apply to the original card, thread, and device binding. If the card has expired, use `/queue` on that device to inspect pending work. After disconnect, the CLI resumes confirmed chat when the Router verifies the same owner and binding. Queued work expires if the binding changes or the Router is too old to verify it on reconnect.
+
+On startup the CLI can restore a damaged configuration or thread catalog from a verified local copy. If the device and a permitted working directory are known but the original thread catalog cannot be recovered, chat starts with separate thread IDs. The CLI preserves the old history. If device configuration cannot be verified, the CLI stays disconnected.
 
 ### Code Change Previews
 
@@ -2134,7 +2141,7 @@ Codex owns the persisted goal and automatic continuations; remote-cli keeps the 
 
 ### 把队列当作显式交接机制
 
-thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队列。只有确认消息确实属于这个 thread 时，才点击加入队列。确认后卡片会变成“已加入”或“已取消”状态，重复点击会被忽略。使用 `/queue` 查看待确认和已确认消息，使用 `/queue clear` 清除它们，使用 `/abort` 中止当前任务并清空该 thread 的队列。
+thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队列。只有确认消息确实属于这个 thread 时，才点击加入队列。使用 `/queue` 查看待确认和已确认消息，使用 `/queue clear` 清除它们。
 
 为了避免上下文混乱，建议等当前任务和队列都处理完后，再发送 `/model`、`/effort`、`/cd`、`/compact`、`/clear` 或 `/new` 等会改变执行上下文的命令。这些命令不会排在普通消息后面执行。
 

@@ -76,7 +76,7 @@ export class DshExecutor extends AcpExecutor {
       backendLabel: 'DeepSeek Harness', sessionNamespace: 'dsh-sessions',
       effortConfigId: 'reasoning_effort', effortAutoValue: '',
       installCommand: 'npm install --global @deepseek-ai/dsh',
-      authCommand: 'dsh web', preserveSessionOnResumeError: true, managedLifecycle: true,
+      authCommand: 'dsh web', managedLifecycle: true,
       clientFactory: (callbacks, cwd) => {
         const wrapped: AcpEventCallbacks = { ...callbacks, onUsage: update => {
           if (Number.isSafeInteger(update.used) && Number.isSafeInteger(update.size)

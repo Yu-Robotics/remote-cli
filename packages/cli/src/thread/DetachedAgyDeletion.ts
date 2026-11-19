@@ -3,12 +3,13 @@ import { constants, promises as fs, type BigIntStats } from 'fs';
 import path from 'path';
 import { bootIdentity } from '../delegation/OwnershipRuntime';
 import { exclusiveLocalVolume } from './AgyDeletionVolume';
+import { agyOwnershipReview, agySavedSelectionDeletion } from '../executor/agy/AgySessionSelection';
 
 export const threadUuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const sessionId = /^[a-zA-Z0-9_-]{1,128}$/;
 const limit = 8192;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-function uncertain(): never { throw new Error('AGY storage ownership is ambiguous; thread data was retained.'); }
+function uncertain(): never { throw new Error(`AGY storage ownership is ambiguous. ${agyOwnershipReview}`); }
 async function stat(file: string) {
   try { return await fs.lstat(file, { bigint: true }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -25,7 +26,9 @@ async function json(file: string) {
   try {
     const opened = await handle.stat({ bigint: true });
     if (opened.dev !== entry.dev || opened.ino !== entry.ino) uncertain();
-    return JSON.parse(await handle.readFile('utf8'));
+    const contents = await handle.readFile('utf8');
+    try { return JSON.parse(contents); }
+    catch { uncertain(); }
   } finally { await handle.close(); }
 }
 
@@ -59,20 +62,20 @@ export async function inspectAgyDeletion(root: string, id: string, allowCurrent 
   await directory(home);
   if (!await directory(sessions)) return [];
   const pointer = path.join(sessions, id + '.json');
-  if (await stat(pointer + '.allocation-unconfirmed')) throw new Error('AGY allocation ownership is unconfirmed; thread state was retained.');
-  if (await stat(pointer + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; thread state was retained.');
+  if (await stat(pointer + '.allocation-unconfirmed')) throw new Error(`AGY allocation ownership is unconfirmed. ${agyOwnershipReview}`);
+  if (await stat(pointer + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed. Retry deletion after the transition finishes. If it stays blocked, ask the device operator to inspect the checkpoint.');
   const archive = pointer + '.detached-acp';
   const detached = await directory(archive);
   const current = await stat(pointer) ? await json(pointer) : undefined;
   if (current !== undefined && (typeof current?.id !== 'string' || !sessionId.test(current.id))) uncertain();
-  if (current?.transport === 'acp' && !allowCurrent) throw new Error('AGY ACP host retirement is unconfirmed; session data was retained.');
   if (await stat(pointer + '.native-schedules')) {
     const owner = await json(pointer + '.native-schedules');
     if (!current || owner?.sessionId !== current.id || typeof owner.hostId !== 'string' || !owner.hostId
-      || owner.retired !== true || detached) {
-      throw new Error('AGY native host retirement is unconfirmed; thread data and schedule ownership were retained.');
+      || owner.retired !== true || detached || (current.transport === 'acp' && !allowCurrent)) {
+      throw new Error(`AGY native host retirement is unconfirmed for deletion. Schedule ownership was retained. ${agyOwnershipReview}`);
     }
   }
+  if (current?.transport === 'acp' && !allowCurrent) throw new Error(agySavedSelectionDeletion);
   if (!detached) return [];
   if (current && current.transport !== 'acp') uncertain();
   for (const name of await fs.readdir(sessions)) {

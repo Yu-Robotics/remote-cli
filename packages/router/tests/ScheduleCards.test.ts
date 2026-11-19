@@ -125,6 +125,21 @@ describe('ScheduleCards', () => {
     f.cards.destroy();
   });
 
+  it('reports an unknown send outcome and the actual receipt when it wins the retry race', async () => {
+    const f = fixture();
+    f.transport.send.mockResolvedValueOnce(false);
+    expect(await f.click('refresh')).toMatch(/outcome is unknown/i);
+    await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('Outcome unknown');
+    f.transport.send.mockImplementationOnce(async () => {
+      await f.result();
+      return true;
+    });
+    expect(await f.click('retry')).toMatch(/status refreshed/i);
+    expect(f.transport.send.mock.calls[1]).toEqual(f.transport.send.mock.calls[0]);
+    f.cards.destroy();
+  });
+
   it('does not claim cancellation after failed cleanup, and exposes a fresh confirmation for retry', async () => {
     const f = fixture();
     await f.click('cancel'); await f.settle(); await f.click('confirm');

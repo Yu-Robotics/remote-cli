@@ -1037,9 +1037,12 @@ notifications retain their existing delivery flow; these management cards do not
 add task-start notifications or interactive tool approvals.
 
 Use `/schedule cancel <id>` to cancel future firings. Results from occurrences
-already tracked as running remain deliverable after cancellation. `/abort` controls
-an active foreground request; it does not independently stop an autonomous scheduled
-turn. Aborting a foreground request may also interrupt shared-session work. Cancel
+already tracked as running remain deliverable after cancellation. For a CLI-timed
+run, `/abort` interrupts that occurrence and confirmed chat resumes in the original
+thread. On a verified Claude native host, it can also interrupt the active native
+scheduled batch. The CLI waits for the matching interrupt and terminal evidence
+before reporting a stop. Future recurring jobs and confirmed chat remain available.
+Aborting a foreground request may also interrupt shared-session work. Cancel
 active schedules before clearing the conversation, changing its directory or
 sandbox, or deleting the thread. Merely selecting another thread leaves its
 executor and schedules running; switching backends or recycling the native
@@ -1830,9 +1833,13 @@ Each thread executes one command at a time because Claude Code, AGY, Codex, Open
 
 With a CLI and Router that support queue-start notifications, confirming a message keeps a static queue receipt. When the task actually starts, a new execution card appears at the bottom of the chat with its thread, working directory, task preview, and remaining queue count. Progress and results stay on that new card, and the old receipt points to it. Older clients retain the waiting-card behavior. Queued work remains in memory; this does not make queues persistent across service restarts.
 
-`/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. `/thread list` and `/thread new` are not blocked by a busy thread because they do not touch its execution context; the **+ New** card button therefore works even while the default thread is running. When the active task finishes, the first confirmed queued message starts even if the active task ended with a backend error such as model capacity. If a task that was taken from the queue fails, the remaining queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
+`/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. When interrupting ordinary foreground work, `/abort` clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. `/thread list` and `/thread new` are not blocked by a busy thread because they do not touch its execution context; the **+ New** card button therefore works even while the default thread is running. When the active task finishes, the first confirmed queued message starts even if the active task ended with a backend error such as model capacity. If a task that was taken from the queue fails, the remaining queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
 New messages cannot bypass confirmed work already waiting in a thread queue, even when the executor is idle. They require queue confirmation and join behind the existing work. If a queued task fails, its error card explicitly reports that the remaining queue is paused, with confirmed and awaiting-confirmation counts. Use `/queue continue` to resume in order, or `/queue clear` to discard pending work. A failure with nothing left waiting does not pause future messages. Queue positions count confirmed waiting messages, excluding the running task; the confirmation card shows the count before the new message is added.
+
+Interrupting a scheduled occurrence preserves confirmed chat. Queue buttons apply to the original card, thread, and device binding. If the card has expired, use `/queue` on that device to inspect pending work. After disconnect, the CLI resumes confirmed chat when the Router verifies the same owner and binding. Queued work expires if the binding changes or the Router is too old to verify it on reconnect.
+
+On startup the CLI can restore a damaged configuration or thread catalog from a verified local copy. If the device and a permitted working directory are known but the original thread catalog cannot be recovered, chat starts with separate thread IDs. The CLI preserves the old history. If device configuration cannot be verified, the CLI stays disconnected.
 
 ### Code Change Previews
 
@@ -2175,7 +2182,7 @@ The first form changes the global backend and clears per-thread overrides. The `
 
 ### Use the queue as an explicit handoff
 
-When a thread is busy, a normal message first creates a confirmation card instead of entering the queue silently. Confirm only when you know the message belongs to that thread. The card changes to an accepted or cancelled state after the decision, and repeated clicks are ignored. Use `/queue` to inspect pending confirmations and confirmed messages, `/queue clear` to discard them, and `/abort` to stop the active task and clear the thread queue.
+When a thread is busy, a normal message first creates a confirmation card instead of entering the queue silently. Confirm only when you know the message belongs to that thread. The card reports when the request has been sent. A CLI start receipt marks the queued message as running. Use `/queue` to inspect pending confirmations and confirmed messages, `/queue clear` to discard them, and `/abort` to stop the current occurrence or foreground task.
 
 For a safer workflow, send context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, `/clear`, or `/new` only after the current task and queue have finished. These commands are intentionally not queued behind ordinary messages.
 
@@ -2227,7 +2234,7 @@ When a task appears stuck, inspect in this order:
 1. Run `/status` to verify the active thread, backend, working directory, and running state.
 2. Run `/context` to inspect session and queue details.
 3. Run `/queue` to distinguish confirmed messages from requests still waiting for card confirmation.
-4. Use `/abort` only when you intend to stop the current task and discard that thread's queue.
+4. Use `/abort` to interrupt the current task. A scheduled occurrence preserves confirmed chat.
 5. On the Router host, inspect `docker compose logs -f router` or the service manager logs.
 
 This separates a backend execution problem from a routing problem, a stale card, or a message that was never confirmed into the queue.

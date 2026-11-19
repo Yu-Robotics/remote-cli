@@ -6,6 +6,11 @@ import { execFile, spawn } from 'child_process';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { createExecutor } from '../../src/executor';
+import { MessageHandler } from '../../src/client/MessageHandler';
+import { WebSocketClient } from '../../src/client/WebSocketClient';
+import { ConfigManager } from '../../src/config/ConfigManager';
+import { ThreadManager } from '../../src/thread/ThreadManager';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 const fixture = vi.hoisted(() => ({ home: '', runtimes: [] as any[], startup: false, close: false, wait: undefined as Promise<void> | undefined,
   promptWait: undefined as Promise<void> | undefined, saved: undefined as Promise<void> | undefined, result: { success: true, output: 'Synthetic output' }, id: 0 }));
 vi.mock('os', async load => { const actual = await load<typeof import('os')>(); return { ...actual, homedir: () => fixture.home, default: { ...actual, homedir: () => fixture.home } }; });
@@ -41,16 +46,20 @@ let executor: AgyExecutor, cwd: string;
 const last = () => fixture.runtimes.at(-1);
 const pointer = () => path.join(fixture.home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
 const make = (extra: object = {}) => new AgyExecutor(new DirectoryGuard([fixture.home]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, ...extra });
-beforeEach(() => {
+function prepareFixture() {
   fixture.home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-acp-executor-')));
   vi.stubEnv('HOME', fixture.home); vi.stubEnv('USERPROFILE', fixture.home);
   cwd = path.join(fixture.home, 'workspace'); fs.mkdirSync(cwd);
   fixture.runtimes = []; fixture.startup = false; fixture.close = false; fixture.wait = undefined; fixture.promptWait = undefined; fixture.saved = undefined;
   fixture.result = { success: true, output: 'Synthetic output' }; fixture.id = 0;
   vi.clearAllMocks(); executor = make();
-});
-afterEach(async () => { fixture.wait = undefined; fixture.close = false; await executor.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(fixture.home, { recursive: true, force: true }); });
+}
+async function disposeFixture() {
+  fixture.wait = undefined; fixture.close = false; await executor.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(fixture.home, { recursive: true, force: true });
+}
 describe('AGY ACP-only executor policies', () => {
+  beforeEach(prepareFixture);
+  afterEach(disposeFixture);
   it('never starts a legacy process on ACP startup failure', async () => {
     fixture.startup = true;
     await expect(executor.execute('task')).rejects.toThrow('startup'); expect(spawn).not.toHaveBeenCalled();
@@ -230,5 +239,75 @@ describe('AGY ACP-only executor policies', () => {
     executor = new AgyExecutor(new DirectoryGuard([fixture.home]), { initialWorkingDirectory: cwd });
     await expect(executor.execute('unscoped')).rejects.toThrow('thread-scoped'); await executor.destroy();
     await expect(executor.execute('closed')).rejects.toThrow('destroyed'); expect(await executor.abort()).toBe(false);
+  });
+});
+
+describe('AGY recovery through Feishu commands', () => {
+  let handler: MessageHandler;
+  beforeEach(prepareFixture);
+  afterEach(async () => {
+    fixture.close = false;
+    try { await handler?.destroy(); } finally { await disposeFixture(); }
+  });
+
+  it('fences a failed backend switch until same-thread clear confirms exit and admits one fresh prompt', async () => {
+    const config = await ConfigManager.initialize();
+    await config.set('executor', { type: 'agy' });
+    const manager = await ThreadManager.initialize(config.getConfigDir());
+    const threadId = (await manager.createThread('recovery', cwd, 'agy')).id;
+    await manager.updateThread(threadId, { delegation: false });
+    const guard = new DirectoryGuard([cwd]);
+    const pool = new ThreadExecutorPool(manager, guard, { type: 'agy' });
+    const socket = new WebSocketClient('ws://127.0.0.1', 'synthetic-device');
+    const frames = vi.spyOn(socket, 'send').mockReturnValue(true);
+    handler = new MessageHandler(socket, pool, manager, guard, config);
+    let sequence = 0;
+    const send = async (content: string, caller = threadId) => {
+      const messageId = `recovery-${++sequence}`;
+      await handler.handleMessage({ type: 'command', messageId, threadId: caller, openId: 'synthetic-owner',
+        content, isSlashCommand: content.startsWith('/'), timestamp: Date.now() });
+      const responses = frames.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'response' && frame.messageId === messageId);
+      expect(responses).toHaveLength(1);
+      expect(responses[0].threadId).toBe(caller);
+      return responses[0];
+    };
+    expect(await send('Before switch')).toMatchObject({ success: true });
+    const old = last();
+    expect(old.prompts).toHaveLength(1);
+    expect(old.prompts[0]).toContain('Before switch');
+    const originalPrompt = old.prompts[0];
+    const history = path.join(old.options.home, 'original-history');
+    fs.writeFileSync(history, 'Synthetic native history');
+    const selection = path.join(config.getConfigDir(), 'agy-sessions', threadId + '.json');
+    const originalSelection = fs.readFileSync(selection);
+    expect(JSON.parse(originalSelection.toString()).id).toBe(old.sessionId);
+
+    vi.mocked(execFile).mockImplementation(((cmd: string, _args: string[], _options: unknown, done: (error: Error | null) => void) => {
+      done(cmd === 'codex' ? null : new Error('Synthetic unavailable backend'));
+    }) as typeof execFile);
+    fixture.close = true;
+    expect(await send('/backend 1 @')).toMatchObject({ success: false, error: expect.stringContaining('retry /clear in the original thread') });
+    expect(pool.getBackendKey(threadId)).toBe('agy');
+    for (const caller of [threadId, manager.getDefaultThread().id]) {
+      expect(await send('/thread delete recovery', caller)).toMatchObject({ success: false, error: expect.stringContaining('retry /clear in that thread') });
+    }
+    expect(manager.getThreadByName('recovery')?.id).toBe(threadId);
+    expect(await send('/clear')).toMatchObject({ success: false, error: expect.stringContaining('AGY host retirement is unconfirmed') });
+    expect(await send('While retirement is unresolved')).toMatchObject({ success: false, error: expect.stringContaining('incomplete') });
+    expect(old.closed).toBe(false);
+    expect(fs.readFileSync(selection)).toEqual(originalSelection);
+    expect(old.prompts).toEqual([originalPrompt]);
+    expect(fixture.runtimes).toHaveLength(1);
+
+    fixture.close = false;
+    expect(await send('/clear')).toMatchObject({ success: true });
+    expect(old.closed).toBe(true);
+    expect(manager.contextResets.isPending(threadId)).toBe(false);
+    expect(await send('After confirmed retirement')).toMatchObject({ success: true });
+    expect(fixture.runtimes).toHaveLength(2);
+    expect(last().sessionId).not.toBe(old.sessionId);
+    expect(last().prompts).toEqual([expect.stringContaining('After confirmed retirement')]);
+    expect(old.prompts).toEqual([originalPrompt]);
+    expect(fs.readFileSync(history, 'utf8')).toBe('Synthetic native history');
   });
 });

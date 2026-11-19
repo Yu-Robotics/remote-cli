@@ -85,7 +85,7 @@ export class ConnectionHub {
   async sendToDevice(deviceId: string, message: any): Promise<boolean> {
     const ws = this.connections.get(deviceId);
 
-    if (!ws) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return false;
     }
 

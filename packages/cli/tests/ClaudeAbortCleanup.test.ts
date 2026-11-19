@@ -7,6 +7,7 @@ import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { spawn } from 'child_process';
 
@@ -482,12 +483,10 @@ describe('Claude abort cleanup ownership', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('keeps autonomous-only abort idle and never starts a host for expired native management', async () => {
+  it('keeps idle abort and expired native management from starting a host', async () => {
     const native = executor(), raw = native as any;
     const stop = vi.spyOn(raw, 'stopProcess');
-    raw.sessionSchedules = { busy: true, processClosed: vi.fn() };
     expect(await native.abort()).toBe(false); expect(stop).not.toHaveBeenCalled();
-    raw.sessionSchedules = undefined;
     const start = vi.spyOn(raw, 'startProcess');
     expect((await native.execute('Expired cleanup', { nativeScheduleManagement: true, nativeScheduleCurrent: () => false })).success).toBe(false);
     expect(start).not.toHaveBeenCalled();
@@ -537,6 +536,154 @@ async function retainedFixture() {
   return { main, raw, child, frames, frame, terminal, hook, inventory,
     holdInterrupt: (value: boolean) => { holdInterrupt = value; }, holdManagement: (value: boolean) => { holdManagement = value; } };
 }
+
+async function wakeFixture() {
+  const f = await retainedFixture();
+  f.holdInterrupt(true);
+  const session_id = 'synthetic-native-session';
+  const start = (id: string = randomUUID()) => {
+    f.frame({ type: 'command_lifecycle', command_uuid: id, session_id, state: 'started', wakeup_source: 'schedule_wakeup' });
+    return id;
+  };
+  const end = (id: string, state = 'cancelled') => f.frame({ type: 'command_lifecycle', command_uuid: id, session_id, state });
+  const result = (is_error = true) => f.frame({ type: 'result', uuid: randomUUID(), session_id, is_error,
+    terminal_reason: is_error ? 'interrupted' : 'completed' });
+  const packets = () => f.frames.filter(row => row.request?.subtype === 'interrupt');
+  const reply = (turn: string, request_id = packets().at(-1).request_id) => {
+    f.frame({ type: 'control_response', response: { subtype: 'success', request_id, response: { turn, still_queued: [] } } });
+  };
+  return { ...f, start, end, result, packets, reply };
+}
+
+describe('Claude autonomous scheduled interruption', () => {
+  it.each(['receipt first', 'receipt last'])('joins every batch member and runs the queued prompt once with %s', async order => {
+    const f = await wakeFixture();
+    const first = f.start(), second = f.start();
+    const next = f.main.execute('Queued successor');
+    const stopping = f.main.abortNativeScheduledOccurrence()!;
+    expect(f.main.abort()).toBe(stopping);
+    expect(f.packets().map(row => row.request)).toEqual([{ subtype: 'interrupt', for_user_message_uuids: [first, second] }]);
+    if (order === 'receipt first') f.reply('stopped');
+    f.result(); f.end(first); f.end(randomUUID());
+    expect(f.main.hasPendingCancellation()).toBe(true);
+    f.end(second);
+    if (order === 'receipt last') {
+      f.reply('stopped', 'unrelated-request'); await Promise.resolve();
+      expect(f.main.hasPendingCancellation()).toBe(true);
+      expect(f.frames.some(row => row.type === 'user')).toBe(false);
+      f.reply('stopped');
+    }
+    expect(await stopping).toBe(true);
+    const inputs = f.frames.filter(row => row.type === 'user');
+    expect(inputs.map(input => input.message.content)).toEqual(['Queued successor']);
+    expect(f.main.abortNativeScheduledOccurrence()).toBeUndefined();
+    f.terminal(inputs[0].uuid); expect((await next).success).toBe(true);
+    expect(f.child.stdin.end).not.toHaveBeenCalled(); expect(f.child.kill).not.toHaveBeenCalled();
+  });
+
+  it('joins a timed-out request after the next wake starts without writing another interrupt', async () => {
+    vi.useFakeTimers(); const f = await wakeFixture();
+    const id = f.start();
+    const failure = expect(f.main.abort()).rejects.toThrow('unconfirmed');
+    await vi.advanceTimersByTimeAsync(15001); await failure;
+    f.result(); f.end(id);
+    const later = f.start();
+    const retry = f.main.abortNativeScheduledOccurrence();
+    f.reply('stopped');
+    expect(await retry).toBe(true);
+    expect(f.packets()).toHaveLength(1);
+    expect(f.main.isBusy()).toBe(true);
+    f.result(false); f.end(later, 'completed');
+    expect(f.main.isBusy()).toBe(false); expect(f.main.hasPendingCancellation()).toBe(false);
+  });
+
+  it.each(['idle', 'spared', 'stopped'])('never claims interruption of a naturally completed wake with a %s receipt', async turn => {
+    const f = await wakeFixture(), id = f.start();
+    const stopping = f.main.abort();
+    f.end(id, 'completed'); f.result(false); f.reply(turn);
+    expect(await stopping).toBe(false);
+    expect(f.main.isBusy()).toBe(false); expect(f.packets()).toHaveLength(1);
+  });
+
+  it('refuses a pending setting and permits an explicit retry after a native rejection', async () => {
+    const f = await wakeFixture();
+    const change = f.main.setModel('synthetic-model');
+    await vi.waitFor(() => expect(f.frames.some(row => row.request?.subtype === 'set_model')).toBe(true));
+    const id = f.start();
+    await expect(f.main.abortNativeScheduledOccurrence()).rejects.toThrow('model change is pending');
+    expect(f.packets()).toHaveLength(0);
+    const modelRequest = f.frames.find(row => row.request?.subtype === 'set_model');
+    f.frame({ type: 'control_response', response: { subtype: 'success', request_id: modelRequest.request_id, response: { model: 'synthetic-model' } } });
+    expect((await change).success).toBe(true);
+    const rejected = expect(f.main.abort()).rejects.toThrow('rejected');
+    f.frame({ type: 'control_response', response: { subtype: 'error', request_id: f.packets()[0].request_id } });
+    await rejected;
+    const retry = f.main.abortNativeScheduledOccurrence();
+    expect(f.packets().map(row => row.request.for_user_message_uuids)).toEqual([[id], [id]]);
+    f.reply('stopped'); f.end(id); f.result();
+    expect(await retry).toBe(true);
+  });
+
+  it('keeps the recurring definition and admits its next prompt after the cancelled occurrence', async () => {
+    const f = await wakeFixture(), event = vi.fn();
+    const foreground = f.main.execute('Create recurring fixture');
+    await Promise.resolve();
+    const create = f.main.withNativeScheduleOperation('fixture-create', () => true, () => f.raw.schedules().create({
+      id: 'fixture-job', prompt: 'Scheduled fixture', cwd: root,
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    }, event, undefined, 'UTC'), true);
+    const action = f.main.nativeScheduleAction('fixture-create')!;
+    f.hook(action, 'creation');
+    f.frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'creation',
+      content: 'Scheduled recurring job fixture-job (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).' }] } });
+    await create;
+    f.terminal(f.frames.find(row => row.type === 'user').uuid); await foreground;
+    const submit = () => {
+      const id = f.start();
+      f.frame({ type: 'control_request', request_id: id, request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+        input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: action.input.prompt } } });
+      expect(f.frames.at(-1).response.response).toEqual({});
+      return id;
+    };
+    const first = submit(), stopping = f.main.abort();
+    f.reply('stopped'); f.end(first); f.result();
+    expect(await stopping).toBe(true);
+    const next = submit(); f.result(false); f.end(next, 'completed');
+    expect(event.mock.calls.map(([value]) => value)).toEqual([
+      { type: 'started', occurrenceId: first },
+      expect.objectContaining({ type: 'completed', occurrenceId: first, success: false }),
+      { type: 'started', occurrenceId: next },
+      expect.objectContaining({ type: 'completed', occurrenceId: next, success: true }),
+    ]);
+    expect(f.frames.filter(row => row.type === 'user')).toHaveLength(1);
+    expect(f.child.stdin.end).not.toHaveBeenCalled();
+  });
+
+  it.each(['malformed', 'oversized'])('rejects a %s target without writing an unscoped interrupt', async variant => {
+    const f = await wakeFixture();
+    if (variant === 'malformed') f.start('not-a-uuid');
+    else for (let n = 0; n < 9; n++) f.start();
+    await expect(f.main.abort()).rejects.toThrow('safely target');
+    expect(f.packets()).toHaveLength(0);
+    expect(f.child.kill).not.toHaveBeenCalled();
+  });
+
+  it.each(['still queued', 'foreground result'])('does not confirm a stop from contradictory %s evidence', async variant => {
+    const f = await wakeFixture(), id = f.start();
+    const failed = expect(f.main.abort()).rejects.toThrow('unconfirmed');
+    if (variant === 'still queued') {
+      f.frame({ type: 'control_response', response: { subtype: 'success', request_id: f.packets()[0].request_id,
+        response: { turn: 'stopped', still_queued: [id] } } });
+      f.result();
+    } else {
+      f.reply('stopped');
+      f.frame({ type: 'result', session_id: 'synthetic-native-session', user_message_uuid: randomUUID(), is_error: true });
+    }
+    f.end(id); await failed;
+    expect(f.main.hasPendingCancellation()).toBe(false);
+    expect(f.child.kill).not.toHaveBeenCalled();
+  });
+});
 
 describe('Claude retained cancellation integration', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
@@ -664,7 +811,7 @@ describe('Claude retained cancellation integration', () => {
     expect(await f.main.abort()).toBe(true); await foreground;
     expect(f.frames.filter(row => row.request?.subtype === 'stop_task').map(row => row.request.task_id)).toEqual(['owned-task']);
   });
-  it('does not interrupt a naturally completed turn or an autonomous-only turn', async () => {
+  it('does not interrupt a naturally completed turn or a wake without its original session identity', async () => {
     const f = await retainedFixture(); const active = f.main.execute('Natural completion'); await Promise.resolve();
     const id = f.frames.filter(row => row.type === 'user').at(-1).uuid;
     // Abort is published before its microtask runs; the native terminal wins the race.

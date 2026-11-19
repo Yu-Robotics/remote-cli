@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.272] - 2026-11-19
+
+### Fixed
+- Preserve confirmed Feishu queue entries when interrupting a scheduled turn, and resume the original thread after the interruption settles.
+- Distinguish an occurrence cancelled before dispatch, a native interruption, and a turn that completed while cancellation was pending. Preserve future recurring runs.
+- Release stale Claude busy and approval state, retain ACP session selections across transient load errors, and allow AGY reset to finish after native shutdown is confirmed.
+- Restore verified local catalogs after corruption. When only thread identities cannot be recovered, start chat in an isolated catalog for the verified device and keep the old history.
+- Retry undelivered results without rerunning the prompt, bind queue actions to the original card and device binding, and surface delayed menu failures on the originating card.
+- Require a Feishu text delivery receipt, route direct replies to the originating thread, and retire Processing cards when dispatch fails.
+- Revalidate queue ownership before backend entry. Resume confirmed chat on reconnect with the same binding and expire stale work after rebind or an unverifiable legacy disconnect.
+- Let chat continue after a saved attachment disappears. Report pending cleanup after a committed thread deletion and permit file enrollment receipt retries on the original card.
+- Deliver completed-only Codex answers to schedule follow-ups and identify retained worker changes when delegated work and its coordinator follow-up both fail.
+
 ## [1.6.271] - 2026-11-19
 
 ### Fixed

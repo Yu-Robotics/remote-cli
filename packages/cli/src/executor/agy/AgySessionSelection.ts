@@ -5,6 +5,9 @@ import { isWorkerLaneExecutorId, type DelegatedWorkerLane } from '../../delegati
 import { createHash } from 'crypto';
 import { syncDirectory } from '../../delegation/OwnershipRuntime';
 
+export const agyOwnershipReview = 'Keep this thread and ask the device operator to inspect AGY ownership. Use /thread list to choose another thread if needed.';
+export const agySavedSelectionDeletion = 'AGY ACP host retirement is unconfirmed. To delete the thread, run /clear in the target thread to reset its conversation and archive its AGY selection, then retry /thread delete <name>.';
+
 /** Preflight for an explicit pointer reset, including when AGY is inactive.
  * Missing ownership is never permission to resume or erase native history. */
 function present(file: string): boolean {

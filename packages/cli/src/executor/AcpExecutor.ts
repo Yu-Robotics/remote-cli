@@ -34,8 +34,6 @@ export interface AcpExecutorOptions {
   /** Override session pointer storage for isolated tests. */
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
-  /** Opt-in for transports that must not replace a session after arbitrary resume failures. */
-  preserveSessionOnResumeError?: boolean;
   /** Opt-in to track and cancel a transport even before session initialization finishes. */
   managedLifecycle?: boolean;
   /** Native approval modes, for backends whose tool policy is separate from ACP permissions. */
@@ -783,7 +781,7 @@ export abstract class AcpExecutor implements IExecutor {
           assertCurrent();
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
             .test(error instanceof Error ? error.message : String(error));
-          if (this.requireOriginalSession || selection || ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession)) throw error;
+          if (this.requireOriginalSession || selection || !missingSession) throw error;
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         } finally { this.replayingSession = false; }

@@ -132,7 +132,6 @@ export class ZCodeExecutor extends AcpExecutor {
       delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory,
-      preserveSessionOnResumeError: managed,
       managedLifecycle: managed,
     };
     super(directoryGuard, baseOptions);

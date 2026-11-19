@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { Config, DEFAULT_CONFIG } from '../types/config';
+import { DamagedCatalog, readCatalog, withCatalogLock, writeCatalog } from './CatalogFile';
 
 /**
  * Configuration Manager
@@ -35,34 +36,29 @@ export class ConfigManager {
       await fs.mkdir(configDir, { recursive: true });
     }
 
-    // Read or create config file
-    let config: Config;
-    let migration: ReturnType<typeof ConfigManager.migrateDeprecatedExecutorConfig> | undefined;
-    try {
-      const content = await fs.readFile(configFile, 'utf-8');
-      migration = ConfigManager.migrateDeprecatedExecutorConfig(JSON.parse(content));
-      // Merge with defaults for any missing fields
-      config = ConfigManager.mergeWithDefaults(migration.config);
-      // Validate config structure
-      if (!ConfigManager.isValidConfig(config)) {
-        throw new Error('Invalid config structure');
+    return withCatalogLock(configFile, async () => {
+      const loaded = await readCatalog(configFile, ConfigManager.parse);
+      const config = loaded?.config ?? structuredClone(DEFAULT_CONFIG);
+      if (!loaded) await writeCatalog(configFile, JSON.stringify(config, null, 2));
+      else if (loaded.changed) {
+        try {
+          await writeCatalog(configFile, JSON.stringify(config, null, 2));
+          for (const warning of loaded.warnings) console.warn(warning);
+        } catch (error) {
+          console.warn('[Config] Failed to persist executor configuration migration:', error instanceof Error ? error.message : error);
+        }
       }
-    } catch (error) {
-      // Config file does not exist or is invalid, use default config
-      config = { ...DEFAULT_CONFIG };
-      await fs.writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
-    }
+      return new ConfigManager(config, configDir, configFile);
+    });
+  }
 
-    if (migration?.changed) {
-      try {
-        await fs.writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
-        for (const warning of migration.warnings) console.warn(warning);
-      } catch (error) {
-        console.warn('[Config] Failed to persist executor configuration migration:', error instanceof Error ? error.message : error);
-      }
-    }
-
-    return new ConfigManager(config, configDir, configFile);
+  private static parse(content: string) {
+    const raw = JSON.parse(content);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new DamagedCatalog('Invalid configuration.');
+    const migration = ConfigManager.migrateDeprecatedExecutorConfig(raw);
+    const config = ConfigManager.mergeWithDefaults(migration.config);
+    if (!ConfigManager.isValidConfig(config)) throw new DamagedCatalog('Invalid configuration.');
+    return { ...migration, config };
   }
 
   /** Migrate executor settings whose implementations have been removed. */
@@ -167,6 +163,11 @@ export class ConfigManager {
     return this.configDir;
   }
 
+  /** Isolate runtime catalogs while keeping device configuration and grants authoritative. */
+  forThreadRecovery(directory: string): ConfigManager {
+    return new ConfigManager(this.getConfig(), directory, this.configFile);
+  }
+
   /**
    * Get configuration file path
    * @returns Configuration file path
@@ -178,27 +179,22 @@ export class ConfigManager {
   /**
    * Save configuration to file
    */
-  private async saveConfig(replaceDelegation = false): Promise<void> {
-    const saved: Record<string, unknown> = { ...this.config };
-    if (!replaceDelegation) {
-      // Runtime instances may outlive external grant edits. An unrelated save
-      // must neither erase a new grant nor resurrect one that was revoked.
+  private async saveConfig(update: (current: Config) => Config): Promise<void> {
+    await withCatalogLock(this.configFile, async () => {
       let content: string;
-      try { content = await fs.readFile(this.configFile, 'utf-8'); }
+      try { content = await fs.readFile(this.configFile, 'utf8'); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Unable to preserve shared-symlink policy while saving configuration.');
         content = '{}';
       }
-      let current: Record<string, unknown>;
-      try {
-        const parsed: unknown = JSON.parse(content);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-        current = parsed as Record<string, unknown>;
-      } catch { throw new Error('Invalid configuration; shared-symlink policy was not overwritten.'); }
-      if (Object.hasOwn(current, 'delegation')) saved.delegation = current.delegation;
-      else delete saved.delegation;
-    }
-    await fs.writeFile(this.configFile, JSON.stringify(saved, null, 2), 'utf-8');
+      let current: Config;
+      try { current = ConfigManager.parse(content).config; }
+      catch { throw new Error('Invalid configuration; shared-symlink policy was not overwritten.'); }
+      const next = update(current);
+      await writeCatalog(this.configFile, JSON.stringify(next, null, 2));
+      // An unrelated write must not hot-switch an active client's identity or policy.
+      this.config = update(this.getConfig());
+    });
   }
 
   /**
@@ -217,10 +213,10 @@ export class ConfigManager {
     }
 
     // Check if already exists
-    if (!this.config.security.allowedDirectories.includes(directory)) {
-      this.config.security.allowedDirectories.push(directory);
-      await this.saveConfig();
-    }
+    await this.saveConfig(config => {
+      if (!config.security.allowedDirectories.includes(directory)) config.security.allowedDirectories.push(directory);
+      return config;
+    });
   }
 
   /**
@@ -228,10 +224,10 @@ export class ConfigManager {
    * @param directory Directory path
    */
   async removeAllowedDirectory(directory: string): Promise<void> {
-    this.config.security.allowedDirectories = this.config.security.allowedDirectories.filter(
-      d => d !== directory
-    );
-    await this.saveConfig();
+    await this.saveConfig(config => {
+      config.security.allowedDirectories = config.security.allowedDirectories.filter(d => d !== directory);
+      return config;
+    });
   }
 
   /**
@@ -239,10 +235,10 @@ export class ConfigManager {
    * @param command Command pattern
    */
   async addDeniedCommand(command: string): Promise<void> {
-    if (!this.config.security.deniedCommands.includes(command)) {
-      this.config.security.deniedCommands.push(command);
-      await this.saveConfig();
-    }
+    await this.saveConfig(config => {
+      if (!config.security.deniedCommands.includes(command)) config.security.deniedCommands.push(command);
+      return config;
+    });
   }
 
   /**
@@ -250,10 +246,10 @@ export class ConfigManager {
    * @param command Command pattern
    */
   async removeDeniedCommand(command: string): Promise<void> {
-    this.config.security.deniedCommands = this.config.security.deniedCommands.filter(
-      c => c !== command
-    );
-    await this.saveConfig();
+    await this.saveConfig(config => {
+      config.security.deniedCommands = config.security.deniedCommands.filter(c => c !== command);
+      return config;
+    });
   }
 
   /**
@@ -266,8 +262,7 @@ export class ConfigManager {
       throw new Error('Invalid server URL: must start with ws:// or wss://');
     }
 
-    this.config.server.url = url;
-    await this.saveConfig();
+    await this.set('server.url', url);
   }
 
   /**
@@ -279,16 +274,14 @@ export class ConfigManager {
       throw new Error('Max concurrent tasks must be at least 1');
     }
 
-    this.config.security.maxConcurrentTasks = max;
-    await this.saveConfig();
+    await this.set('security.maxConcurrentTasks', max);
   }
 
   /**
    * Reset configuration to defaults
    */
   async resetToDefaults(): Promise<void> {
-    this.config = { ...DEFAULT_CONFIG };
-    await this.saveConfig(true);
+    await this.saveConfig(() => structuredClone(DEFAULT_CONFIG));
   }
 
   /**
@@ -311,8 +304,7 @@ export class ConfigManager {
         throw new Error('Invalid config structure');
       }
 
-      this.config = config;
-      await this.saveConfig(true);
+      await this.saveConfig(() => config);
     } catch (error) {
       if (error instanceof SyntaxError) {
         throw new Error('Invalid JSON format');
@@ -336,6 +328,7 @@ export class ConfigManager {
    * @returns Configuration value
    */
   get(keyPath: string): any {
+    if (this.configDir !== path.dirname(this.configFile) && keyPath === 'sessionSharing') return { enabled: false };
     const keys = keyPath.split('.');
     let value: any = this.config;
 
@@ -362,21 +355,16 @@ export class ConfigManager {
 
     const keys = keyPath.split('.');
     const lastKey = keys.pop()!;
-    let target: any = this.config;
-
-    // Navigate to target object
-    for (const key of keys) {
-      if (!(key in target) || typeof target[key] !== 'object' || target[key] === null) {
-        target[key] = {};
+    if ([...keys, lastKey].some(key => ['__proto__', 'prototype', 'constructor'].includes(key))) throw new Error('Invalid configuration key');
+    await this.saveConfig(config => {
+      let target: any = config;
+      for (const key of keys) {
+        if (!Object.hasOwn(target, key) || typeof target[key] !== 'object' || target[key] === null) target[key] = {};
+        target = target[key];
       }
-      target = target[key];
-    }
-
-    // Set value
-    target[lastKey] = value;
-
-    // Save configuration
-    await this.saveConfig(keyPath === 'delegation' || keyPath.startsWith('delegation.'));
+      target[lastKey] = value;
+      return config;
+    });
   }
 
   /**

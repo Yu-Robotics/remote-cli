@@ -21,6 +21,7 @@ interface Pending {
   entry: Entry; abort: AbortController; done: Promise<void>; finish: () => void;
   downloading?: boolean; timer?: NodeJS.Timeout;
   admission?: Promise<void>; task?: Promise<void>; writes?: Promise<void>; reporting?: Promise<void>; removing?: boolean;
+  removal?: Promise<void>;
   sequence: number;
 }
 export interface FileInboxDependencies {
@@ -298,18 +299,23 @@ export class FileInbox {
           if (![...this.claims.values()].some(ids => ids.includes(entry.id))) entry.consumed = false;
           throw error;
         }
-        // Select the failure and queue its completion without another await:
-        // release cannot interleave a cancellation between these decisions.
-        // A failed write or crash before completion commits can repeat the
-        // error on restart. Neither this marker nor prepare is a delivery ACK.
-        entry.failureReported = true;
-        void this.persist(pending).catch(() => {});
       }
-      throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
+      return this.rejectUnavailable(pending);
     });
     pending.reporting = operation;
     void operation.finally(() => { if (pending.reporting === operation) pending.reporting = undefined; }).catch(() => {});
     return operation;
+  }
+
+  private rejectUnavailable(pending: Pending): never {
+    const entry = pending.entry;
+    // The claim is current and the error is selected. A failed completion
+    // write can repeat the warning after restart, but cannot block live chat.
+    if (entry.failureReported !== true) {
+      entry.failureReported = true;
+      void this.persist(pending).catch(() => {});
+    }
+    throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
   }
 
   async prepare(messageId: string): Promise<string> {
@@ -329,7 +335,19 @@ export class FileInbox {
         return this.reportFailure(pending, assertClaim);
       }
       const filename = this.original(entry);
-      const stat = await fs.lstat(filename);
+      let stat;
+      try { stat = await fs.lstat(filename); }
+      catch (error) {
+        assertClaim();
+        this.assertContext(entry);
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error('Could not inspect the saved attachment. Please retry or use /files clear.');
+        }
+        entry.state = 'failed';
+        entry.detail = 'Saved original is missing. Please upload the file again.';
+        this.status(pending);
+        return this.rejectUnavailable(pending);
+      }
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== entry.size) throw new Error('Saved attachment was removed or changed. Please upload it again.');
       metadata.push({ id, name: entry.name, originalFile: filename,
         ...(entry.textAvailable ? { extractedText: path.join(this.directory(id), 'text.txt') } : {}),
@@ -361,10 +379,15 @@ export class FileInbox {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    for (const [id, pending] of this.entries) {
+    await this.initialize();
+    let incomplete = false;
+    for (const pending of this.entries.values()) {
       if (pending.entry.threadId !== threadId) continue;
-      await this.remove(pending);
+      pending.entry.expiresAt = Math.min(pending.entry.expiresAt, Date.now());
+      try { await this.remove(pending, true); }
+      catch { incomplete = true; }
     }
+    if (incomplete) throw new Error('Local attachment cleanup is incomplete.');
   }
 
   cancelThread(threadId: string): void {
@@ -397,18 +420,51 @@ export class FileInbox {
     const pinned = new Set([...this.claims.values()].flat());
     for (const [id, pending] of this.entries) {
       if (pending.entry.expiresAt > Date.now() || pinned.has(id) || pending.downloading || ['pending', 'downloading'].includes(pending.entry.state)) continue;
-      await this.remove(pending);
+      // An expired file can remain locked while other threads continue using the inbox.
+      await this.remove(pending).catch(() => {});
     }
   }
 
-  private async remove(pending: Pending): Promise<void> {
+  private remove(pending: Pending, deletingThread = false): Promise<void> {
+    if (pending.removal) return pending.removal;
+    pending.removal = this.removeFiles(pending, deletingThread).finally(() => { pending.removal = undefined; });
+    return pending.removal;
+  }
+
+  private async removeFiles(pending: Pending, deletingThread: boolean): Promise<void> {
     pending.removing = true;
-    await this.fail(pending, 'Local attachment removed. Upload it again to restore.');
+    pending.abort.abort(); clearTimeout(pending.timer); pending.finish();
     await pending.admission;
     await pending.task;
     await pending.writes?.catch(() => {});
-    await fs.rm(this.directory(pending.entry.id), { recursive: true, force: true });
+    const directory = this.directory(pending.entry.id);
+    pending.entry.state = 'failed';
+    pending.entry.detail = 'Local attachment cleanup is pending.';
+    try {
+      const canonical = await fs.realpath(directory).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (canonical !== undefined) {
+        if (canonical !== path.resolve(directory)) throw new Error('Attachment directory changed.');
+        const manifest = path.join(directory, 'metadata.json');
+        const saved = await readPrivateJson(manifest);
+        const entry = pending.entry;
+        if (saved.id !== entry.id || saved.destination !== entry.destination || saved.openId !== entry.openId
+          || saved.threadId !== entry.threadId || saved.origin !== entry.origin) throw new Error('Attachment ownership changed.');
+        if (deletingThread) {
+          // An expired manifest lets startup retry removal after a filesystem error.
+          await atomicJson(manifest, entry).catch(() => {});
+        }
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    } catch {
+      this.status(pending);
+      throw new Error('Local attachment cleanup is incomplete.');
+    }
     this.entries.delete(pending.entry.id);
+    pending.entry.detail = 'Local attachment removed. Upload it again to restore.';
+    this.status(pending);
   }
 
   async destroy(): Promise<void> {

@@ -121,6 +121,11 @@ export interface IExecutor {
   observeNativeSessionCreation?(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void;
   resetContext(): void;
   abort(): Promise<boolean>;
+  hasActiveNativeScheduledOccurrence?(): boolean;
+  /** Capture and interrupt the native scheduled batch synchronously, before foreground cleanup.
+   * Undefined means no native occurrence. True requires confirmed interruption; false means no stop.
+   * A rejected or false result must never fall through to a generic abort. */
+  abortNativeScheduledOccurrence?(): Promise<boolean> | undefined;
   /** Retire the turn activation but retain native managed-tool registration during interrupt. */
   preservesProcessOnAbort?(): boolean;
   hasPendingCancellation?(): boolean;

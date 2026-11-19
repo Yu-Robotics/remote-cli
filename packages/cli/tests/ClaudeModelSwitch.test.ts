@@ -113,7 +113,8 @@ function handlerFixture() {
   pool.getExecutor(thread.id);
   const ws: any = { send: vi.fn(), isConnected: () => true, hasPendingTaskResults: () => false, trackTask: vi.fn() };
   let globalModel: string | undefined;
-  const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent', claude: { model: globalModel } } : undefined,
+  const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent', claude: { model: globalModel } }
+    : key === 'openId' ? 'synthetic-owner' : undefined,
     getConfigDir: () => path.join(root, 'config'), getSharedSymlinks: () => [] };
   const handler = new MessageHandler(ws, pool, manager, new DirectoryGuard([root]), config); handlers.push(handler);
   const inner = handler as any;
@@ -121,8 +122,8 @@ function handlerFixture() {
   vi.spyOn(inner.delegation.registry, 'list').mockResolvedValue([]);
   vi.spyOn(inner.settingsCatalogReader, 'withExecutor').mockImplementation(async (...args: any[]) => args[4](executor));
   let sequence = 0;
-  const send = (content: string) => handler.handleMessage({ type: 'command', threadId: thread.id, messageId: `command-${++sequence}`,
-    openId: 'synthetic-owner', content, timestamp: Date.now() } as any);
+  const send = (content: string, openId = 'synthetic-owner') => handler.handleMessage({ type: 'command', threadId: thread.id, messageId: `command-${++sequence}`,
+    openId, content, timestamp: Date.now() } as any);
   const messages = () => ws.send.mock.calls.map(([message]: any[]) => message);
   return { thread, manager, pool, handler, inner, send, messages, setGlobal: (model?: string) => { globalModel = model; } };
 }
@@ -262,6 +263,92 @@ describe('Claude in-process model ownership', () => {
     const retry = await change(); ack(); expect((await retry.promise).success).toBe(true); expect(raw.model).toBe('opus');
   });
 
+  it('keeps the model control off the wire while a host-scheduled turn is awaiting its lifecycle terminal', async () => {
+    await warm();
+    const scheduled = executor.execute('Scheduled report', { hostScheduleSessionId: 'synthetic-session' });
+    await tick();
+    const input = wire.filter(packet => packet.type === 'user').at(-1);
+    expect(input?.message.content).toBe('Scheduled report');
+    frame({ type: 'command_lifecycle', command_uuid: input.uuid, state: 'started' });
+    frame({ type: 'result', user_message_uuid: input.uuid, is_error: false, result: 'Report complete' });
+    expect((await scheduled).success).toBe(true);
+
+    const attempt = executor.setModel('opus');
+    await tick();
+    expect(control()).toBeUndefined();
+    expect((await attempt).success).toBe(false);
+    expect(executor.hasPendingSettingsChange()).toBe(false);
+    const next = executor.execute('Queued chat');
+    expect(wire.filter(packet => packet.type === 'user')).toHaveLength(1);
+    frame({ type: 'command_lifecycle', command_uuid: input.uuid, state: 'completed' });
+    await tick();
+    const successor = wire.filter(packet => packet.type === 'user').at(-1);
+    expect(successor.message.content).toBe('Queued chat');
+    completed(successor.uuid);
+    expect((await next).success).toBe(true);
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
+  it('hands chat to the retained host after interrupting a host-timed turn without reapplying the saved model', async () => {
+    await warm();
+    const { pool, thread } = handlerFixture();
+    const scheduled = pool.getExecutor(thread.id).execute('Scheduled report', { hostScheduleSessionId: 'synthetic-session' });
+    const interrupted = expect(scheduled).rejects.toThrow('aborted by user');
+    await tick();
+    const input = wire.filter(packet => packet.type === 'user').at(-1);
+    expect(input.message.content).toBe('Scheduled report');
+    frame({ type: 'command_lifecycle', command_uuid: input.uuid, state: 'started' });
+    const abort = executor.abort();
+    await tick();
+    const interrupt = wire.find(packet => packet.request?.subtype === 'interrupt');
+    expect(interrupt?.request.for_user_message_uuids).toEqual([input.uuid]);
+    expect((await executor.setModel('opus')).success).toBe(false);
+    respond({ subtype: 'success', response: { turn: 'stopped', still_queued: [] } }, interrupt);
+    frame({ type: 'result', user_message_uuid: input.uuid, is_error: true, result: 'Stopped' });
+    frame({ type: 'command_lifecycle', command_uuid: input.uuid, state: 'cancelled' });
+    await interrupted;
+    expect(await abort).toBe(true);
+
+    expect(pool.isThreadBusy(thread.id)).toBe(false);
+    const chat = pool.getExecutor(thread.id).execute('Continue after the scheduled report');
+    const successor = wire.at(-1);
+    expect(successor.message.content).toBe('Continue after the scheduled report');
+    completed(successor.uuid);
+    expect((await chat).success).toBe(true);
+    expect(control()).toBeUndefined();
+    expect(thread.models.claude).toBe('sonnet');
+    expect(executor.getSessionId()).toBe('synthetic-session');
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
+  it('admits chat after a timed-out change receives a pending verdict and then its definitive receipt', async () => {
+    await warm();
+    const f = handlerFixture();
+    const pending = f.send('/model opus');
+    await tick();
+    const packet = control();
+    expect(packet.request.model).toBe('opus');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await pending;
+    expect(f.messages().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('timed out') });
+    respond({ subtype: 'error', error_code: 'verdict_pending', model: 'synthetic-opus' }, packet);
+    expect(f.pool.isThreadBusy(f.thread.id)).toBe(true);
+    expect((await executor.execute('Too early')).success).toBe(false);
+    respond({ subtype: 'success', response: { model: 'synthetic-opus' } }, { request_id: 'foreign' });
+    expect(f.pool.isThreadBusy(f.thread.id)).toBe(true);
+    ack('synthetic-opus', packet);
+    expect(f.pool.isThreadBusy(f.thread.id)).toBe(false);
+    expect(f.thread.models.claude).toBe('sonnet');
+    expect(executor.getExecutionMetadata().model).toBe('synthetic-opus');
+    const chat = f.pool.getExecutor(f.thread.id).execute('Continue after confirmation');
+    const input = wire.at(-1);
+    expect(input.message.content).toBe('Continue after confirmation');
+    completed(input.uuid);
+    expect((await chat).success).toBe(true);
+    expect(wire.filter(row => row.request?.subtype === 'set_model')).toHaveLength(1);
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
   it.each(['internal_error', 'malformed'])('keeps %s uncertain until a fresh confirmed setting, never a restart', async mode => {
     await warm(); const { promise } = await change();
     if (mode === 'malformed') respond({ subtype: 'success', response: {} });
@@ -336,13 +423,97 @@ describe('Claude in-process model ownership', () => {
 });
 
 describe('production handler model/card persistence', () => {
+  async function confirmChat(f: ReturnType<typeof handlerFixture>) {
+    f.thread.delegation = false;
+    vi.spyOn(f.inner.delegation, 'assertExecutionSafe').mockResolvedValue(undefined);
+    vi.spyOn(executor, 'configureManagedTools').mockResolvedValue(undefined);
+    const execute = vi.spyOn(executor, 'execute').mockResolvedValue({ success: true, output: 'Finished queued chat' });
+    await f.send('Queued chat');
+    const confirmation = f.messages().at(-1)?.queueConfirmation;
+    expect(confirmation?.id).toEqual(expect.any(String));
+    await f.send(`/queue confirm ${confirmation.id} queued-chat`);
+    expect(f.messages().at(-1)).toMatchObject({ success: true });
+    expect(execute).not.toHaveBeenCalled();
+    return execute;
+  }
+
+  it('interrupts the owned autonomous Claude occurrence and hands the thread to its confirmed chat', async () => {
+    await warm(); const job = await reserve(); const f = handlerFixture();
+    scheduled(job, false);
+    expect(executor.isBusy()).toBe(true);
+    expect(control()).toBeUndefined();
+    let confirmInterrupt!: (accepted: boolean) => void;
+    const receipt = new Promise<boolean>(resolve => { confirmInterrupt = resolve; });
+    const interrupt = vi.fn().mockRejectedValueOnce(new Error('Native terminal not confirmed'))
+      .mockReturnValueOnce(receipt);
+    Object.assign(executor, { abortNativeScheduledOccurrence: interrupt });
+    const generic = vi.spyOn(executor, 'abort');
+    const chat = await confirmChat(f);
+    await f.send('/abort', 'other-owner');
+    expect(f.messages().at(-1)).toMatchObject({ success: false, openId: 'other-owner' });
+    expect(interrupt).not.toHaveBeenCalled();
+    await f.send('/abort');
+    expect(f.messages().at(-1)).toMatchObject({ success: false, error: 'Native terminal not confirmed' });
+    expect(chat).not.toHaveBeenCalled();
+    const retry = f.send('/abort');
+    await tick();
+    endScheduled();
+    const duplicate = f.send('/abort');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(interrupt).toHaveBeenCalledTimes(2);
+    expect(chat).not.toHaveBeenCalled();
+    confirmInterrupt(true);
+    await Promise.all([retry, duplicate]);
+    expect(f.messages().filter((m: any) => m.success && m.output?.includes('current native scheduled occurrence'))).toHaveLength(2);
+    await vi.waitFor(() => expect(f.messages()).toContainEqual(expect.objectContaining({ type: 'response', messageId: 'queued-chat', success: true })));
+    expect(f.messages().filter((m: any) => m.type === 'queue_started')).toEqual([
+      expect.objectContaining({ messageId: 'queued-chat', threadId: f.thread.id, openId: 'synthetic-owner' }),
+    ]);
+    expect(generic).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledOnce();
+    expect(raw.sessionSchedules.hasJobs).toBe(true);
+    expect(child.stdin.end).not.toHaveBeenCalled();
+  });
+
+  it.each(['unconfirmed', 'already completed'])('resumes chat after the native occurrence ends with an %s interrupt', async outcome => {
+    await warm(); const job = await reserve(); const f = handlerFixture();
+    scheduled(job, false);
+    let finish!: () => void;
+    const receipt = new Promise<boolean>((resolve, reject) => {
+      finish = () => outcome === 'unconfirmed' ? reject(new Error('Awaiting native terminal')) : resolve(false);
+    });
+    Object.assign(executor, { abortNativeScheduledOccurrence: () => receipt });
+    const generic = vi.spyOn(executor, 'abort');
+    const chat = await confirmChat(f);
+    const abort = f.send('/abort');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(chat).not.toHaveBeenCalled();
+    if (outcome === 'already completed') endScheduled();
+    finish();
+    await abort;
+    if (outcome === 'unconfirmed') {
+      expect(f.messages().at(-1)).toMatchObject({ success: false, error: 'Awaiting native terminal' });
+      expect(chat).not.toHaveBeenCalled();
+      endScheduled();
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    await vi.waitFor(() => expect(f.messages()).toContainEqual(expect.objectContaining({
+      messageId: 'queued-chat', openId: 'synthetic-owner', threadId: f.thread.id, success: true,
+    })));
+    expect(generic).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledOnce();
+    expect(raw.sessionSchedules.hasJobs).toBe(true);
+  });
+
   it('persists text selection only after native ACK and retains the registered bridge', async () => {
     await warm(); const f = handlerFixture();
     const bridge = new ManagedToolBridge(); bridges.push(bridge); await bridge.start(['scheduling']);
     f.inner.delegationBridges.set(f.thread.id, bridge); const close = vi.spyOn(bridge, 'close');
     const pending = f.send('/model opus'); await tick(); expect(control()).toBeDefined();
     expect(f.thread.models.claude).toBe('sonnet');
-    await f.send('/abort'); expect(f.messages().at(-1)).toMatchObject({ success: false }); expect(close).not.toHaveBeenCalled();
+    await f.send('/abort');
+    expect(f.messages().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Native settings change is pending or unconfirmed') });
+    expect(close).not.toHaveBeenCalled();
     ack(); await pending; expect(f.thread.models.claude).toBe('opus');
     expect(f.messages().at(-1)?.error).toBeUndefined(); expect(f.messages().at(-1)).toMatchObject({ success: true }); expect(child.stdin.end).not.toHaveBeenCalled();
   });
@@ -354,20 +525,52 @@ describe('production handler model/card persistence', () => {
     else if (mode === 'close') child.emit('close', 0);
     else respond({ subtype: 'error', error_code: 'not_found', model: 'synthetic-sonnet' });
     await pending; expect(f.thread.models.claude).toBe('sonnet'); expect(f.messages().at(-1)).toMatchObject({ success: false });
+    if (mode === 'timeout') {
+      await f.send('/abort');
+      expect(f.messages().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Native settings change is pending or unconfirmed') });
+    }
     ack('synthetic-opus', packet); expect(f.thread.models.claude).toBe('sonnet');
+    if (mode === 'timeout') {
+      await f.send('/abort');
+      expect(f.messages().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('No command is currently executing') });
+      expect(child.stdin.end).not.toHaveBeenCalled();
+    }
   });
 
-  it('permits a terminal-error text retry through the real pool while ordinary work remains fenced', async () => {
+  it('permits a terminal-error model retry ahead of confirmed chat and drains it after the ACK', async () => {
     await warm(); const f = handlerFixture();
     const first = f.send('/model opus'); await tick();
     respond({ subtype: 'error', error_code: 'internal_error', model: 'synthetic-opus' });
     await first;
     expect(f.pool.isThreadBusy(f.thread.id)).toBe(true);
     expect(f.thread.models.claude).toBe('sonnet');
+    const chat = await confirmChat(f);
+    await f.send('/abort');
+    expect(f.messages().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Retry /model') });
     const retry = f.send('/model sonnet'); await tick();
     expect(control().request.model).toBe('sonnet'); ack('synthetic-sonnet'); await retry;
-    expect(f.messages().at(-1)).toMatchObject({ success: true });
+    await vi.waitFor(() => expect(f.messages()).toContainEqual(expect.objectContaining({ type: 'response', messageId: 'queued-chat', success: true })));
+    expect(chat).toHaveBeenCalledOnce();
     expect(f.pool.isThreadBusy(f.thread.id)).toBe(false);
+    expect(child.stdin.end).not.toHaveBeenCalled();
+  });
+
+  it('resumes confirmed chat on a late terminal refusal without another user command', async () => {
+    await warm(); const f = handlerFixture();
+    const pending = f.send('/model opus'); await tick();
+    const packet = control();
+    await vi.advanceTimersByTimeAsync(10000); await pending;
+    const chat = await confirmChat(f);
+    await f.send('/abort');
+    expect(f.messages().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Wait for its reply') });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(chat).not.toHaveBeenCalled();
+    respond({ subtype: 'error', error_code: 'not_found', model: 'synthetic-sonnet' }, packet);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(f.messages()).toContainEqual(expect.objectContaining({ type: 'response', messageId: 'queued-chat',
+      success: true, threadId: f.thread.id, openId: 'synthetic-owner' })));
+    expect(chat).toHaveBeenCalledOnce();
+    expect(f.thread.models.claude).toBe('sonnet');
     expect(child.stdin.end).not.toHaveBeenCalled();
   });
 
