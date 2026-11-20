@@ -216,6 +216,9 @@ export class AgySessionSchedules {
 
   /** Called before a genuine foreground prompt; ACP text is not schedule output. */
   beginForeground(): void { this.check(); if (this.operation || this.foreground || this.boundary !== undefined) throw new Error('AGY host is busy.'); this.foregroundResult = undefined; this.foreground = true; this.executionForeground = true; }
+  get foregroundInvocationStart(): number | undefined {
+    return this.foreground && this.executionForeground && !this.operation && !this.invocation?.outputs ? this.invocation?.start : undefined;
+  }
   suspendForeground(): boolean {
     if (this.failure || !this.foreground || !this.invocation || this.invocation.outputs || this.foregroundResult) return false;
     this.endOperationTurn();

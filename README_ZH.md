@@ -627,7 +627,7 @@ inference. Images are forwarded as ACP content; model support remains native-dep
 
 New workers persist their native creation receipt before their first prompt. Reuse
 requires matching worker provenance, observed terminal evidence and exact prior group
-exit. A requested tool denial permanently fences that host's reuse and controlled
+exit. A requested tool denial permanently fences the worker's reuse and controlled
 reconnect, even if native later reports DONE and a successful Stop. Observed
 background-task creation receipts also fence reuse regardless of DONE status or
 hook coverage. Previous continuity receipts require explicit clear. Hook failures
@@ -636,6 +636,10 @@ limit, not proof that arbitrary saved queues are empty. Nonforeground permission
 requests are denied; only the current foreground turn uses approval cards/text.
 No automatic native schedule recovery, replay, checkpoint restoration or exit-time model
 handoff is used.
+
+In ordinary AGY chat, the model can request a native task list on its own.
+From CLI 1.6.274, the live chat can continue when the native transcript confirms
+that the hook denied that exact read-only call and the turn finishes normally.
 
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when

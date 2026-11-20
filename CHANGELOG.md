@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.274] - 2026-11-20
+
+### Fixed
+- Allow an ordinary AGY chat to continue on its live session after the native transcript confirms that the hook denied an unsolicited `manage_task` list call and the turn completes.
+
 ## [1.6.273] - 2026-11-19
 
 ### Changed

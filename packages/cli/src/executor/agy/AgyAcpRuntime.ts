@@ -164,9 +164,13 @@ export class AgyAcpRuntime {
       this.controlRecords = controls;
       if (this.options.hostScheduleChat && controls.some(row => row.source === 'SYSTEM' && row.type === 'SYSTEM_MESSAGE'
           && /sender=/.test(row.content ?? '') && !nativeRestartNotice(row))) this.hostScheduleUnsafe = true;
+      if (this.chat?.hasListDenial && this.hostScheduleUnsafe) this.chat.fence('AGY hook evidence changed after a list denial; explicit clear is required.');
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
-        : this.chat ? this.chat.accept(event, payload, controls) : this.host!.schedules.accept(event, payload, controls);
+        : this.chat ? this.chat.accept(event, payload, controls, !!this.active && this.active.hostScheduleSessionId === undefined
+          && !!this.options.hostScheduleChat && !this.options.worker && !this.hostScheduleUnsafe && !this.relayFault
+          && !this.commands?.pending && !this.closing && !this.settingsBusy && !this.scheduleOperations)
+          : this.host!.schedules.accept(event, payload, controls);
       if (!this.continuityUnsafe && (event === 'PreToolUse' && decision.decision === 'deny'
         || controls.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
         this.continuityUnsafe = true;
@@ -302,8 +306,11 @@ export class AgyAcpRuntime {
         this.host = undefined;
       }
       this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled');
-      this.hostScheduleSettled = result.success && result.stopReason === 'end_turn' && this.foregroundReusable;
-      if (!this.hostScheduleSettled) this.hostScheduleUnsafe = true;
+      const completed = result.success && result.stopReason === 'end_turn';
+      this.hostScheduleSettled = completed && this.foregroundReusable;
+      // A confirmed list denial keeps ordinary chat live. continuityUnsafe already
+      // disqualifies this host from scheduling, reconnect and durable checkpoints.
+      if (!this.hostScheduleSettled && !(completed && this.chat?.hasListDenial && this.chat.reusable)) this.hostScheduleUnsafe = true;
       // Current native Stop gives the final text without replaying buffered ACP
       // output. With timers, this is a batch projection, not token streaming.
       if (result.output && (this.retained || !this.streamed)) {

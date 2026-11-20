@@ -195,6 +195,62 @@ function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRu
 }
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  it.each(['confirmed', 'worker', 'mutation', 'extra args', 'planner mismatch', 'missing', 'wrong nonce',
+    'wrong step', 'wrong status', 'late post-tool', 'other unfinished tool', 'failed Stop', 'rewritten receipt', 'idle tool'])(
+    'continues only the original main foreground session after a verified list denial: %s', async scenario => {
+      const worker = scenario === 'worker';
+      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: !worker, worker });
+      const turn = runtime.execute('hold', {});
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      const args = scenario === 'mutation' ? { Action: 'kill' } : scenario === 'extra args' ? { Action: 'list', TaskId: 'other' } : { Action: 'list' };
+      client.row('PLANNER_RESPONSE', '');
+      client.rows.at(-1).tool_calls = [{ name: 'manage_task', args: scenario === 'planner mismatch' ? {} : args }];
+      const step = client.cursor++;
+      const decision = client.hook('PreToolUse', { stepIdx: step, toolCall: { name: 'manage_task', id: 'list-call', args } });
+      expect(decision.decision).toBe('deny');
+      if (scenario !== 'missing') {
+        const text = 'Encountered error in step execution: tool call denied by pre-tool hook: ' +
+          (scenario === 'wrong nonce' ? 'unrelated' : decision.reason);
+        client.row('GENERIC', text, 'MODEL', scenario === 'wrong status' ? 'DONE' : 'ERROR',
+          scenario === 'wrong step' ? client.cursor++ : step);
+      }
+      client.hook('PostInvocation');
+      if (scenario === 'late post-tool') client.hook('PostToolUse', { stepIdx: step });
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      if (scenario === 'other unfinished tool') {
+        client.hook('PreToolUse', { stepIdx: client.cursor, toolCall: { id: 'other', name: 'other_tool', args: {} } });
+        client.row('GENERIC', '', 'MODEL', 'RUNNING');
+      }
+      client.row('PLANNER_RESPONSE', 'Listing unavailable.');
+      client.hook('PostInvocation');
+      client.hook('Stop', { terminationReason: scenario === 'failed Stop' ? 'ERROR' : 'NO_TOOL_CALL', error: scenario === 'failed Stop' ? 'failed' : '' });
+      client.release({ stopReason: 'end_turn' });
+      if (['confirmed', 'rewritten receipt', 'idle tool'].includes(scenario)) {
+        expect(await turn).toMatchObject({ success: true, output: 'Listing unavailable.' });
+        if (scenario === 'confirmed') {
+          expect(await runtime.execute('next ordinary prompt', {})).toMatchObject({ success: true });
+          expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+        } else if (scenario === 'rewritten receipt') {
+          client.rows.find((r: TranscriptRecord) => r.step_index === step).content = 'changed';
+          await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+        } else {
+          expect(client.hook('PreToolUse', { stepIdx: client.cursor, toolCall: { id: 'idle', name: 'manage_task', args } }).decision).toBe('deny');
+          await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+          expect(client.prompts).toEqual(['hold']);
+        }
+      } else {
+        await expect(turn).rejects.toThrow();
+        await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+        expect(client.prompts).toEqual(['hold']);
+      }
+      expect(native.clients).toHaveLength(1);
+      expect(runtime.reusable).toBe(false);
+      expect(runtime.hostScheduleAvailable).toBe(false);
+      await runtime.close();
+      expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
+    });
+
   async function captureTimedSession(checkOwnership = true) {
     if (checkOwnership) await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] });
     const creating = executor.execute('hold');
