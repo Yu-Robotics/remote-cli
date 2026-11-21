@@ -155,23 +155,27 @@ export class AgyAcpRuntime {
       let controls = rows;
       if (this.commands && !this.hostScheduleUnsafe) {
         try {
-          controls = this.commands.observe(event, payload, rows, !!this.active);
-          if (!this.active && event === 'Stop' && (payload.terminationReason !== 'NO_TOOL_CALL' || payload.error !== '')) {
+          controls = this.commands.observe(event, payload, rows, !!this.active, this.hostScheduleSafe && this.hostScheduleSettled);
+          if (!this.active && event === 'Stop' && !this.commands.idleDecision && (payload.terminationReason !== 'NO_TOOL_CALL' || payload.error !== '')) {
             this.hostScheduleUnsafe = true;
           }
-        } catch { this.hostScheduleUnsafe = true; }
+        } catch {
+          this.hostScheduleUnsafe = true;
+          if (this.commands.liveDenial) this.chat?.fence('AGY idle command denial is unconfirmed.');
+        }
       } else if (this.options.hostScheduleChat && !this.active && event !== 'SessionStart') this.hostScheduleUnsafe = true;
       this.controlRecords = controls;
       if (this.options.hostScheduleChat && controls.some(row => row.source === 'SYSTEM' && row.type === 'SYSTEM_MESSAGE'
           && /sender=/.test(row.content ?? '') && !nativeRestartNotice(row))) this.hostScheduleUnsafe = true;
       if (this.chat?.hasListDenial && this.hostScheduleUnsafe) this.chat.fence('AGY hook evidence changed after a list denial; explicit clear is required.');
+      const idleDecision = !this.active && this.hostScheduleSafe ? this.commands?.idleDecision : undefined;
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
-        ? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
+        ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && this.active.hostScheduleSessionId === undefined
           && !!this.options.hostScheduleChat && !this.options.worker && !this.hostScheduleUnsafe && !this.relayFault
           && !this.commands?.pending && !this.closing && !this.settingsBusy && !this.scheduleOperations)
           : this.host!.schedules.accept(event, payload, controls);
-      if (!this.continuityUnsafe && (event === 'PreToolUse' && decision.decision === 'deny'
+      if (!this.continuityUnsafe && (event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
         || controls.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
         this.continuityUnsafe = true;
         this.options.settledPrompt?.(false);
@@ -181,7 +185,8 @@ export class AgyAcpRuntime {
           const call = payload.toolCall as { id: string; name: string; args: Record<string, unknown> };
           if (call && Number.isSafeInteger(payload.stepIdx)) {
             if (decision.decision === 'allow') {
-              this.commands?.observeTool(payload.stepIdx as number, call.name, call.id, call.args, this.options.cwd);
+              this.commands?.observeTool(payload.stepIdx as number, call.name, call.id, call.args, this.options.cwd,
+                !!this.sessionId && this.active.hostScheduleSessionId === this.sessionId && this.hostScheduleSafe);
             }
             if (call.name === 'ask_question' && this.question) {
               this.question.args = call.args;
@@ -199,7 +204,7 @@ export class AgyAcpRuntime {
           if (row) { this.active.onToolResult?.({ tool_use_id: id, content: (row.content ?? '').slice(0, 32768), is_error: event === 'PostToolUse' && !!payload.error }); this.tools.delete(step); }
         }
       }
-      return decision;
+      return idleDecision?.terminationBehavior && this.hostScheduleSafe ? idleDecision : decision;
     }, () => {
       this.relayFault = true;
       this.chat?.fence('AGY hook relay failed; chat state is unconfirmed.');
@@ -429,7 +434,7 @@ export class AgyAcpRuntime {
     }
     let cleanHistory: string | undefined;
     let unpromptedHistory: string | undefined;
-    if (this.options.hostScheduleChat && !this.hostScheduleUnsafe && !this.relayFault && this.reusable && this.sessionId && this.relay) {
+    if (this.options.hostScheduleChat && !this.hostScheduleUnsafe && !this.commands?.liveDenial && !this.relayFault && this.reusable && this.sessionId && this.relay) {
       try {
         if (this.hostScheduleSettled) {
           const history = agyHostScheduleHistory(this.options.home, this.sessionId);

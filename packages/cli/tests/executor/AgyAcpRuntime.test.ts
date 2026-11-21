@@ -300,6 +300,48 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(client.hook('PreToolUse', { stepIdx: client.cursor, toolCall: original })).toMatchObject({ decision: 'deny' });
     expect(() => executor.checkHostScheduleSession(id)).toThrow();
   });
+  it.each(['confirmed', 'ordinary turn', 'different planner', 'wrong nonce', 'post-tool', 'changed history',
+    'extra row', 'missing Stop', 'wrong Stop', 'still busy', 'continued'])(
+    'admits the next slot only after a proven idle shell denial: %s', async scenario => {
+      const { id } = await captureTimedSession();
+      const running = executor.execute('hold', scenario === 'ordinary turn' ? {} : { hostScheduleSessionId: id });
+      await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+      const client = last();
+      const task = yieldCommand(client);
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(running).resolves.toMatchObject({ success: true });
+      client.hook('PostToolUse', { stepIdx: task.step, toolCall: { name: 'run_command', id: `call-${task.step}`, args: {} } });
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      completion(client, task);
+      const args = { CommandLine: 'echo synthetic' };
+      client.row('PLANNER_RESPONSE', '');
+      client.rows.at(-1).tool_calls = [{ name: 'run_command', args: scenario === 'different planner' ? {} : args }];
+      const step = client.cursor++;
+      const decision = client.hook('PreToolUse', { stepIdx: step, toolCall: { name: 'run_command', id: 'idle-shell', args } });
+      expect(decision.decision).toBe('deny');
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' +
+        (scenario === 'wrong nonce' ? 'different' : decision.reason), 'MODEL', 'ERROR', step);
+      if (scenario === 'post-tool') client.hook('PostToolUse', { stepIdx: step });
+      if (scenario === 'changed history') client.rows[0].content += 'changed';
+      const ending = client.hook('PostInvocation');
+      if (scenario === 'confirmed') expect(ending).toEqual({ terminationBehavior: 'terminate' });
+      if (scenario === 'extra row') client.row('GENERIC', 'unexpected');
+      if (scenario !== 'missing Stop') client.hook('Stop', {
+        terminationReason: scenario === 'wrong Stop' ? 'NO_TOOL_CALL' : 'TERMINAL_CUSTOM_HOOK',
+        error: '', fullyIdle: scenario !== 'still busy', continuationActive: scenario === 'continued',
+      });
+      if (scenario !== 'confirmed') {
+        expect(() => executor.checkHostScheduleSession(id)).toThrow();
+        expect(client.prompts).toEqual(['hold', 'hold']);
+        return;
+      }
+      executor.checkHostScheduleSession(id);
+      await expect(executor.execute('next slot', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+      expect(client.prompts).toEqual(['hold', 'hold', 'next slot']);
+      await executor.destroy();
+      expect(() => make().checkHostScheduleSession(id)).toThrow();
+    });
   it.each(['foreground', 'idle'])('recovers multiple commands after matched %s completion without replay', async timing => {
     const { id } = await captureTimedSession();
     const running = executor.execute('hold', { hostScheduleSessionId: id });

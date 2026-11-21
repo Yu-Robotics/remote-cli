@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.275] - 2026-11-21
+
+### Fixed
+- Keep the live AGY session available for the next scheduled turn after a verified background command notification attempts one additional shell call. Verify its denial and the idle native stop before resuming.
+
 ## [1.6.274] - 2026-11-20
 
 ### Fixed

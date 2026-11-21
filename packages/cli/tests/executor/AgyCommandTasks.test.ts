@@ -64,6 +64,16 @@ describe('owned AGY command evidence', () => {
     tasks.observe('Stop', {}, rows, false);
     expect(tasks.pending).toBe(false);
   });
+  it('recognizes a native completion whose shell output has no trailing newline', () => {
+    const tasks = yielded();
+    tasks.observe('PostToolUse', post, [receipt], false);
+    tasks.observe('PreInvocation', {}, [receipt], false);
+    const rows = [receipt, { ...terminal, content: terminal.content!.replace('OK\n\nLog:', 'OK\nLog:') }];
+    tasks.observe('PostInvocation', {}, rows, false);
+    expect(tasks.pending).toBe(true);
+    tasks.observe('Stop', {}, rows, false);
+    expect(tasks.pending).toBe(false);
+  });
   it('rejects missing evidence, wrong-session notifications and an echoed completion', () => {
     const tasks = fixture();
     tasks.observe('PostToolUse', {}, [receipt], true);

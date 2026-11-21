@@ -642,6 +642,11 @@ In ordinary AGY chat, the model can request a native task list on its own.
 From CLI 1.6.274, the live chat can continue when the native transcript confirms
 that the hook denied that exact read-only call and the turn finishes normally.
 
+From CLI 1.6.275, when a scheduled AGY command finishes in the background,
+the live conversation can handle a single extra shell request from its completion
+notification silently. The CLI verifies the denial and an idle native stop before
+the next scheduled turn can use the same session.
+
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when
 the previous owner and exact native group are proved absent. A dead parent alone
