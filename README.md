@@ -592,6 +592,9 @@ managed schedules and their stored history. Legacy native cleanup may still
 require the original session.
 
 Both `/schedule list` and **Refresh status** display records stored by the CLI.
+The Feishu management card opens on current schedules. Open the history view to
+find completed, cancelled, failed, or interrupted schedules, including when the
+current view is empty. Switching views preserves the stored records.
 To inspect legacy Claude definitions on their original native host, use
 `/schedule cleanup review` in the bound conversation.
 

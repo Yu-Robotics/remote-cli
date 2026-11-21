@@ -6,10 +6,11 @@ import type { ScheduleMenu } from '../src/types/ScheduleCards';
 function buttons(elements: any[]): any[] {
   return elements.flatMap(element => element.columns?.flatMap((column: any) => column.elements.filter((child: any) => child.tag === 'button')) ?? []);
 }
-function fixture(count = 1, rule = '* * * * * (UTC)') {
+function fixture(count = 1, rule = '* * * * * (UTC)', prepare?: (menu: ScheduleMenu) => void) {
   const menu: ScheduleMenu = { snapshotId: 'snapshot', threadId: 'original-thread', threadName: 'Original thread', expiresAt: Date.now() + 60_000,
     entries: Array.from({ length: count }, (_, index) => ({ value: `choice-${index}`, id: `schedule-${index}`, backend: 'claude',
       state: 'active', rule, prompt: '<at id="all">**synthetic**</at>', canCancel: true })) };
+  prepare?.(menu);
   const transport = { ownsDevice: vi.fn(async () => true), captureOwnership: () => () => true,
     available: vi.fn(() => true), send: vi.fn(async () => true), update: vi.fn(async () => {}) };
   const cards = new ScheduleCards(transport);
@@ -79,6 +80,9 @@ describe('ScheduleCards', () => {
     expect(JSON.stringify(f.latest())).not.toContain('Cancellation confirmed');
     await f.result();
     expect(JSON.stringify(f.latest())).toContain('Cancellation confirmed');
+    expect(JSON.stringify(f.latest())).toContain('No current schedules');
+    await f.click('view'); await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('Cancelled');
     expect(buttons(f.latest()).find(button => button.behaviors[0].value.op === 'cancel').disabled).toBe(true);
     f.cards.destroy();
   });
@@ -156,6 +160,7 @@ describe('ScheduleCards', () => {
     await f.click('cancel'); await f.settle(); await f.click('confirm');
     await f.result(true, { menu: { ...f.menu, entries: [{ ...f.menu.entries[0], state: 'completed', canCancel: false }] } });
     expect(JSON.stringify(f.latest())).not.toContain('Cancellation confirmed');
+    await f.click('view'); await f.settle();
     expect(JSON.stringify(f.latest())).toContain('Completed');
     f.cards.destroy();
   });
@@ -164,6 +169,7 @@ describe('ScheduleCards', () => {
     const f = fixture();
     await f.click('cancel'); await f.settle(); await f.click('confirm');
     await f.result(success, { menu: { ...f.menu, entries: [{ ...f.menu.entries[0], state: 'cancelled', canCancel: true }] } });
+    await f.click('view'); await f.settle();
     const rendered = JSON.stringify(f.latest());
     expect(rendered).toContain('Stopping · exit unconfirmed');
     expect(rendered).not.toContain('**Status:** cancelled');
@@ -222,6 +228,49 @@ describe('ScheduleCards', () => {
       }
     }
     expect(f.transport.send).not.toHaveBeenCalled();
+    f.cards.destroy();
+  });
+
+  it('loads a history continuation from the original snapshot and keeps Current reachable', async () => {
+    const f = fixture(1, 'UTC', menu => { menu.more = { history: 'older' }; });
+    const oldCancel = f.payload('cancel');
+    await f.click('view');
+    expect(f.transport.send).toHaveBeenCalledWith('device', expect.objectContaining({
+      operation: 'more', snapshotId: 'snapshot', value: 'older', threadId: 'original-thread',
+    }));
+    const older = { ...f.menu.entries[0], id: 'old-task', value: 'older', state: 'failed', canCancel: false };
+    await f.result(true, { menu: { ...f.menu, snapshotId: 'foreign', entries: [older] } });
+    expect(JSON.stringify(f.latest())).not.toContain('old-task');
+    await f.click('page');
+    await f.result(true, { menu: { ...f.menu, entries: [older], more: { history: 'last' } } });
+    expect(JSON.stringify(f.latest())).toContain('old-task');
+    const next = buttons(f.latest()).find(button => button.text.content === 'Next').behaviors[0].value;
+    await f.cards.click('owner', 'card', next);
+    await f.result(true, { menu: { ...f.menu, more: undefined, entries: [{ ...older, id: 'last-task', value: 'last' }] } });
+    expect(JSON.stringify(f.latest())).toContain('last-task');
+    await f.click('view'); await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('schedule-0');
+    await expect(f.cards.click('owner', 'card', oldCancel)).rejects.toThrow('changed');
+    f.cards.destroy();
+  });
+
+  it('keeps terminal rows in History with pending delivery and execution details', async () => {
+    const f = fixture(4, 'UTC', menu => {
+      menu.entries.forEach(entry => { entry.canCancel = false; entry.state = 'cancelled'; });
+      menu.entries[1].pending = 'delivery';
+      menu.entries[2].pending = 'execution';
+      menu.entries[3].state = 'interrupted';
+    });
+    expect(JSON.stringify(f.latest())).toContain('No current schedules');
+    await f.click('view'); await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('schedule-0');
+    const next = () => buttons(f.latest()).find(button => button.text.content === 'Next').behaviors[0].value;
+    await f.cards.click('owner', 'card', next()); await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('Result delivery pending');
+    await f.cards.click('owner', 'card', next()); await f.settle();
+    expect(JSON.stringify(f.latest())).toContain('Execution pending');
+    await f.click('refresh'); await f.result(true, { menu: { ...f.menu, snapshotId: 'fresh' } });
+    expect(JSON.stringify(f.latest())).toContain('History · Task 3 of 4');
     f.cards.destroy();
   });
 

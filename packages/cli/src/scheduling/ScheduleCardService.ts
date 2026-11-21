@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import type { ScheduleActionMessage, ScheduleActionResult, ScheduleMenu } from '../types/ScheduleCards';
+import { scheduleView, type ScheduleActionMessage, type ScheduleActionResult, type ScheduleMenu } from '../types/ScheduleCards';
 import type { ScheduleOwner, ScheduleRecord } from './types';
 
 interface Dependencies {
@@ -7,6 +7,7 @@ interface Dependencies {
   threadName(threadId: string): string;
   records(owner: ScheduleOwner): Promise<ScheduleRecord[]>;
   canCancel(owner: ScheduleOwner, id: string): boolean;
+  deliveryPending?(owner: ScheduleOwner, id: string): boolean;
   refresh(owner: ScheduleOwner): Promise<void>;
   cancel(owner: ScheduleOwner, id: string): Promise<unknown>;
   exclusive<T>(owner: ScheduleOwner, body: () => Promise<T>): Promise<T>;
@@ -17,6 +18,18 @@ const TTL = 15 * 60_000;
 const valid = (value: unknown): value is string => typeof value === 'string' && value.length > 0
   && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
 const literal = (value: string, max: number) => value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
+
+function page(menu: ScheduleMenu, choices: ScheduleMenu['entries']): ScheduleMenu {
+  let bytes = 0, end = 0;
+  while (end < choices.length && end < 100) {
+    bytes += Buffer.byteLength(JSON.stringify(choices[end])) + 1;
+    if (bytes > 120 * 1024) break;
+    end++;
+  }
+  const more: ScheduleMenu['more'] = {};
+  for (const entry of choices.slice(end)) more[scheduleView(entry)] ??= entry.value;
+  return structuredClone({ ...menu, entries: choices.slice(0, end), ...(end < choices.length && { more }) });
+}
 
 /** No disk access or subscriptions until an explicit schedule command opens a snapshot. */
 export class ScheduleCardService {
@@ -35,14 +48,17 @@ export class ScheduleCardService {
     const menu: ScheduleMenu = { snapshotId: randomUUID(), threadId: owner.threadId,
       threadName: literal(this.dependencies.threadName(owner.threadId), 100), expiresAt: Date.now() + TTL,
       entries: records.filter(record => record.openId === owner.openId && record.threadId === owner.threadId
-        && record.generation === owner.generation).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100)
+        && record.generation === owner.generation).sort((a, b) => b.createdAt - a.createdAt)
         .map(record => ({ value: randomUUID(), id: record.id, backend: record.backend,
         state: record.state, rule: literal(record.rule.kind === 'once' ? record.rule.at
           : `${record.rule.expression} (${record.rule.timezone})`, 160), prompt: literal(record.prompt, 240),
         ...(record.error ? { error: literal(record.error, 240) } : {}),
+        ...(record.inFlightDueAt !== undefined ? { pending: 'execution' as const }
+          : this.dependencies.deliveryPending?.(owner, record.id) ? { pending: 'delivery' as const } : {}),
         canCancel: this.dependencies.canCancel(owner, record.id) })) };
     this.snapshots.set(menu.snapshotId, { owner: { ...owner }, menu });
-    return structuredClone(menu);
+    return page(menu, [...menu.entries.filter(entry => scheduleView(entry) === 'current'),
+      ...menu.entries.filter(entry => scheduleView(entry) === 'history')]);
   }
 
   action(request: ScheduleActionMessage): Promise<ScheduleActionResult> {
@@ -52,8 +68,8 @@ export class ScheduleCardService {
       snapshotId: request.snapshotId, success, ...(error ? { error } : {}), ...(menu ? { menu } : {}), timestamp: Date.now(),
     });
     if (![request.messageId, request.openId, request.threadId, request.snapshotId].every(valid)
-      || !['refresh', 'cancel'].includes(request.operation)
-      || (request.operation === 'cancel' ? !valid(request.value) : request.value !== undefined)) {
+      || !['refresh', 'cancel', 'more'].includes(request.operation)
+      || (request.operation === 'refresh' ? request.value !== undefined : !valid(request.value))) {
       return Promise.resolve(reply(false, 'Invalid schedule action.'));
     }
     const snapshot = this.snapshots.get(request.snapshotId);
@@ -68,6 +84,11 @@ export class ScheduleCardService {
     const previous = this.receipts.get(request.messageId);
     if (previous) return previous.digest === digest ? previous.result
       : Promise.resolve(reply(false, 'This request ID belongs to another schedule action.'));
+    if (request.operation === 'more') {
+      if (!entry) return Promise.resolve(reply(false, 'Unknown schedule page.'));
+      const choices = snapshot.menu.entries.slice(snapshot.menu.entries.indexOf(entry)).filter(item => scheduleView(item) === scheduleView(entry));
+      return Promise.resolve(reply(true, undefined, page(snapshot.menu, choices)));
+    }
     if (this.receipts.size >= 500) return Promise.resolve(reply(false, 'Schedule confirmation storage is full. Try again later.'));
     const epoch = this.epoch;
     const receipt: Receipt = { digest, expires: Date.now() + TTL, pending: true, result: Promise.resolve(reply(false)) };

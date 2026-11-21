@@ -863,6 +863,11 @@ export class ScheduleService {
     });
   }
 
+  hasPendingScheduleResult(owner: ScheduleOwner, id: string): boolean {
+    this.owned(owner, id);
+    return this.delivering.has(id) || [...this.pending.values()].some(delivery => delivery.scheduleId === id);
+  }
+
   /** Durable outputs still awaiting their external delivery receipt. */
   hasPendingResults(threadId?: string): boolean {
     if (threadId === undefined) return this.pending.size > 0;

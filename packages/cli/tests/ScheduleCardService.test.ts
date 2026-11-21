@@ -20,7 +20,7 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ScheduleCardService', () => {
-  it('shows a new host task ahead of a full legacy history and excludes other owners', () => {
+  it('shows a new host task ahead of a full legacy catalog and pages the original snapshot', async () => {
     const f = fixture();
     const old = Array.from({ length: 100 }, (_, i) => ({ ...f.records[0], id: `old-${i}` }));
     const fresh = { ...f.records[0], id: 'fresh', engine: 'host', backend: 'kimi', createdAt: 10 } as const;
@@ -29,6 +29,15 @@ describe('ScheduleCardService', () => {
     expect(menu.entries).toHaveLength(100);
     expect(menu.entries[0]).toMatchObject({ id: 'fresh', backend: 'kimi' });
     expect(menu.entries.some(entry => entry.id === 'foreign')).toBe(false);
+    const request = { ...f.request, operation: 'more' as const, snapshotId: menu.snapshotId, value: menu.more!.current };
+    const next = await f.service.action(request);
+    expect(next.menu?.snapshotId).toBe(menu.snapshotId);
+    expect(next.menu?.entries.map(entry => entry.id)).toEqual(['old-99']);
+    expect(next.menu?.more).toBeUndefined();
+    expect((await f.service.action(request)).menu).toEqual(next.menu);
+    expect((await f.service.action({ ...request, openId: 'other' })).success).toBe(false);
+    expect(f.dependencies.refresh).not.toHaveBeenCalled();
+    expect(f.dependencies.cancel).not.toHaveBeenCalled();
   });
 
   it('captures opaque choices and refreshes using the original owner without creating schedules', async () => {
@@ -39,6 +48,27 @@ describe('ScheduleCardService', () => {
     expect(f.dependencies.refresh).toHaveBeenCalledWith(f.owner);
     expect(f.dependencies.cancel).not.toHaveBeenCalled();
     expect(result.menu?.snapshotId).not.toBe(f.menu.snapshotId);
+  });
+
+  it('reaches all history in bounded pages even with multibyte descriptions and an older current task', async () => {
+    const f = fixture();
+    f.dependencies.canCancel.mockReturnValue(false);
+    const text = '\u2605'.repeat(240);
+    const history = Array.from({ length: 201 }, (_, i) => ({
+      ...f.records[0], id: `finished-${i}`, state: 'completed' as const, createdAt: i + 10, prompt: text, error: text,
+    }));
+    let menu = f.service.open(f.owner, [...history, f.records[0]]);
+    expect(menu.entries[0].id).toBe('schedule');
+    const ids: string[] = [];
+    for (;;) {
+      expect(Buffer.byteLength(JSON.stringify(menu))).toBeLessThan(128 * 1024);
+      ids.push(...menu.entries.map(entry => entry.id));
+      if (!menu.more?.history) break;
+      const result = await f.service.action({ ...f.request, snapshotId: menu.snapshotId, operation: 'more', value: menu.more.history });
+      expect(result.success).toBe(true);
+      menu = result.menu!;
+    }
+    expect(ids).toEqual(['schedule', ...history.reverse().map(entry => entry.id)]);
   });
 
   it('resolves the original opaque choice even if the returned menu is modified', async () => {

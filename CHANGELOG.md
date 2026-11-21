@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.276] - 2026-11-21
+
+### Changed
+- Open the Feishu schedule list on current tasks and provide a history view for terminal records.
+
 ## [1.6.275] - 2026-11-21
 
 ### Fixed

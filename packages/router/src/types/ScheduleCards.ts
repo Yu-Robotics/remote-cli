@@ -16,6 +16,11 @@ export interface ScheduleCardEntry {
   prompt: string;
   error?: string;
   canCancel: boolean;
+  pending?: 'execution' | 'delivery';
+}
+export type ScheduleView = 'current' | 'history';
+export function scheduleView(entry: ScheduleCardEntry): ScheduleView {
+  return ['creating', 'active', 'running'].includes(entry.state) ? 'current' : 'history';
 }
 export interface ScheduleMenu {
   snapshotId: string;
@@ -23,6 +28,7 @@ export interface ScheduleMenu {
   threadName: string;
   expiresAt: number;
   entries: ScheduleCardEntry[];
+  more?: Partial<Record<ScheduleView, string>>;
 }
 export interface ScheduleActionMessage {
   type: 'schedule_action';
@@ -30,7 +36,7 @@ export interface ScheduleActionMessage {
   openId: string;
   threadId: string;
   snapshotId: string;
-  operation: 'refresh' | 'cancel';
+  operation: 'refresh' | 'cancel' | 'more';
   value?: string;
   timestamp: number;
 }

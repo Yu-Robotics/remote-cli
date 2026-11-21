@@ -124,6 +124,9 @@ describe('ScheduleService', () => {
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(service.hasPendingResults()).toBe(true);
+      expect(service.hasPendingScheduleResult(owner, 'queued')).toBe(true);
+      expect(service.hasPendingScheduleResult(owner, 'racing')).toBe(false);
+      expect(() => service.hasPendingScheduleResult({ ...owner, openId: 'other' }, 'queued')).toThrow(/owner/);
       await tick(interval);
       const admit = await captured.promise;
       for (const changed of [{ openId: 'other' }, { generation: 'other' }, { bindingEpoch: 'other' }]) {

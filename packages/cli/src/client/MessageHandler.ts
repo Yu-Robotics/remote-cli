@@ -324,6 +324,7 @@ export class MessageHandler {
       threadName: id => this.threadManager.getThread(id)?.name ?? id,
       records: owner => this.schedules!.list(owner),
       canCancel: (owner, id) => this.schedules!.canCancel(owner, id),
+      deliveryPending: (owner, id) => this.schedules!.hasPendingScheduleResult(owner, id),
       refresh: async owner => { await this.runScheduleOperation(owner, { kind: 'list' }); },
       cancel: (owner, id) => this.runScheduleOperation(owner, { kind: 'cancel', id }),
       // Each operation acquires the same record-specific admission as its slash command.
