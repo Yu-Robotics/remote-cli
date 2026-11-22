@@ -113,6 +113,8 @@ export interface ScheduleRecord extends ScheduleOwner {
   nextDueAt?: number;
   /** Admission was persisted before the native turn. Never replay this slot. */
   inFlightDueAt?: number;
+  /** Latest settled host slot. dueAt is its scheduled UTC millisecond. */
+  lastOccurrence?: { dueAt: number; status: 'succeeded' | 'failed' | 'unknown' | 'aborted' | 'skipped'; error?: string };
   backend: BackendKey;
   cwd: string;
   prompt: string;

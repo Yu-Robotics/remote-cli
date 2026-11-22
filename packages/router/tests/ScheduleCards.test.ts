@@ -65,6 +65,36 @@ describe('ScheduleCards', () => {
     recurring.cards.destroy();
   });
 
+  it.each(['succeeded', 'failed', 'unknown', 'skipped', 'aborted'] as const)('shows the %s slot alongside the next due time on Current', status => {
+    const f = fixture(2, '0 9 * * * (Asia/Shanghai)', menu => {
+      menu.entries[0].nextDueAt = Date.UTC(2030, 0, 2, 1);
+      menu.entries[0].lastOccurrence = { dueAt: Date.UTC(2030, 0, 1, 1), status,
+        ...(status === 'failed' && { error: '<retry>' }) };
+    });
+    const content = f.latest().map(element => element.content).join('\n');
+    expect(content).toContain('Asia/Shanghai');
+    expect(content).toContain('Next due: 2030-01-02 01:00:00 UTC');
+    expect(content).toContain(`Latest slot: 2030-01-01 01:00:00 UTC · ${status}`);
+    if (status === 'failed') expect(content).toContain('\\<retry\\>');
+    expect(content).toContain('Scheduled');
+    expect(f.payload('page')).toBeDefined();
+    f.cards.destroy();
+  });
+
+  it('accepts older menus and rejects invalid slot times, outcomes and errors', () => {
+    const f = fixture();
+    expect(f.latest().some(element => /Latest slot|Next due/.test(element.content))).toBe(false);
+    const parse = (fields: object) => parseScheduleMenu({ ...f.menu, entries: [{ ...f.menu.entries[0], ...fields }] });
+    for (const fields of [{ nextDueAt: '2030-01-01' }, { nextDueAt: Number.MAX_SAFE_INTEGER }, { lastOccurrence: null },
+      { lastOccurrence: { dueAt: 0, status: 'running' } }, { lastOccurrence: { status: 'unknown' } },
+      { lastOccurrence: { dueAt: 0, status: 'failed', error: 'x'.repeat(241) } }]) {
+      expect(parse(fields)).toBeUndefined();
+    }
+    expect(parse({ nextDueAt: 0 })).toBeDefined();
+    expect(parse({ lastOccurrence: { dueAt: 0, status: 'skipped' } })).toBeDefined();
+    f.cards.destroy();
+  });
+
   it('requires confirmation, supports Back, and changes state only after the matching CLI receipt', async () => {
     const f = fixture();
     await f.click('cancel'); await f.settle();

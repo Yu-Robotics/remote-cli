@@ -3864,6 +3864,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     return this.settingsAdmission.command(threadId, messageId, async () => {
       const token = this.beginThreadOperation(threadId);
       const occurrence: HostOccurrence = { record, cancelled: false };
+      let stopSchedule = false;
+      let executionStarted = false;
       this.hostOccurrences.set(threadId, occurrence);
       this.messageOpenIds.set(messageId, openId);
       try {
@@ -3872,9 +3874,15 @@ You can also use natural language commands to control Claude Code CLI.`,
           // Admission, approvals and transport still require a confirmed live binding.
           if (!allowDisconnectedResult || this.scheduleBinding) this.checkHostRecordBinding(record);
           else if (!this.scheduleOwnerCurrent(record)) throw new Error('Scheduled result owner changed.');
+          const thread = this.threadManager.getThread(threadId);
+          if (!thread || this.threadPool.getBackendKey(threadId) !== record.backend
+            || this.directoryGuard.resolveWorkingDirectory(thread.workingDirectory) !== cwd) {
+            stopSchedule = true;
+            throw new Error('Scheduled occurrence lost its original conversation or owner.');
+          }
+          if (stopSchedule) throw new Error('Scheduled task could not resume its original native session.');
           if (this.isDestroyed || this.cancelledOperations.has(token) || this.activeThreadOperations.get(threadId)?.token !== token
-            || !openId || record.engine !== 'host' || this.threadPool.getBackendKey(threadId) !== record.backend
-            || this.directoryGuard.resolveWorkingDirectory(this.threadManager.getThread(threadId)!.workingDirectory) !== cwd) {
+            || !openId || record.engine !== 'host') {
             throw new Error('Scheduled occurrence lost its original conversation or owner.');
           }
         };
@@ -3888,7 +3896,13 @@ You can also use natural language commands to control Claude Code CLI.`,
           if (this.threadPool.getExistingExecutor(threadId) !== executor) throw new Error('Scheduled executor changed.');
           if (allowPendingCommand && record.backend === 'agy' && executor.getSessionId?.() === sessionId
             && executor.getCurrentWorkingDirectory() === cwd && executor.isHostScheduleWaitingForCommand?.(sessionId, cwd)) return false;
-          this.checkHostSession(executor, sessionId, cwd);
+          const actualSession = executor.getSessionId?.();
+          if (actualSession && actualSession !== sessionId) stopSchedule = true;
+          try { this.checkHostSession(executor, sessionId, cwd); }
+          catch (error) {
+            if (allowPendingCommand && !allowDisconnectedResult && !stopSchedule && record.rule.kind === 'cron') return false;
+            throw error;
+          }
           return true;
         };
         if (!check(false, true)) return undefined;
@@ -3908,6 +3922,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
         let display = '';
         occurrence.executor = executor;
+        executionStarted = true;
         const result = await executor.execute(record.prompt, {
           hostScheduleSessionId: sessionId,
           // Claude checks queued authorization before process startup and again before stdin.
@@ -3916,7 +3931,10 @@ You can also use natural language commands to control Claude Code CLI.`,
           } }),
           resolvePrompt: actual => {
             beforePrompt();
-            if (actual !== sessionId) throw new Error('Scheduled task could not resume its original native session.');
+            if (actual !== sessionId) {
+              stopSchedule = !!actual;
+              throw new Error('Scheduled task could not resume its original native session.');
+            }
             return record.prompt;
           },
           onDisplayText: chunk => { if (display.length < 65537) display += chunk.slice(0, 65537 - display.length); },
@@ -3930,7 +3948,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             try { check(); } catch { return; }
             this.sendStreamChunk(messageId, threadId, chunk);
           },
-        }).catch((error: unknown) => ({ success: false, output: undefined,
+        }).catch((error: unknown) => ({ success: false, output: undefined, outcomeUnknown: true as const,
           error: error instanceof Error ? error.message : 'Scheduled execution failed.' }));
         // Hold the thread until executor cleanup settles, even if a successful result won the race.
         const aborted = occurrence.abort && await occurrence.abort.catch(error => {
@@ -3944,14 +3962,16 @@ You can also use natural language commands to control Claude Code CLI.`,
           occurrence.abortReceipt = aborted === 'local-cancellation'
             ? 'The local scheduled request was cancelled by /abort. Its native outcome is unconfirmed.'
             : 'The scheduled occurrence was interrupted by /abort.';
-          return { success: false, abortedByUser: true, output: display || result.output,
+          return { success: false, abortedByUser: true, ...(aborted === 'local-cancellation' && { outcomeUnknown: true }), output: display || result.output,
             error: occurrence.abortReceipt };
         }
         // Prefer the public display stream, but preserve the executor's final
         // output when a backend only returns its answer at turn completion.
-        return { success: result.success, output: display || result.output, error: result.error };
+        return { success: result.success, output: display || result.output, error: result.error,
+          ...('outcomeUnknown' in result && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : 'Scheduled execution failed.' };
+        return { success: false, error: error instanceof Error ? error.message : 'Scheduled execution failed.',
+          ...(executionStarted && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } finally {
         for (const [id, pending] of this.pendingApprovalCards) {
           if (pending.request.taskMessageId === messageId) this.resolveApprovalCard(id, 'expired');

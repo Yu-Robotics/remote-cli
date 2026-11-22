@@ -51,7 +51,8 @@ export interface SchedulePurgeResult {
 type PurgeOutcome = { status: 'removed' | 'alreadyRemoved'; forgottenCleanup?: true }
   | { status: 'pending'; reason: SchedulePurgeReason; detail: string };
 
-export type HostResult = { success: boolean; output?: string; error?: string; abortedByUser?: true };
+export type HostResult = { success: boolean; output?: string; error?: string; abortedByUser?: true;
+  outcomeUnknown?: true; stopSchedule?: true };
 
 export interface ScheduleServiceOptions {
   directory: string;
@@ -353,7 +354,11 @@ export class ScheduleService {
   private finishHost(record: ScheduleRecord, due: number, result: HostResult): string {
     const occurrenceId = `host-${due}`;
     const id = deliveryId(record.id, occurrenceId);
-    const interruptedCron = result.abortedByUser && record.inFlightDueAt === due && record.rule.kind === 'cron';
+    const admitted = record.inFlightDueAt === due;
+    const error = result.success ? undefined : bounded(result.error ?? 'Host schedule execution failed.', ERROR_BYTES);
+    const status = result.success ? 'succeeded' : result.outcomeUnknown ? 'unknown' : result.abortedByUser ? 'aborted' : 'failed';
+    record.lastOccurrence = { dueAt: due, status,
+      ...(error !== undefined && { error }) };
     delete record.inFlightDueAt;
     delete record.nextDueAt;
     // Host slots advance monotonically. The persisted next/in-flight slot
@@ -364,9 +369,9 @@ export class ScheduleService {
       ...(result.output !== undefined && { output: bounded(result.output, OUTPUT_BYTES) }),
       ...(result.error !== undefined && { error: bounded(result.error, ERROR_BYTES) }) });
     if (record.cancelRequested) record.state = 'cancelled';
-    else if (!result.success && !interruptedCron) {
+    else if (!result.success && (record.rule.kind === 'once' || !admitted || result.stopSchedule)) {
       record.state = 'failed';
-      record.error = bounded(result.error ?? 'Host schedule execution failed.', ERROR_BYTES);
+      record.error = error;
     } else if (record.rule.kind === 'once') record.state = 'completed';
     else this.advanceHost(record, Math.max(due, this.now()));
     return id;
@@ -418,6 +423,8 @@ export class ScheduleService {
     }
     const missed = due < this.hostStartup;
     if (record.inFlightDueAt === undefined && record.rule.kind === 'cron' && (missed || now - due >= 60_000)) {
+      record.lastOccurrence = { dueAt: due, status: 'skipped', error: missed
+        ? 'The slot elapsed while the scheduler was offline.' : 'The slot expired before dispatch.' };
       this.advanceHost(record, Math.max(now, this.hostStartup));
       return true;
     }
@@ -426,7 +433,8 @@ export class ScheduleService {
     const error = record.inFlightDueAt !== undefined
       ? 'Host schedule execution outcome is unknown after restart. The occurrence was not replayed.'
       : 'One-shot schedule was missed while the service was offline.';
-    deliveries.push(this.finishHost(record, due, { success: false, error }));
+    deliveries.push(this.finishHost(record, due, { success: false, error,
+      ...(record.inFlightDueAt !== undefined && { outcomeUnknown: true }) }));
     return true;
   }
 
@@ -516,7 +524,9 @@ export class ScheduleService {
         if (result?.success && record.inFlightDueAt !== due) throw new Error('Host dispatch completed without admission.');
         if (!result && record.inFlightDueAt === due) throw new Error('Admitted host occurrence returned no result. Its outcome is unknown.');
       }
-    } catch (error) { result = { success: false, error: errorText(error) }; }
+    } catch (error) {
+      result = { success: false, error: errorText(error), ...(record.inFlightDueAt === due && { outcomeUnknown: true }) };
+    }
     finally { open = false; }
     const delivery = await this.serial(async () => {
       this.hostAttempts.delete(record.id);
@@ -1170,13 +1180,14 @@ export class ScheduleService {
 
   private load(data: unknown, hostCatalog = false): void {
     const catalog = object(data, ['version', 'records', 'pending', 'purged', 'cleanup', 'purgeRequests']);
-    if (!(hostCatalog ? [6, 7] : [1, 2, 3, 4, 5, 6]).includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
+    if (!(hostCatalog ? [6, 7, 8] : [1, 2, 3, 4, 5, 6]).includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
       || !Array.isArray(catalog.pending) || catalog.pending.length > this.maxPending) throw new Error('Invalid schedule catalog envelope.');
     const records = new Map<string, ScheduleRecord>();
     const pending = new Map<string, PendingDelivery>();
     for (const value of catalog.records) {
       const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'cleanupConfirmed', 'recovery', 'completedOccurrences', 'skippedOccurrences',
-        'engine', 'sessionId', ...(catalog.version === 7 ? ['bindingEpoch'] : []), 'nextDueAt', 'inFlightDueAt']);
+        'engine', 'sessionId', ...(Number(catalog.version) >= 7 ? ['bindingEpoch'] : []),
+        ...(catalog.version === 8 ? ['lastOccurrence'] : []), 'nextDueAt', 'inFlightDueAt']);
       validateScheduleId(record.id); validateOwner(record as unknown as ScheduleOwner); validateSchedulePrompt(record.prompt);
       text(record.cwd, 4096);
       if (!path.isAbsolute(record.cwd) || !(record.engine === 'host' ? isHostScheduleBackend(record.backend) : isNativeScheduleBackend(record.backend))
@@ -1221,9 +1232,18 @@ export class ScheduleService {
         if (Number(catalog.version) < 6 || record.nativeId !== undefined || record.recovery !== undefined
           || record.cleanupConfirmed !== undefined || record.creationRefused !== undefined || record.skippedOccurrences !== undefined
           || record.state === 'creating') throw new Error('Invalid host schedule identity.');
-        if (catalog.version === 7 && record.bindingEpoch === undefined && record.state !== 'interrupted') throw new Error('Missing host binding epoch.');
+        if (Number(catalog.version) >= 7 && record.bindingEpoch === undefined && record.state !== 'interrupted') throw new Error('Missing host binding epoch.');
         if (record.bindingEpoch !== undefined || record.sessionId !== undefined) text(record.sessionId);
         const due = record.nextDueAt !== undefined ? record.nextDueAt : record.inFlightDueAt;
+        if (record.lastOccurrence !== undefined) {
+          const last = object(record.lastOccurrence, ['dueAt', 'status', 'error']);
+          if (typeof last.dueAt !== 'number' || !Number.isSafeInteger(last.dueAt) || last.dueAt <= record.createdAt
+            || (last.status === 'skipped' ? rule.kind !== 'cron' || nextHostDue(rule as unknown as ScheduleRule, last.dueAt - 1) !== last.dueAt
+              : !Array.isArray(record.completedOccurrences) || record.completedOccurrences.at(-1) !== `host-${last.dueAt}`)
+            || typeof due === 'number' && due <= last.dueAt || !['succeeded', 'failed', 'unknown', 'aborted', 'skipped'].includes(last.status as string)
+            || last.error !== undefined && (last.status === 'succeeded' || typeof last.error !== 'string'
+              || Buffer.byteLength(last.error) > ERROR_BYTES)) throw new Error('Invalid host occurrence outcome.');
+        }
         if ((record.nextDueAt !== undefined) !== (record.state === 'active')
           || (record.state === 'running' && record.inFlightDueAt === undefined)
           || record.inFlightDueAt !== undefined && !['running', 'cancelled'].includes(record.state as string)
@@ -1233,7 +1253,7 @@ export class ScheduleService {
           || nextHostDue(rule as unknown as ScheduleRule, due - 1) !== due
           || Array.isArray(record.completedOccurrences) && record.completedOccurrences.includes(`host-${due}`))) throw new Error('Invalid host occurrence receipt.');
       } else if (record.engine !== undefined || record.sessionId !== undefined || record.nextDueAt !== undefined
-        || record.inFlightDueAt !== undefined) throw new Error('Unexpected host schedule fields.');
+        || record.inFlightDueAt !== undefined || record.lastOccurrence !== undefined) throw new Error('Unexpected host schedule fields.');
       records.set(record.id, structuredClone(record) as unknown as ScheduleRecord);
     }
     for (const value of catalog.pending) {
@@ -1251,7 +1271,7 @@ export class ScheduleService {
     if (Number(catalog.version) >= 3) {
       if (!Array.isArray(catalog.purged) || catalog.purged.length > MAX_PURGED_IDS) throw new Error('Invalid purge fences.');
       for (const value of catalog.purged) {
-        const fence = object(value, ['id', 'threadId', 'openId', 'generation', ...(catalog.version === 7 ? ['bindingEpoch'] : [])]);
+        const fence = object(value, ['id', 'threadId', 'openId', 'generation', ...(Number(catalog.version) >= 7 ? ['bindingEpoch'] : [])]);
         validateScheduleId(fence.id); validateOwner(fence as unknown as ScheduleOwner);
         if (records.has(fence.id) || purged.has(fence.id)) throw new Error('Conflicting purge fence.');
         purged.set(fence.id, ownerOf(fence as unknown as ScheduleOwner));
@@ -1334,7 +1354,7 @@ export class ScheduleService {
   private async persistCatalog(host: boolean): Promise<void> {
     const filename = host ? this.hostCatalogPath : this.catalogPath;
     const belongs = (id: string) => this.hostCatalogIds.has(id) === host;
-    const snapshot = JSON.stringify({ version: host ? 7 : 6,
+    const snapshot = JSON.stringify({ version: host ? 8 : 6,
       records: [...this.records.values()].filter(row => belongs(row.id)),
       pending: [...this.pending.values()].filter(row => belongs(row.scheduleId)),
       cleanup: host ? [] : [...this.cleanup.values()],

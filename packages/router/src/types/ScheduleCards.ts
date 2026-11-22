@@ -17,9 +17,15 @@ export interface ScheduleCardEntry {
   error?: string;
   canCancel: boolean;
   pending?: 'execution' | 'delivery';
+  nextDueAt?: number;
+  lastOccurrence?: {
+    dueAt: number;
+    status: 'succeeded' | 'failed' | 'unknown' | 'skipped' | 'aborted';
+    error?: string;
+  };
 }
 export type ScheduleView = 'current' | 'history';
-export function scheduleView(entry: ScheduleCardEntry): ScheduleView {
+export function scheduleView(entry: Pick<ScheduleCardEntry, 'state'>): ScheduleView {
   return ['creating', 'active', 'running'].includes(entry.state) ? 'current' : 'history';
 }
 export interface ScheduleMenu {

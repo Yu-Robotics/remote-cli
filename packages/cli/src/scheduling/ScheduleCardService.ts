@@ -19,6 +19,16 @@ const valid = (value: unknown): value is string => typeof value === 'string' && 
   && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
 const literal = (value: string, max: number) => value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
 
+function cronDetails(record: ScheduleRecord) {
+  if (record.engine !== 'host' || record.rule.kind !== 'cron' || scheduleView(record) !== 'current') return {};
+  const last = record.lastOccurrence;
+  return {
+    ...(record.nextDueAt !== undefined && { nextDueAt: record.nextDueAt }),
+    ...(last && { lastOccurrence: { dueAt: last.dueAt, status: last.status,
+      ...(last.error && { error: literal(last.error, 240) }) } }),
+  };
+}
+
 function page(menu: ScheduleMenu, choices: ScheduleMenu['entries']): ScheduleMenu {
   let bytes = 0, end = 0;
   while (end < choices.length && end < 100) {
@@ -48,11 +58,14 @@ export class ScheduleCardService {
     const menu: ScheduleMenu = { snapshotId: randomUUID(), threadId: owner.threadId,
       threadName: literal(this.dependencies.threadName(owner.threadId), 100), expiresAt: Date.now() + TTL,
       entries: records.filter(record => record.openId === owner.openId && record.threadId === owner.threadId
-        && record.generation === owner.generation).sort((a, b) => b.createdAt - a.createdAt)
+        && record.generation === owner.generation
+        && (record.bindingEpoch === undefined ? record.engine !== 'host' : record.bindingEpoch === owner.bindingEpoch))
+        .sort((a, b) => b.createdAt - a.createdAt)
         .map(record => ({ value: randomUUID(), id: record.id, backend: record.backend,
         state: record.state, rule: literal(record.rule.kind === 'once' ? record.rule.at
           : `${record.rule.expression} (${record.rule.timezone})`, 160), prompt: literal(record.prompt, 240),
         ...(record.error ? { error: literal(record.error, 240) } : {}),
+        ...cronDetails(record),
         ...(record.inFlightDueAt !== undefined ? { pending: 'execution' as const }
           : this.dependencies.deliveryPending?.(owner, record.id) ? { pending: 'delivery' as const } : {}),
         canCancel: this.dependencies.canCancel(owner, record.id) })) };

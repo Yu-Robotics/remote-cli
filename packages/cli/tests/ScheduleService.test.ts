@@ -185,7 +185,7 @@ describe('ScheduleService', () => {
       }
       await service.create({ ...owner, bindingEpoch: undefined }, hostInput());
       expect(current).toHaveBeenCalledWith(owner);
-      expect(await read()).toMatchObject({ version: 7, records: [{ bindingEpoch: owner.bindingEpoch }] });
+      expect(await read()).toMatchObject({ version: 8, records: [{ bindingEpoch: owner.bindingEpoch }] });
       const rebound = { ...owner, bindingEpoch: 'new' };
       expect(await service.list(rebound)).toEqual([]);
       await expect(service.cancel(rebound, 'host-a')).rejects.toThrow(/owner/);
@@ -365,7 +365,8 @@ describe('ScheduleService', () => {
       service = await run(dispatch);
       await service.retryDeliveries();
       const records = await service.list(owner);
-      expect(records).toEqual([expect.objectContaining({ id: 'cron', state: 'active', nextDueAt: now + 4 * interval }),
+      expect(records).toEqual([expect.objectContaining({ id: 'cron', state: 'active', nextDueAt: now + 4 * interval,
+        lastOccurrence: { dueAt: now + interval, status: 'skipped', error: expect.stringContaining('offline') } }),
         expect.objectContaining({ id: 'once', state: 'failed', error: expect.stringMatching(/missed/) })]);
       expect(deliver.mock.calls[0][0]).toMatchObject({ schedule: { id: 'once' }, success: false, error: expect.stringMatching(/missed/) });
       expect(dispatch).not.toHaveBeenCalled();
@@ -406,7 +407,8 @@ describe('ScheduleService', () => {
       interrupted.resolve();
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, occurrenceId: `host-${now + interval}`,
-        error: expect.stringContaining('/abort'), schedule: { state: 'active', nextDueAt: now + 3 * interval } });
+        error: expect.stringContaining('/abort'), schedule: { state: 'active', nextDueAt: now + 3 * interval,
+          lastOccurrence: { dueAt: now + interval, status: 'aborted' } } });
       await service.destroy(); service = await run(dispatch);
       await tick(interval - 1000);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
@@ -414,17 +416,47 @@ describe('ScheduleService', () => {
         schedule: { state: 'active', nextDueAt: now + 4 * interval } });
     });
 
-    it.each(['once', 'cancel', 'failure'])('preserves terminal %s semantics on a failed host fire', async reason => {
+    it.each(['once', 'cancel', 'permanent failure'])('preserves terminal %s semantics on a failed host fire', async reason => {
       const service = await run(async (_record, _id, admit) => {
         if (!await admit()) return;
         if (reason === 'cancel') await service.cancel(owner, 'job');
-        return { success: false, ...(reason !== 'failure' && { abortedByUser: true as const }), error: 'Occurrence failed' };
+        return { success: false, ...(reason === 'permanent failure' ? { stopSchedule: true as const } : { abortedByUser: true as const }), error: 'Occurrence failed' };
       });
       await service.create(owner, hostInput('job', reason !== 'once'));
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, schedule: { state: reason === 'cancel' ? 'cancelled' : 'failed' } });
       expect((await service.list(owner))[0].nextDueAt).toBeUndefined();
+    });
+
+    it('records two failed cron slots and a later success across restart with independent outbox receipts', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, id, admit) => {
+        if (!await admit()) return;
+        return id === `host-${now + 3 * interval}` ? { success: true, output: 'Recovered' }
+          : { success: false, error: 'Upstream unavailable' };
+      });
+      deliver.mockRejectedValue(new Error('Offline'));
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('cron', true));
+      for (let i = 1; i <= 3; i++) {
+        await tick(interval);
+        await vi.waitFor(async () => expect((await read()).pending).toHaveLength(i));
+        const row = (await service.list(owner))[0];
+        expect(row).toMatchObject({ state: 'active', nextDueAt: clock + interval });
+        expect(row.lastOccurrence).toEqual(i === 3 ? { dueAt: clock, status: 'succeeded' }
+          : { dueAt: clock, status: 'failed', error: 'Upstream unavailable' });
+        expect(row.error).toBeUndefined();
+        await service.destroy();
+        service = await run(dispatch);
+        expect((await service.list(owner))[0]).toEqual(row);
+      }
+      const ids = [1, 2, 3].map(i => `host-${now + i * interval}`);
+      expect(dispatch.mock.calls.map(([, id]) => id)).toEqual(ids);
+      expect((await read()).pending.map((row: ScheduleDelivery) => [row.occurrenceId, row.success])).toEqual(
+        ids.map((id, index) => [id, index === 2]));
+      deliver.mockResolvedValue(undefined);
+      await service.retryDeliveries();
+      expect((await read()).pending).toEqual([]);
     });
 
     it('defers busy threads under the same occurrence ID and expires the prior admission callback', async () => {
@@ -444,6 +476,38 @@ describe('ScheduleService', () => {
       await tick(1000);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(dispatch.mock.calls[0][1]).toEqual(dispatch.mock.calls[1][1]);
+    });
+
+    it('keeps a historical v7 failed cron stopped without inventing a last outcome', async () => {
+      const dispatch = vi.fn();
+      let service = await run(dispatch);
+      await service.create(owner, hostInput('old', true));
+      await service.destroy();
+      const catalog = await read();
+      catalog.version = 7;
+      const [row] = catalog.records;
+      delete row.nextDueAt;
+      Object.assign(row, { state: 'failed', error: 'Prior failure', completedOccurrences: [`host-${now + interval}`] });
+      await fs.writeFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
+      service = await run(dispatch);
+      await tick(2 * interval);
+      expect((await service.list(owner))[0]).toEqual(row);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it('records a missing admitted result as unknown and starts only the next cron slot', async () => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, id, admit) => {
+        if (!await admit() || id === `host-${now + interval}`) return undefined;
+        return { success: true };
+      });
+      const service = await run(dispatch);
+      await service.create(owner, hostInput('cron', true));
+      await tick(interval); await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: clock + interval,
+        lastOccurrence: { dueAt: clock, status: 'unknown', error: expect.stringContaining('outcome is unknown') } });
+      await tick(interval); await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      expect(dispatch.mock.calls.map(([, id]) => id)).toEqual([`host-${now + interval}`, `host-${now + 2 * interval}`]);
     });
 
     it.each(['cancel', 'owner change', 'shutdown'])('denies admission after %s during reservation', async barrier => {
@@ -494,7 +558,7 @@ describe('ScheduleService', () => {
       expect(cleanupFor).not.toHaveBeenCalled();
     });
 
-    it('fences an unknown in-flight occurrence across restart and ignores late completion from the old owner', async () => {
+    it.each([false, true])('fences an unknown in-flight slot across restart and ignores late completion (cron=%s)', async cron => {
       const admitted = deferred<void>(), finish = deferred<void>();
       const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, admit) => {
         if (!await admit()) throw new Error('Expected admission');
@@ -502,26 +566,31 @@ describe('ScheduleService', () => {
         return { success: true, output: 'late' };
       });
       const first = await run(dispatch);
-      await first.create(owner, hostInput());
+      await first.create(owner, hostInput('host-a', cron));
       await expect(make().initialize()).rejects.toThrow(/owns the schedule catalog/);
       await tick(interval); await admitted.promise; await first.destroy();
       const next = await run(dispatch);
       finish.resolve();
       await next.retryDeliveries();
       expect(deliver.mock.calls[0][0]).toMatchObject({ success: false, error: expect.stringMatching(/outcome is unknown/) });
-      await tick(2 * interval);
-      expect(dispatch).toHaveBeenCalledOnce();
-      expect(deliver).toHaveBeenCalledOnce();
+      expect((await next.list(owner))[0]).toMatchObject({ state: cron ? 'active' : 'failed',
+        lastOccurrence: { dueAt: clock, status: 'unknown', error: expect.stringContaining('not replayed') } });
+      await tick(interval);
+      if (cron) {
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+        expect(dispatch.mock.calls.map(([, id]) => id)).toEqual([`host-${now + interval}`, `host-${now + 2 * interval}`]);
+        expect((await next.list(owner))[0].lastOccurrence).toEqual({ dueAt: clock, status: 'succeeded' });
+      } else {
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(deliver).toHaveBeenCalledOnce();
+      }
       expect((await read()).pending).toEqual([]);
     });
 
-    it.each(['throw', 'domain failure', 'success without admission', 'undefined after admission'])('makes %s terminal for only its own job', async mode => {
-      const dispatch: Dispatch = async (_record, _id, admit) => {
+    it.each(['throw', 'success without admission'])('makes pre-admission %s terminal for only its own job', async mode => {
+      const dispatch: Dispatch = async () => {
         if (mode === 'throw') throw new Error('Session mismatch');
-        if (mode === 'success without admission') return { success: true };
-        await admit();
-        if (mode === 'domain failure') return { success: false, error: 'Backend session unavailable.' };
-        return undefined;
+        return { success: true };
       };
       const service = await run(dispatch);
       await service.create(owner, hostInput('cron', true));
@@ -644,6 +713,7 @@ describe('ScheduleService', () => {
       { completedOccurrences: [`host-${now + interval}`] }, { cancelRequested: true },
       { bindingEpoch: undefined }, { bindingEpoch: null }, { bindingEpoch: '' }, { bindingEpoch: 'x'.repeat(257) },
       { sessionId: undefined },
+      { lastOccurrence: { dueAt: now + interval, status: 'unknown' } },
     ])('rejects conflicting host timing receipts %o before arming any work', async fields => {
       const dispatch = vi.fn(async () => undefined);
       const service = await run(dispatch);

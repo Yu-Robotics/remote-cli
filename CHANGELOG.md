@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.277] - 2026-11-22
+
+### Fixed
+- Keep CLI-managed recurring schedules active after an individual execution fails. Show the latest occurrence outcome separately from the next due time on the schedule card.
+
 ## [1.6.276] - 2026-11-21
 
 ### Changed

@@ -33,8 +33,8 @@ const text = (value: unknown, max: number): value is string => typeof value === 
 const id = (value: unknown): value is string => text(value, 256) && value.length > 0;
 const escape = (value: string) => value.replace(/[\\`*_{}\[\]()<>!#|~]/g, '\\$&');
 
-function formatUtcDateTime(value: string): string | undefined {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return;
+function formatUtcDateTime(value: string | number): string | undefined {
+  if (typeof value === 'string' && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return;
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return;
   const pad = (part: number) => String(part).padStart(2, '0');
@@ -44,6 +44,9 @@ function formatUtcDateTime(value: string): string | undefined {
 function displayRule(rule: string): string {
   return formatUtcDateTime(rule) ?? rule;
 }
+
+const validSlotTime = (value: unknown): boolean => typeof value === 'number'
+  && Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
 
 function statusPresentation(state: ScheduleCardEntry['state'], cleanupPending: boolean): { label: string; color: string } {
   if (cleanupPending) return { label: 'Stopping · exit unconfirmed', color: 'orange' };
@@ -73,6 +76,10 @@ export function parseScheduleMenu(value: unknown, allBackends = true): ScheduleM
       || !isScheduleBackend(entry.backend, allBackends) || !['creating', 'active', 'running', 'completed', 'cancelled', 'interrupted', 'failed'].includes(entry.state)
       || !text(entry.rule, 160) || !text(entry.prompt, 240) || typeof entry.canCancel !== 'boolean'
       || (entry.error !== undefined && !text(entry.error, 240))
+      || (entry.nextDueAt !== undefined && !validSlotTime(entry.nextDueAt))
+      || (entry.lastOccurrence !== undefined && (!entry.lastOccurrence || !validSlotTime(entry.lastOccurrence.dueAt)
+        || !['succeeded', 'failed', 'unknown', 'skipped', 'aborted'].includes(entry.lastOccurrence.status)
+        || (entry.lastOccurrence.error !== undefined && !text(entry.lastOccurrence.error, 240))))
       || (entry.pending !== undefined && !['execution', 'delivery'].includes(entry.pending))) return;
     values.add(entry.value);
   }
@@ -270,6 +277,12 @@ export class ScheduleCards {
       elements.push(markdown(`**${escape(entry.prompt)}**`));
       elements.push(markdown(`<text_tag color='${status.color}'>${status.label}</text_tag> · ${escape(entry.backend)} · ${escape(state.menu.threadName)}`));
       elements.push(notation(`When: ${escape(displayRule(entry.rule))}\nReference: \`${escape(entry.id)}\``));
+      if (state.view === 'current') {
+        if (entry.nextDueAt !== undefined) elements.push(notation(`Next due: ${formatUtcDateTime(entry.nextDueAt)}`));
+        const last = entry.lastOccurrence;
+        if (last) elements.push(notation(`Latest slot: ${formatUtcDateTime(last.dueAt)} · ${last.status}`
+          + (last.error ? `\n${escape(last.error)}` : '')));
+      }
       if (entry.pending) elements.push(notation(entry.pending === 'delivery' ? 'Result delivery pending.' : 'Execution pending.'));
       if (entry.error) elements.push(notation(`<text_tag color='red'>Details</text_tag> · ${escape(entry.error)}`));
       if (state.confirm) {

@@ -4,7 +4,7 @@ import type { ScheduleActionMessage } from '../src/types/ScheduleCards';
 import type { ScheduleRecord } from '../src/scheduling/types';
 
 function fixture() {
-  const owner = { openId: 'owner', threadId: 'thread', generation: 'generation' };
+  const owner = { openId: 'owner', threadId: 'thread', generation: 'generation', bindingEpoch: 'binding' };
   const records: ScheduleRecord[] = [{ ...owner, id: 'schedule', backend: 'claude', cwd: '.', prompt: 'Synthetic task',
     rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' }, state: 'active', createdAt: 1 }];
   const dependencies = { current: vi.fn(() => true), threadName: () => 'Original thread',
@@ -38,6 +38,22 @@ describe('ScheduleCardService', () => {
     expect((await f.service.action({ ...request, openId: 'other' })).success).toBe(false);
     expect(f.dependencies.refresh).not.toHaveBeenCalled();
     expect(f.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it('includes bounded slot details only for current host cron entries in the original binding', () => {
+    const f = fixture();
+    const lastOccurrence = { dueAt: 1000, status: 'failed' as const, error: 'failure\n' + 'x'.repeat(300) };
+    const cron = { ...f.records[0], engine: 'host' as const, nextDueAt: 61000, lastOccurrence };
+    const menu = f.service.open(f.owner, [cron, { ...cron, id: 'foreign', bindingEpoch: 'old-binding' },
+      { ...cron, id: 'once', rule: { kind: 'once', at: '2030-01-01T00:00:00Z' } },
+      { ...cron, id: 'native', engine: undefined, bindingEpoch: undefined }, { ...cron, id: 'retired', state: 'cancelled' }]);
+    expect(menu.entries.map(entry => entry.id)).toEqual(['schedule', 'once', 'native', 'retired']);
+    expect(menu.entries[0]).toMatchObject({ state: 'active', nextDueAt: 61000,
+      lastOccurrence: { dueAt: 1000, status: 'failed', error: 'failure ' + 'x'.repeat(232) } });
+    for (const entry of menu.entries.slice(1)) {
+      expect(entry).not.toHaveProperty('lastOccurrence');
+      expect(entry).not.toHaveProperty('nextDueAt');
+    }
   });
 
   it('captures opaque choices and refreshes using the original owner without creating schedules', async () => {

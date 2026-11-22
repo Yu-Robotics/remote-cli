@@ -314,6 +314,27 @@ describe('MessageHandler schedule management and delivery', () => {
       scheduleId: 'host-task', bindingEpoch: binding.epoch }, output: 'Synthetic result' }]);
   });
 
+  it('defers a recurring slot for an unready original session, but stops on a known replacement', async () => {
+    const { record, dispatch } = await dispatchFixture();
+    Object.assign(record, { rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
+    const admit = vi.fn(async () => true);
+    f.executor.checkHostScheduleSession.mockImplementationOnce(() => { throw new Error('Session still settling'); });
+    expect(await dispatch(admit)).toBeUndefined();
+    expect(admit).not.toHaveBeenCalled();
+    expect(await dispatch(admit)).toMatchObject({ success: true });
+    f.executor.getSessionId.mockReturnValue('replacement');
+    expect(await dispatch(admit)).toMatchObject({ success: false, stopSchedule: true });
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a returned upstream failure and marks transport loss during execution unknown', async () => {
+    const { dispatch } = await dispatchFixture();
+    f.executor.execute.mockResolvedValueOnce({ success: false, output: '', error: 'Upstream unavailable' } as any);
+    expect(await dispatch()).toEqual({ success: false, output: '', error: 'Upstream unavailable' });
+    f.executor.execute.mockRejectedValueOnce(new Error('Connection lost'));
+    expect(await dispatch()).toMatchObject({ success: false, outcomeUnknown: true, error: 'Connection lost' });
+  });
+
   it.each([{ ...binding, openId: 'other' }, { ...binding, epoch: 'new-binding' }, { ...binding, deviceId: 'other-device' }])(
     'rechecks binding during admission and before delivering a retained result (%j)', async replacement => {
       const { dispatch, deliver } = await dispatchFixture();

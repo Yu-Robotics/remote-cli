@@ -592,6 +592,10 @@ managed schedules and their stored history. Legacy native cleanup may still
 require the original session.
 
 Both `/schedule list` and **Refresh status** display records stored by the CLI.
+For CLI-managed recurring schedules, a failed run leaves the next scheduled
+time in place. The schedule card shows the latest run and the next due time.
+Each future run still requires the original binding and conversation. An
+occurrence with an unknown outcome after restart is never replayed.
 The Feishu management card opens on current schedules. Open the history view to
 find completed, cancelled, failed, or interrupted schedules, including when the
 current view is empty. Switching views preserves the stored records.
