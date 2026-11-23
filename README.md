@@ -658,6 +658,10 @@ From CLI 1.6.278, ordinary AGY chat can also handle a task-list request while
 its own shell command is running in the background. AGY can request a stop for
 that specific command. The next message can use the same live conversation
 after the CLI verifies that the command and its notification have finished.
+From CLI 1.6.279, the same live chat can continue after the CLI confirms
+that a task-management request was refused. This includes repeated status
+checks, requests for tasks that have finished, and attempts to send input.
+The next message waits for outstanding commands to finish.
 
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when

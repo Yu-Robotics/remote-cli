@@ -174,7 +174,7 @@ export class AgyAcpRuntime {
         ? this.commands : undefined;
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
-        : this.chat ? this.chat.accept(event, payload, controls, !!this.active && this.active.hostScheduleSessionId === undefined
+        : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
           && !!this.options.hostScheduleChat && !this.options.worker && !this.hostScheduleUnsafe && !this.relayFault
           && (!this.commands?.pending || !!ordinaryCommands?.ordinaryCommandsPending) && !this.closing && !this.settingsBusy && !this.scheduleOperations,
           ordinaryCommands)

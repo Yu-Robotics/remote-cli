@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.279] - 2026-11-23
+
+### Fixed
+- Keep an ordinary AGY conversation available after a verified refusal of a native task-management request, including repeated status checks, input requests and requests for a task that has already finished. Only an exact stop request for an owned, outstanding shell command can execute. The next prompt waits for confirmed completion.
+
 ## [1.6.278] - 2026-11-22
 
 ### Fixed

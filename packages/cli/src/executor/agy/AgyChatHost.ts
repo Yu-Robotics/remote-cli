@@ -18,14 +18,14 @@ export class AgyChatHost {
   private monitor: AgySessionSchedules;
   private failure?: string;
   // Live evidence only. A newly loaded session cannot inherit these exceptions.
-  private readonly listDenials = new Map<number, string>();
-  private pendingListStep?: number;
+  private readonly managementDenials = new Map<number, { reason: string; planner: TranscriptRecord }>();
+  private pendingDenialStep?: number;
   private managedThisTurn = false;
   private admittedKill = false;
-  get reusable(): boolean { return !this.blocked && this.pendingListStep === undefined && !this.records.some(row =>
+  get reusable(): boolean { return !this.blocked && this.pendingDenialStep === undefined && !this.records.some(row =>
     creationReceipt(row, this.sessionId, row.step_index) || nativeWake(row)
-    || row.type === 'GENERIC' && row.status !== 'DONE' && !this.listDenials.has(row.step_index)); }
-  get liveManagement(): boolean { return this.listDenials.size > 0 || this.admittedKill; }
+    || row.type === 'GENERIC' && row.status !== 'DONE' && !this.managementDenials.has(row.step_index)); }
+  get liveManagement(): boolean { return this.managementDenials.size > 0 || this.admittedKill; }
   private active = false;
   private cancelled = false;
   private rejectCancel?: (error: Error) => void;
@@ -45,7 +45,7 @@ export class AgyChatHost {
   accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false, commands?: AgyCommandTasks) {
     this.records = records;
     if (this.managedThisTurn && this.active && !allowForegroundManagement) this.fence(denialFailure);
-    if (this.listDenials.size) this.verifyListDenials(event, payload, records);
+    if (this.managementDenials.size) this.verifyManagementDenials(event, payload, records);
     if (event === 'PreInvocation' && this.turnStart === undefined && Number.isSafeInteger(payload.initialNumSteps)) this.turnStart = payload.initialNumSteps as number;
     const duplicateTool = this.observedTools.has(payload.stepIdx as number);
     if (event === 'PreToolUse' && Number.isSafeInteger(payload.stepIdx)) this.observedTools.add(payload.stepIdx as number);
@@ -64,18 +64,22 @@ export class AgyChatHost {
       const planner = records.at(-1);
       if (allowForegroundManagement && this.active && !this.cancelled && !duplicateTool && !this.blocked && start !== undefined
         && Number.isSafeInteger(step) && step > start && typeof call?.id === 'string' && call.id.length > 0 && call.id.length <= 256
-        && call.name === listCall.name && planner && this.managementPlanner(planner, step, call.args)) {
-        if (isDeepStrictEqual(call.args, listCall.args)) {
-          const reason = 'Native task listing is unavailable in ordinary chat (' + randomUUID() + ').';
-          this.listDenials.set(step, reason);
-          this.pendingListStep = step;
-          this.managedThisTurn = true;
-          return { decision: 'deny' as const, reason };
-        }
+        && call.name === listCall.name && call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+        && planner && this.managementPlanner(planner, step, call.args)) {
+        this.managedThisTurn = true;
         if (commands?.admitKill(step, call.id, call.args, planner)) {
-          this.admittedKill = this.managedThisTurn = true;
+          this.admittedKill = true;
           return { decision: 'allow' as const };
         }
+        let message = 'This native task management request is unavailable in ordinary chat';
+        if (isDeepStrictEqual(call.args, listCall.args)) message = 'Native task listing is unavailable in ordinary chat';
+        else if (commands?.ordinaryCommandTarget(step, 'status', call.args) !== undefined) {
+          message = 'Background command completion is pending. Wait for its completion notification';
+        }
+        const reason = message + ' (' + randomUUID() + ').';
+        this.managementDenials.set(step, { planner: structuredClone(planner), reason });
+        this.pendingDenialStep = step;
+        return { decision: 'deny' as const, reason };
       }
       this.fence(denialFailure);
     }
@@ -87,18 +91,18 @@ export class AgyChatHost {
     return row?.step_index === step - 1 && row.source === 'MODEL' && row.type === 'PLANNER_RESPONSE'
       && row.status === 'DONE' && isDeepStrictEqual(row.tool_calls, [{ name: listCall.name, args }]);
   }
-  private verifyListDenials(event: string, payload: HookPayload, records: TranscriptRecord[]): void {
+  private verifyManagementDenials(event: string, payload: HookPayload, records: TranscriptRecord[]): void {
     // The relay supplies unique, ordered steps from this session's anchored native transcript.
     let confirmed = 0;
     for (const [index, row] of records.entries()) {
-      const reason = this.listDenials.get(row.step_index);
-      if (reason === undefined) continue;
-      if (this.managementPlanner(records[index - 1], row.step_index, listCall.args) && row.status === 'ERROR' && !row.tool_calls?.length
-        && receiptText(row) === 'Encountered error in step execution: tool call denied by pre-tool hook: ' + reason) confirmed++;
+      const denial = this.managementDenials.get(row.step_index);
+      if (!denial) continue;
+      if (isDeepStrictEqual(records[index - 1], denial.planner) && row.status === 'ERROR' && !row.tool_calls?.length
+        && receiptText(row) === 'Encountered error in step execution: tool call denied by pre-tool hook: ' + denial.reason) confirmed++;
     }
-    if (confirmed !== this.listDenials.size || this.pendingListStep !== undefined && event !== 'PostInvocation'
-      || (event === 'PreToolUse' || event === 'PostToolUse') && this.listDenials.has(payload.stepIdx as number)) this.fence(denialFailure);
-    this.pendingListStep = undefined;
+    if (confirmed !== this.managementDenials.size || this.pendingDenialStep !== undefined && event !== 'PostInvocation'
+      || (event === 'PreToolUse' || event === 'PostToolUse') && this.managementDenials.has(payload.stepIdx as number)) this.fence(denialFailure);
+    this.pendingDenialStep = undefined;
   }
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
@@ -115,7 +119,7 @@ export class AgyChatHost {
         return { success: false, output: 'AGY foreground cancelled; completed side effects remain.', stopReason: 'cancelled' };
       }
       const result = this.monitor.endForeground();
-      if (this.managedThisTurn && (this.pendingListStep !== undefined || terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable)) {
+      if (this.managedThisTurn && (this.pendingDenialStep !== undefined || terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable)) {
         this.fence(denialFailure);
       }
       if (!result || this.blocked) throw new Error(this.blocked ?? 'AGY foreground hook terminal is missing.');

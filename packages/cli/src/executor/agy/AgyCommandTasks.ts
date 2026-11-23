@@ -40,16 +40,20 @@ export class AgyCommandTasks {
       && [...this.outstanding].every(step => this.calls.get(step)?.scheduled === false);
   }
 
-  admitKill(step: number, callId: string, args: unknown, planner: TranscriptRecord): boolean {
-    if (this.kill || !this.ordinaryCommandsPending || this.foregroundStart === undefined || step <= this.lastStep) return false;
+  ordinaryCommandTarget(step: number, action: 'status' | 'kill', args: unknown): number | undefined {
+    if (this.kill || !this.ordinaryCommandsPending || this.foregroundStart === undefined || step <= this.lastStep) return;
     for (const target of this.outstanding) {
       const taskId = this.session + '/task-' + target;
-      if (!isDeepStrictEqual(args, { Action: 'kill', TaskId: taskId })) continue;
-      this.kill = { step, target, taskId, callId, cwd: this.calls.get(target)!.cwd, posted: false, exitObserved: false };
-      this.receipts.set(planner.step_index, identity(planner));
-      return true;
+      if (isDeepStrictEqual(args, { Action: action, TaskId: taskId })) return target;
     }
-    return false;
+  }
+
+  admitKill(step: number, callId: string, args: unknown, planner: TranscriptRecord): boolean {
+    const target = this.ordinaryCommandTarget(step, 'kill', args);
+    if (target === undefined) return false;
+    this.kill = { step, target, taskId: this.session + '/task-' + target, callId, cwd: this.calls.get(target)!.cwd, posted: false, exitObserved: false };
+    this.receipts.set(planner.step_index, identity(planner));
+    return true;
   }
 
   observeTool(step: number, name: string, id: string, args: Record<string, unknown>, cwd: string, scheduled = false): void {

@@ -195,24 +195,28 @@ function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRu
 }
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
-  it.each(['confirmed', 'worker', 'mutation', 'extra args', 'planner mismatch', 'missing', 'wrong nonce',
+  it.each(['confirmed', 'worker', 'loaded', 'mutation', 'extra args', 'planner mismatch', 'missing', 'wrong nonce', 'wrong source',
+    'rewritten planner', 'malformed call', 'missing Stop',
     'wrong step', 'wrong status', 'late post-tool', 'other unfinished tool', 'failed Stop', 'rewritten receipt', 'idle tool'])(
-    'continues only the original main foreground session after a verified list denial: %s', async scenario => {
+    'requires a verified management denial on the original main foreground session: %s', async scenario => {
       const worker = scenario === 'worker';
-      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: !worker, worker });
+      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: !worker, worker,
+        sessionId: scenario === 'loaded' ? native.sessionId : undefined });
       const turn = runtime.execute('hold', {});
       await vi.waitFor(() => expect(last()?.release).toBeDefined());
       const client = last();
-      const args = scenario === 'mutation' ? { Action: 'kill' } : scenario === 'extra args' ? { Action: 'list', TaskId: 'other' } : { Action: 'list' };
+      const args = scenario === 'malformed call' ? null : scenario === 'mutation' ? { Action: 'kill' }
+        : scenario === 'extra args' ? { Action: 'list', TaskId: 'other' } : { Action: 'list' };
       client.row('PLANNER_RESPONSE', '');
       client.rows.at(-1).tool_calls = [{ name: 'manage_task', args: scenario === 'planner mismatch' ? {} : args }];
       const step = client.cursor++;
       const decision = client.hook('PreToolUse', { stepIdx: step, toolCall: { name: 'manage_task', id: 'list-call', args } });
       expect(decision.decision).toBe('deny');
+      if (scenario === 'rewritten planner') client.rows.at(-1).content += 'changed';
       if (scenario !== 'missing') {
         const text = 'Encountered error in step execution: tool call denied by pre-tool hook: ' +
           (scenario === 'wrong nonce' ? 'unrelated' : decision.reason);
-        client.row('GENERIC', text, 'MODEL', scenario === 'wrong status' ? 'DONE' : 'ERROR',
+        client.row('GENERIC', text, scenario === 'wrong source' ? 'SYSTEM' : 'MODEL', scenario === 'wrong status' ? 'DONE' : 'ERROR',
           scenario === 'wrong step' ? client.cursor++ : step);
       }
       client.hook('PostInvocation');
@@ -224,11 +228,11 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       }
       client.row('PLANNER_RESPONSE', 'Listing unavailable.');
       client.hook('PostInvocation');
-      client.hook('Stop', { terminationReason: scenario === 'failed Stop' ? 'ERROR' : 'NO_TOOL_CALL', error: scenario === 'failed Stop' ? 'failed' : '' });
+      if (scenario !== 'missing Stop') client.hook('Stop', { terminationReason: scenario === 'failed Stop' ? 'ERROR' : 'NO_TOOL_CALL', error: scenario === 'failed Stop' ? 'failed' : '' });
       client.release({ stopReason: 'end_turn' });
-      if (['confirmed', 'rewritten receipt', 'idle tool'].includes(scenario)) {
+      if (['confirmed', 'mutation', 'extra args', 'rewritten receipt', 'idle tool'].includes(scenario)) {
         expect(await turn).toMatchObject({ success: true, output: 'Listing unavailable.' });
-        if (scenario === 'confirmed') {
+        if (['confirmed', 'mutation', 'extra args'].includes(scenario)) {
           expect(await runtime.execute('next ordinary prompt', {})).toMatchObject({ success: true });
           expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
         } else if (scenario === 'rewritten receipt') {
@@ -285,21 +289,62 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const result = `Task id "${task.id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\nFirst line\r\nSecond line\r\n\nLog: ${task.log}`;
     client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + `[Message] timestamp=2026-01-01T00:00:00Z sender=${task.id} priority=MESSAGE_PRIORITY_HIGH content=${result}\n</SYSTEM_MESSAGE>`, 'SYSTEM');
   }
-  function manageCommand(client: ReturnType<typeof last>, args: Record<string, string>) {
+  function manageCommand(client: ReturnType<typeof last>, args: Record<string, string>, plannerArgs = args) {
     client.row('PLANNER_RESPONSE', '');
-    client.rows.at(-1).tool_calls = [{ name: 'manage_task', args }];
+    client.rows.at(-1).tool_calls = [{ name: 'manage_task', args: plannerArgs }];
     const stepIdx = client.cursor++;
     const payload = { stepIdx, toolCall: { name: 'manage_task', id: 'manage-' + stepIdx, args } };
     return { payload, decision: client.hook('PreToolUse', payload) };
   }
-  it.each(['foreground completion', 'delayed completion', 'missing completion', 'active continuation'])(
-    'preserves only live chat after listing an outstanding foreground command: %s', async timing => {
+  it.each(['confirmed', 'replayed nonce'])('verifies repeated refusals across ordinary prompts: %s', async scenario => {
+    const requests = [{ Action: 'send_input', TaskId: 'other/task-1', Input: 'synthetic input' },
+      { Action: 'unsupported' }, {}] as Record<string, string>[];
+    const reasons = new Set<string>();
+    for (let turnIndex = 0; turnIndex < 2; turnIndex++) {
+      const turn = executor.execute('hold');
+      await vi.waitFor(() => expect(last()?.prompts).toHaveLength(turnIndex + 1));
+      const client = last();
+      for (const args of requests) {
+        const { decision, payload } = manageCommand(client, args);
+        expect(decision.decision).toBe('deny');
+        expect(decision.reason).toContain('request is unavailable');
+        expect(reasons.has(decision.reason)).toBe(false);
+        const replay = scenario === 'replayed nonce' && turnIndex === 1;
+        const reason = replay ? [...reasons][0] : decision.reason;
+        reasons.add(decision.reason);
+        client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + reason,
+          'MODEL', 'ERROR', payload.stepIdx);
+        client.hook('PostInvocation');
+        client.hook('PreInvocation', { initialNumSteps: client.cursor });
+        if (replay) break;
+      }
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      if (scenario === 'replayed nonce' && turnIndex === 1) {
+        await expect(turn).rejects.toThrow();
+        await expect(executor.execute('next ordinary prompt')).rejects.toThrow();
+      } else {
+        await expect(turn).resolves.toMatchObject({ success: true, sessionAbbr: client.session.slice(0, 8) });
+      }
+      expect(() => executor.checkHostScheduleSession(client.session)).toThrow();
+    }
+    if (scenario === 'confirmed') {
+      await expect(executor.execute('next ordinary prompt')).resolves.toMatchObject({ success: true });
+      expect(last().prompts).toEqual(['hold', 'hold', 'next ordinary prompt']);
+    }
+    expect(native.clients).toHaveLength(1);
+    await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] }))
+      .rejects.toThrow('reconnect was refused');
+  });
+  it.each(['list', 'status'].flatMap(action =>
+    ['foreground completion', 'delayed completion', 'missing completion', 'active continuation'].map(timing => ({ action, timing }))))(
+    'preserves only live chat after $action on an outstanding foreground command: $timing', async ({ action, timing }) => {
       const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
       const turn = runtime.execute('hold', {});
       await vi.waitFor(() => expect(last()?.release).toBeDefined());
       const client = last(), task = yieldCommand(client);
-      const { decision, payload } = manageCommand(client, { Action: 'list' });
+      const { decision, payload } = manageCommand(client, action === 'status' ? { Action: action, TaskId: task.id } : { Action: action });
       expect(decision.decision).toBe('deny');
+      if (action === 'status') expect(decision.reason).toContain('command completion is pending');
       client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
         'MODEL', 'ERROR', payload.stepIdx);
       client.hook('PostInvocation');
@@ -333,14 +378,61 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       await runtime.close();
       expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
     });
+  it.each(['foreign session', 'unknown target', 'extra argument', 'completed target', 'missing creation', 'worker',
+    'scheduled', 'loaded', 'planner mismatch', 'changed planner', 'missing denial', 'wrong nonce'])(
+    'checks target, scope and receipt for a status refusal: %s', async scenario => {
+      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home },
+        worker: scenario === 'worker', sessionId: scenario === 'loaded' ? native.sessionId : undefined });
+      const turn = runtime.execute('hold', scenario === 'scheduled' ? { hostScheduleSessionId: native.sessionId } : {});
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      const task = scenario === 'missing creation' ? undefined : yieldCommand(client);
+      if (scenario === 'completed target') completion(client, task!);
+      const args: Record<string, string> = { Action: 'status', TaskId: task?.id ?? client.session + '/task-0' };
+      if (scenario === 'foreign session') args.TaskId = 'other/task-0';
+      if (scenario === 'unknown target') args.TaskId = client.session + '/task-999';
+      if (scenario === 'extra argument') args.extra = 'unexpected';
+      const { decision, payload } = manageCommand(client, args, scenario === 'planner mismatch' ? { Action: 'list' } : args);
+      expect(decision.decision).toBe('deny');
+      const unavailable = ['foreign session', 'unknown target', 'extra argument', 'completed target', 'missing creation'].includes(scenario);
+      if (unavailable) {
+        expect(decision.reason).toContain('request is unavailable');
+      } else if (['changed planner', 'missing denial', 'wrong nonce'].includes(scenario)) {
+        expect(decision.reason).toContain('command completion is pending');
+      } else {
+        expect(runtime.blocked).toBeTruthy();
+      }
+      if (scenario === 'changed planner') args.TaskId = 'other/task-0';
+      if (scenario !== 'missing denial') client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: '
+        + (scenario === 'wrong nonce' ? 'unrelated' : decision.reason), 'MODEL', 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      if (unavailable && task && scenario !== 'completed target') completion(client, task);
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      if (unavailable) {
+        await expect(turn).resolves.toMatchObject({ success: true });
+        await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
+        expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+      } else {
+        await expect(turn).rejects.toThrow();
+        expect(runtime.blocked).toBeTruthy();
+        await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+        expect(client.prompts).toEqual(['hold']);
+      }
+      expect(runtime.hostScheduleAvailable).toBe(false);
+      expect(runtime.reusable).toBe(false);
+      await runtime.close();
+      expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
+    });
   it.each(['cancelled', 'after list', 'missing notice', 'wrong exit log', 'wrong sender', 'rewritten receipt', 'delayed receipt', 'missing receipt', 'wrong receipt', 'missing callback',
-    'wrong callback', 'foreign target', 'extra argument', 'worker', 'scheduled', 'loaded'])(
+    'wrong callback', 'foreign target', 'extra argument', 'already completed', 'worker', 'scheduled', 'loaded'])(
     'limits native kill to an owned live foreground command: %s', async scenario => {
       const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home },
         worker: scenario === 'worker', sessionId: scenario === 'loaded' ? native.sessionId : undefined });
       const turn = runtime.execute('hold', scenario === 'scheduled' ? { hostScheduleSessionId: native.sessionId } : {});
       await vi.waitFor(() => expect(last()?.release).toBeDefined());
       const client = last(), task = yieldCommand(client);
+      if (scenario === 'already completed') completion(client, task);
       if (scenario === 'after list') {
         const list = manageCommand(client, { Action: 'list' });
         expect(list.decision.decision).toBe('deny');
@@ -352,7 +444,8 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       const args: Record<string, string> = { Action: 'kill', TaskId: scenario === 'foreign target' ? 'other/task-0' : task.id };
       if (scenario === 'extra argument') args.extra = 'unexpected';
       const { decision, payload } = manageCommand(client, args);
-      const denied = ['foreign target', 'extra argument', 'worker', 'scheduled', 'loaded'].includes(scenario);
+      const refused = ['foreign target', 'extra argument', 'already completed'].includes(scenario);
+      const denied = refused || ['worker', 'scheduled', 'loaded'].includes(scenario);
       expect(decision.decision).toBe(denied ? 'deny' : 'allow');
       const receipt = () => client.row('GENERIC', 'Task "' + (scenario === 'wrong receipt' ? 'other/task-0' : task.id) + '" cancelled.',
         'MODEL', 'DONE', payload.stepIdx);
@@ -372,8 +465,9 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
             + log + '\n</SYSTEM_MESSAGE>', 'SYSTEM');
         }
       }
+      if (refused && scenario !== 'already completed') completion(client, task);
       client.finish(); client.release({ stopReason: 'end_turn' });
-      if (['cancelled', 'after list', 'delayed receipt'].includes(scenario)) {
+      if (refused || ['cancelled', 'after list', 'delayed receipt'].includes(scenario)) {
         await expect(turn).resolves.toMatchObject({ success: true });
         await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
         expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
