@@ -117,7 +117,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   }
   finish(text = 'Synthetic result') {
     this.row('PLANNER_RESPONSE', text); this.hook('PostInvocation');
-    this.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '' });
+    this.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false });
   }
   async prompt(_id: string, blocks: any[]) {
     const text = blocks[0].text; this.prompts.push(text);
@@ -285,6 +285,109 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const result = `Task id "${task.id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\nFirst line\r\nSecond line\r\n\nLog: ${task.log}`;
     client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + `[Message] timestamp=2026-01-01T00:00:00Z sender=${task.id} priority=MESSAGE_PRIORITY_HIGH content=${result}\n</SYSTEM_MESSAGE>`, 'SYSTEM');
   }
+  function manageCommand(client: ReturnType<typeof last>, args: Record<string, string>) {
+    client.row('PLANNER_RESPONSE', '');
+    client.rows.at(-1).tool_calls = [{ name: 'manage_task', args }];
+    const stepIdx = client.cursor++;
+    const payload = { stepIdx, toolCall: { name: 'manage_task', id: 'manage-' + stepIdx, args } };
+    return { payload, decision: client.hook('PreToolUse', payload) };
+  }
+  it.each(['foreground completion', 'delayed completion', 'missing completion', 'active continuation'])(
+    'preserves only live chat after listing an outstanding foreground command: %s', async timing => {
+      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
+      const turn = runtime.execute('hold', {});
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last(), task = yieldCommand(client);
+      const { decision, payload } = manageCommand(client, { Action: 'list' });
+      expect(decision.decision).toBe('deny');
+      client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+        'MODEL', 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      if (timing === 'foreground completion') completion(client, task);
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ success: true });
+      if (timing !== 'foreground completion') {
+        await expect(runtime.execute('too soon', {})).rejects.toThrow('completion is pending');
+        expect(client.prompts).toEqual(['hold']);
+        if (timing !== 'missing completion') {
+          client.hook('PostToolUse', { stepIdx: task.step, toolCall: { name: 'run_command', id: 'call-' + task.step, args: {} } });
+          client.hook('PreInvocation', { initialNumSteps: client.cursor });
+          completion(client, task);
+          client.row('PLANNER_RESPONSE', 'Command finished.');
+          client.hook('PostInvocation');
+          await expect(runtime.execute('before idle Stop', {})).rejects.toThrow('completion is pending');
+          client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: timing === 'active continuation' });
+        }
+      }
+      if (timing === 'active continuation') {
+        await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+        expect(client.prompts).toEqual(['hold']);
+      } else if (timing !== 'missing completion') {
+        await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
+        expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+      }
+      expect(native.clients).toHaveLength(1);
+      expect(runtime.reusable).toBe(false);
+      expect(runtime.hostScheduleAvailable).toBe(false);
+      await runtime.close();
+      expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
+    });
+  it.each(['cancelled', 'after list', 'missing notice', 'wrong exit log', 'wrong sender', 'rewritten receipt', 'delayed receipt', 'missing receipt', 'wrong receipt', 'missing callback',
+    'wrong callback', 'foreign target', 'extra argument', 'worker', 'scheduled', 'loaded'])(
+    'limits native kill to an owned live foreground command: %s', async scenario => {
+      const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home },
+        worker: scenario === 'worker', sessionId: scenario === 'loaded' ? native.sessionId : undefined });
+      const turn = runtime.execute('hold', scenario === 'scheduled' ? { hostScheduleSessionId: native.sessionId } : {});
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last(), task = yieldCommand(client);
+      if (scenario === 'after list') {
+        const list = manageCommand(client, { Action: 'list' });
+        expect(list.decision.decision).toBe('deny');
+        client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + list.decision.reason,
+          'MODEL', 'ERROR', list.payload.stepIdx);
+        client.hook('PostInvocation');
+        client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      }
+      const args: Record<string, string> = { Action: 'kill', TaskId: scenario === 'foreign target' ? 'other/task-0' : task.id };
+      if (scenario === 'extra argument') args.extra = 'unexpected';
+      const { decision, payload } = manageCommand(client, args);
+      const denied = ['foreign target', 'extra argument', 'worker', 'scheduled', 'loaded'].includes(scenario);
+      expect(decision.decision).toBe(denied ? 'deny' : 'allow');
+      const receipt = () => client.row('GENERIC', 'Task "' + (scenario === 'wrong receipt' ? 'other/task-0' : task.id) + '" cancelled.',
+        'MODEL', 'DONE', payload.stepIdx);
+      if (denied) client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+        'MODEL', 'ERROR', payload.stepIdx);
+      else {
+        if (!['delayed receipt', 'missing receipt'].includes(scenario)) receipt();
+        if (scenario !== 'missing callback') client.hook('PostToolUse', scenario === 'wrong callback'
+          ? { ...payload, toolCall: { ...payload.toolCall, id: 'another-call' } } : payload);
+        if (scenario === 'delayed receipt') receipt();
+        if (scenario === 'rewritten receipt') client.rows.at(-1).content = 'Changed terminal';
+        if (scenario !== 'missing notice') {
+          const sender = scenario === 'wrong sender' ? 'other/task-0' : task.id;
+          const log = scenario === 'wrong exit log' ? task.log + '.other' : task.log;
+          client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + '[Message] timestamp=2026-01-01T00:00:00Z sender=' + sender
+            + ' priority=MESSAGE_PRIORITY_LOW content=Task id "' + task.id + '" was canceled with result:\nTool execution was canceled\nLog: '
+            + log + '\n</SYSTEM_MESSAGE>', 'SYSTEM');
+        }
+      }
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      if (['cancelled', 'after list', 'delayed receipt'].includes(scenario)) {
+        await expect(turn).resolves.toMatchObject({ success: true });
+        await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
+        expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+      } else {
+        await expect(turn).rejects.toThrow();
+        await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+        expect(client.prompts).toEqual(['hold']);
+      }
+      expect(native.clients).toHaveLength(1);
+      expect(runtime.reusable).toBe(false);
+      expect(runtime.hostScheduleAvailable).toBe(false);
+      await runtime.close();
+      expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
+    });
   it('denies another tool during an idle command notification', async () => {
     const { id } = await captureTimedSession();
     const running = executor.execute('hold', { hostScheduleSessionId: id });

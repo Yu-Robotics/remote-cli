@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import type { AcpTransport } from '../acp/AcpClient';
 import type { AcpContentBlock } from '../acp/AcpTypes';
+import type { AgyCommandTasks } from './AgyCommandTasks';
 import { AgySessionSchedules, type HookPayload } from '../../scheduling/agy/AgySessionSchedules';
 import { creationReceipt, nativeWake, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
 
@@ -19,11 +20,12 @@ export class AgyChatHost {
   // Live evidence only. A newly loaded session cannot inherit these exceptions.
   private readonly listDenials = new Map<number, string>();
   private pendingListStep?: number;
-  private listDeniedThisTurn = false;
+  private managedThisTurn = false;
+  private admittedKill = false;
   get reusable(): boolean { return !this.blocked && this.pendingListStep === undefined && !this.records.some(row =>
     creationReceipt(row, this.sessionId, row.step_index) || nativeWake(row)
     || row.type === 'GENERIC' && row.status !== 'DONE' && !this.listDenials.has(row.step_index)); }
-  get hasListDenial(): boolean { return this.listDenials.size > 0; }
+  get liveManagement(): boolean { return this.listDenials.size > 0 || this.admittedKill; }
   private active = false;
   private cancelled = false;
   private rejectCancel?: (error: Error) => void;
@@ -40,10 +42,10 @@ export class AgyChatHost {
   }
   get blocked(): string | undefined { return this.failure ?? this.monitor.status.blocked; }
   fence(reason: string): void { this.failure ??= reason; }
-  accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundListDenial = false) {
+  accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false, commands?: AgyCommandTasks) {
     this.records = records;
-    if (this.listDeniedThisTurn && this.active && !allowForegroundListDenial) this.fence(denialFailure);
-    if (this.hasListDenial) this.verifyListDenials(event, payload, records);
+    if (this.managedThisTurn && this.active && !allowForegroundManagement) this.fence(denialFailure);
+    if (this.listDenials.size) this.verifyListDenials(event, payload, records);
     if (event === 'PreInvocation' && this.turnStart === undefined && Number.isSafeInteger(payload.initialNumSteps)) this.turnStart = payload.initialNumSteps as number;
     const duplicateTool = this.observedTools.has(payload.stepIdx as number);
     if (event === 'PreToolUse' && Number.isSafeInteger(payload.stepIdx)) this.observedTools.add(payload.stepIdx as number);
@@ -59,15 +61,21 @@ export class AgyChatHost {
       const step = payload.stepIdx as number;
       const call = payload.toolCall as { name?: unknown; args?: unknown; id?: unknown } | undefined;
       const start = this.monitor.foregroundInvocationStart;
-      if (allowForegroundListDenial && this.active && !this.cancelled && !duplicateTool && !this.blocked && start !== undefined
+      const planner = records.at(-1);
+      if (allowForegroundManagement && this.active && !this.cancelled && !duplicateTool && !this.blocked && start !== undefined
         && Number.isSafeInteger(step) && step > start && typeof call?.id === 'string' && call.id.length > 0 && call.id.length <= 256
-        && call.name === listCall.name && isDeepStrictEqual(call.args, listCall.args)
-        && this.listPlanner(records.at(-1), step)) {
-        const reason = 'Native task listing is unavailable in ordinary chat (' + randomUUID() + ').';
-        this.listDenials.set(step, reason);
-        this.pendingListStep = step;
-        this.listDeniedThisTurn = true;
-        return { decision: 'deny' as const, reason };
+        && call.name === listCall.name && planner && this.managementPlanner(planner, step, call.args)) {
+        if (isDeepStrictEqual(call.args, listCall.args)) {
+          const reason = 'Native task listing is unavailable in ordinary chat (' + randomUUID() + ').';
+          this.listDenials.set(step, reason);
+          this.pendingListStep = step;
+          this.managedThisTurn = true;
+          return { decision: 'deny' as const, reason };
+        }
+        if (commands?.admitKill(step, call.id, call.args, planner)) {
+          this.admittedKill = this.managedThisTurn = true;
+          return { decision: 'allow' as const };
+        }
       }
       this.fence(denialFailure);
     }
@@ -75,9 +83,9 @@ export class AgyChatHost {
       : event === 'PreToolUse' ? { decision: 'deny' as const, reason: this.failure } : {};
     return decision;
   }
-  private listPlanner(row: TranscriptRecord | undefined, step: number): boolean {
+  private managementPlanner(row: TranscriptRecord | undefined, step: number, args: unknown): boolean {
     return row?.step_index === step - 1 && row.source === 'MODEL' && row.type === 'PLANNER_RESPONSE'
-      && row.status === 'DONE' && isDeepStrictEqual(row.tool_calls, [listCall]);
+      && row.status === 'DONE' && isDeepStrictEqual(row.tool_calls, [{ name: listCall.name, args }]);
   }
   private verifyListDenials(event: string, payload: HookPayload, records: TranscriptRecord[]): void {
     // The relay supplies unique, ordered steps from this session's anchored native transcript.
@@ -85,7 +93,7 @@ export class AgyChatHost {
     for (const [index, row] of records.entries()) {
       const reason = this.listDenials.get(row.step_index);
       if (reason === undefined) continue;
-      if (this.listPlanner(records[index - 1], row.step_index) && row.status === 'ERROR' && !row.tool_calls?.length
+      if (this.managementPlanner(records[index - 1], row.step_index, listCall.args) && row.status === 'ERROR' && !row.tool_calls?.length
         && receiptText(row) === 'Encountered error in step execution: tool call denied by pre-tool hook: ' + reason) confirmed++;
     }
     if (confirmed !== this.listDenials.size || this.pendingListStep !== undefined && event !== 'PostInvocation'
@@ -95,19 +103,19 @@ export class AgyChatHost {
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
     if (this.active || this.blocked || !this.reusable) throw new Error(this.blocked ?? 'AGY chat is busy or has unsettled native work.');
-    this.turnStart = undefined; this.observedTools.clear(); this.listDeniedThisTurn = false;
+    this.turnStart = undefined; this.observedTools.clear(); this.managedThisTurn = false;
     this.monitor.beginForeground(); this.active = true; this.cancelled = false;
     try {
       const terminal = await Promise.race([promptNative(blocks), new Promise<never>((_, reject) => { this.rejectCancel = reject; })]);
       if (terminal.stopReason === 'cancelled' || this.cancelled) {
-        if (this.listDeniedThisTurn) this.fence(denialFailure);
+        if (this.managedThisTurn) this.fence(denialFailure);
         // Cancellation is not success and cannot discharge earlier hook faults.
         if (this.blocked) throw new Error(this.blocked);
         this.monitor = this.newMonitor();
         return { success: false, output: 'AGY foreground cancelled; completed side effects remain.', stopReason: 'cancelled' };
       }
       const result = this.monitor.endForeground();
-      if (this.listDeniedThisTurn && (this.pendingListStep !== undefined || terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable)) {
+      if (this.managedThisTurn && (this.pendingListStep !== undefined || terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable)) {
         this.fence(denialFailure);
       }
       if (!result || this.blocked) throw new Error(this.blocked ?? 'AGY foreground hook terminal is missing.');

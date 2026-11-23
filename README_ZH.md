@@ -653,6 +653,11 @@ the live conversation can handle a single extra shell request from its completio
 notification silently. The CLI verifies the denial and an idle native stop before
 the next scheduled turn can use the same session.
 
+From CLI 1.6.278, ordinary AGY chat can also handle a task-list request while
+its own shell command is running in the background. AGY can request a stop for
+that specific command. The next message can use the same live conversation
+after the CLI verifies that the command and its notification have finished.
+
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when
 the previous owner and exact native group are proved absent. A dead parent alone

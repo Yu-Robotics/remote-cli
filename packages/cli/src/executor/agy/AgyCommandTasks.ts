@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import path from 'path';
 import { isDeepStrictEqual } from 'util';
 import { pathToFileURL } from 'url';
-import { nativeWake, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
+import { deletionReceipt, nativeWake, NOTIFICATION_PREFIX, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import type { HookDecision, HookPayload } from '../../scheduling/agy/AgySessionSchedules';
 
 export interface AgyCommandCheckpoint { lastStep: number; digest: string }
@@ -17,6 +17,7 @@ export class AgyCommandTasks {
   private readonly receipts = new Map<number, string>();
   private readonly outstanding = new Set<number>();
   private readonly posted = new Set<number>();
+  private kill?: { step: number; target: number; taskId: string; callId: string; cwd: string; posted: boolean; exitObserved: boolean };
   private provisional?: Set<number>;
   private idleInvocation = false;
   private idleNotification = false;
@@ -32,7 +33,24 @@ export class AgyCommandTasks {
   constructor(private readonly session: string, private readonly home: string,
     private readonly checkpoint?: AgyCommandCheckpoint) {}
 
-  get pending(): boolean { return this.outstanding.size > 0 || this.idleInvocation || this.idleNotification; }
+  get pending(): boolean { return !!this.kill || this.outstanding.size > 0 || this.idleInvocation || this.idleNotification; }
+
+  get ordinaryCommandsPending(): boolean {
+    return !this.idleInvocation && !this.idleNotification && this.outstanding.size > 0
+      && [...this.outstanding].every(step => this.calls.get(step)?.scheduled === false);
+  }
+
+  admitKill(step: number, callId: string, args: unknown, planner: TranscriptRecord): boolean {
+    if (this.kill || !this.ordinaryCommandsPending || this.foregroundStart === undefined || step <= this.lastStep) return false;
+    for (const target of this.outstanding) {
+      const taskId = this.session + '/task-' + target;
+      if (!isDeepStrictEqual(args, { Action: 'kill', TaskId: taskId })) continue;
+      this.kill = { step, target, taskId, callId, cwd: this.calls.get(target)!.cwd, posted: false, exitObserved: false };
+      this.receipts.set(planner.step_index, identity(planner));
+      return true;
+    }
+    return false;
+  }
 
   observeTool(step: number, name: string, id: string, args: Record<string, unknown>, cwd: string, scheduled = false): void {
     const prior = this.calls.get(step);
@@ -51,6 +69,16 @@ export class AgyCommandTasks {
   private log(step: number): string {
     return pathToFileURL(path.join(this.home, '.gemini', 'antigravity-cli', 'brain', this.session,
       '.system_generated', 'tasks', `task-${step}.log`)).href;
+  }
+
+  private cancellationNotice(row: TranscriptRecord, target: number, id: string): boolean {
+    if (row.source !== 'SYSTEM' || row.type !== 'SYSTEM_MESSAGE' || row.status !== 'DONE' || row.tool_calls?.length
+      || !row.content?.startsWith(NOTIFICATION_PREFIX)) return false;
+    const message = row.content.slice(NOTIFICATION_PREFIX.length);
+    const stamp = /^\[Message\] timestamp=(\S+) /.exec(message);
+    return !!stamp && Number.isFinite(Date.parse(stamp[1]))
+      && message.slice(stamp[0].length) === 'sender=' + id + ' priority=MESSAGE_PRIORITY_LOW content=Task id "' + id
+        + '" was canceled with result:\nTool execution was canceled\nLog: ' + this.log(target) + '\n</SYSTEM_MESSAGE>';
   }
 
   private digest(): string {
@@ -83,12 +111,30 @@ export class AgyCommandTasks {
       && payload.conversationId === this.session && payload.cwd === prior.cwd && tool?.name === 'run_command'
       && tool.id === prior.id && isDeepStrictEqual(tool.args, prior.args);
     const delayedPost = !foreground && commandPost && this.outstanding.has(hookStep);
+    const kill = this.kill;
+    if (kill && event === 'PostToolUse' && hookStep === kill.step) {
+      if (!foreground || kill.posted || payload.error || payload.hookEventName !== event || payload.conversationId !== this.session
+        || payload.cwd !== kill.cwd || tool?.id !== kill.callId || tool.name !== 'manage_task'
+        || !isDeepStrictEqual(tool.args, { Action: 'kill', TaskId: kill.taskId })) throw new Error('Unverified AGY kill callback.');
+      kill.posted = true;
+    }
     const other: TranscriptRecord[] = [];
     let seen = 0, newCompletion = false, candidateCompleted = false;
     for (const row of rows) {
       const step = row.step_index;
       if (this.receipts.has(step)) {
         if (this.receipts.get(step) !== identity(row)) throw new Error('AGY command evidence changed.');
+      } else if (kill && step === kill.step) {
+        if (row.source === 'MODEL' && row.type === 'GENERIC' && row.status === 'RUNNING') {
+          other.push(row);
+          continue;
+        }
+        if (!deletionReceipt(row, kill.taskId) || row.tool_calls?.length) throw new Error('Unverified AGY cancellation receipt.');
+        this.receipts.set(step, identity(row));
+      } else if (kill && foreground && !kill.exitObserved && step > kill.step && this.receipts.has(kill.step)
+        && this.cancellationNotice(row, kill.target, kill.taskId)) {
+        kill.exitObserved = true;
+        this.receipts.set(step, identity(row));
       } else if (receiptText(row)?.startsWith(creationPrefix)) {
         const text = receiptText(row)!;
         const id = `${this.session}/task-${step}`;
@@ -121,6 +167,13 @@ export class AgyCommandTasks {
       seen++;
     }
     if (seen !== this.receipts.size) throw new Error('AGY command evidence is missing.');
+    if (kill && kill.posted && kill.exitObserved) {
+      this.outstanding.delete(kill.target);
+      this.calls.delete(kill.target);
+      this.posted.delete(kill.target);
+      this.kill = undefined;
+    }
+    if (this.kill && event === 'Stop') throw new Error('AGY command cancellation was not confirmed.');
     if (this.candidate && !foreground && allowIdleDenial && (event === 'PreToolUse' || this.denial)) {
       this.idleDecision = this.observeIdleDenial(event, payload, rows, other, candidateCompleted);
       this.lastStep = rows.at(-1)!.step_index;

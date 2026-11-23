@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.278] - 2026-11-22
+
+### Fixed
+- Keep an ordinary AGY conversation available when the model asks about its own background shell command. Verify the target of a stop request and wait for native completion before accepting another message on the same session.
+
 ## [1.6.277] - 2026-11-22
 
 ### Fixed
