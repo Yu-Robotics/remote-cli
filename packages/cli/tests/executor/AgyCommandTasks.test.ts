@@ -16,19 +16,23 @@ describe('owned AGY command evidence', () => {
     content: `Tool is running as a background task with task id: ${id}\nTask Description: work\nTask logs are available at: ${log}` };
   const terminal: TranscriptRecord = { step_index: 7, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE',
     content: NOTIFICATION_PREFIX + `[Message] timestamp=2026-01-01T00:00:00Z sender=${id} priority=MESSAGE_PRIORITY_HIGH content=Task id "${id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\nOK\n\nLog: ${log}\n</SYSTEM_MESSAGE>` };
+  const hook = (hookEventName: string) => ({ hookEventName, conversationId: session, cwd: home });
+  it('rejects an unidentified hook', () => {
+    expect(() => new AgyCommandTasks(session, home).observe('PreInvocation', {}, [], true)).toThrow('identity changed');
+  });
   function fixture(start = 4) {
     const tasks = new AgyCommandTasks(session, home);
-    tasks.observe('PreInvocation', { initialNumSteps: start }, [], true);
+    tasks.observe('PreInvocation', { ...hook('PreInvocation'), initialNumSteps: start }, [], true);
     tasks.observeTool(4, call.name, call.id, call.args, home);
     return tasks;
   }
   it('rejects an older tool index and a conflicting hook identity', () => {
-    expect(() => fixture(5).observe('PostToolUse', {}, [receipt], true)).toThrow();
+    expect(() => fixture(5).observe('PostToolUse', hook('PostToolUse'), [receipt], true)).toThrow();
     expect(() => fixture().observeTool(4, 'other-tool', 'different', {}, home)).toThrow();
   });
   function yielded() {
     const tasks = fixture();
-    tasks.observe('Stop', {}, [receipt], true);
+    tasks.observe('Stop', hook('Stop'), [receipt], true);
     tasks.endForeground();
     return tasks;
   }
@@ -43,51 +47,51 @@ describe('owned AGY command evidence', () => {
     const tasks = yielded();
     tasks.observe('PostToolUse', post, [receipt], false);
     expect(() => tasks.observe('PostToolUse', post, [receipt], false)).toThrow();
-    tasks.observe('PreInvocation', {}, [receipt], false);
-    expect(() => tasks.observe('Stop', {}, [receipt], false)).toThrow();
+    tasks.observe('PreInvocation', hook('PreInvocation'), [receipt], false);
+    expect(() => tasks.observe('Stop', hook('Stop'), [receipt], false)).toThrow();
     expect(tasks.pending).toBe(true);
   });
   it('rejects replay of a foreground post that preceded the yield receipt', () => {
     const tasks = fixture();
     tasks.observe('PostToolUse', post, [], true);
-    tasks.observe('Stop', {}, [receipt], true);
+    tasks.observe('Stop', hook('Stop'), [receipt], true);
     tasks.endForeground();
     expect(() => tasks.observe('PostToolUse', post, [receipt], false)).toThrow();
   });
   it('waits for notification Stop after native nonzero completion with no output', () => {
     const tasks = yielded();
     tasks.observe('PostToolUse', post, [receipt], false);
-    tasks.observe('PreInvocation', {}, [receipt], false);
+    tasks.observe('PreInvocation', hook('PreInvocation'), [receipt], false);
     const rows = [receipt, { ...terminal, content: terminal.content!.replace('code 0.\n\nCommand output:\nOK\n', 'code 7.\n\nNo output from the command.') }];
-    tasks.observe('PostInvocation', {}, rows, false);
+    tasks.observe('PostInvocation', hook('PostInvocation'), rows, false);
     expect(tasks.pending).toBe(true);
-    tasks.observe('Stop', {}, rows, false);
+    tasks.observe('Stop', hook('Stop'), rows, false);
     expect(tasks.pending).toBe(false);
   });
   it('recognizes a native completion whose shell output has no trailing newline', () => {
     const tasks = yielded();
     tasks.observe('PostToolUse', post, [receipt], false);
-    tasks.observe('PreInvocation', {}, [receipt], false);
+    tasks.observe('PreInvocation', hook('PreInvocation'), [receipt], false);
     const rows = [receipt, { ...terminal, content: terminal.content!.replace('OK\n\nLog:', 'OK\nLog:') }];
-    tasks.observe('PostInvocation', {}, rows, false);
+    tasks.observe('PostInvocation', hook('PostInvocation'), rows, false);
     expect(tasks.pending).toBe(true);
-    tasks.observe('Stop', {}, rows, false);
+    tasks.observe('Stop', hook('Stop'), rows, false);
     expect(tasks.pending).toBe(false);
   });
   it('rejects missing evidence, wrong-session notifications and an echoed completion', () => {
     const tasks = fixture();
-    tasks.observe('PostToolUse', {}, [receipt], true);
-    expect(() => tasks.observe('PostInvocation', {}, [], true)).toThrow();
-    expect(() => tasks.observe('PostInvocation', {}, [receipt, { ...terminal,
+    tasks.observe('PostToolUse', hook('PostToolUse'), [receipt], true);
+    expect(() => tasks.observe('PostInvocation', hook('PostInvocation'), [], true)).toThrow();
+    expect(() => tasks.observe('PostInvocation', hook('PostInvocation'), [receipt, { ...terminal,
       content: terminal.content!.replace('sender=' + id, 'sender=other/task-4') }], true)).toThrow();
-    tasks.observe('PostInvocation', {}, [receipt, { ...terminal, source: 'MODEL' }], true);
+    tasks.observe('PostInvocation', hook('PostInvocation'), [receipt, { ...terminal, source: 'MODEL' }], true);
     expect(tasks.pending).toBe(true);
   });
   it('rejects unrelated work in the same batch as an idle completion', () => {
     const tasks = fixture();
-    tasks.observe('PostToolUse', {}, [receipt], true);
+    tasks.observe('PostToolUse', hook('PostToolUse'), [receipt], true);
     tasks.endForeground();
     const unrelated = { step_index: 6, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'other work' };
-    expect(() => tasks.observe('PreInvocation', {}, [receipt, unrelated, terminal], false)).toThrow();
+    expect(() => tasks.observe('PreInvocation', hook('PreInvocation'), [receipt, unrelated, terminal], false)).toThrow();
   });
 });

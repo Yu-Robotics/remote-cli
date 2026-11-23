@@ -28,6 +28,7 @@ export interface AgyAcpRuntimeOptions {
   /** Main chat whose schedule tools create host timers only. */
   hostScheduleChat?: boolean;
   commandCheckpoint?: AgyCommandCheckpoint;
+  validatedChatLoad?: boolean;
   beforeSessionLoad?(): void;
   saveSession(id: string): void | Promise<void>;
   beforeAllocation?(): void;
@@ -64,6 +65,8 @@ export class AgyAcpRuntime {
   private continuityUnsafe = false;
   private hostScheduleSettled = false;
   private hostScheduleUnsafe = false;
+  private commandState = 'settled';
+  private readonly commandCorrelation = randomUUID().slice(0, 8);
   private prompted = false;
   private allocatedSessionId?: string;
   private active?: ExecuteOptions;
@@ -105,7 +108,7 @@ export class AgyAcpRuntime {
   get blocked(): string | undefined { return this.chat?.blocked ?? this.host?.schedules.status.blocked; }
   private get foregroundReusable(): boolean { return !this.continuityUnsafe && !this.blocked && !this.retained && (this.chat?.reusable ?? true)
     && !this.controlRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'); }
-  get reusable(): boolean { return this.foregroundReusable && !this.commands?.pending; }
+  get reusable(): boolean { return this.foregroundReusable && !this.commands?.pending && !this.commands?.liveDenial; }
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
   /** Admission to retire our host, never proof that the host has already exited. */
@@ -120,10 +123,19 @@ export class AgyAcpRuntime {
       && !this.settingsBusy;
   }
   get hostScheduleAvailable(): boolean {
-    return this.hostScheduleSafe && !this.commands?.pending && (this.active !== undefined || this.hostScheduleSettled && this.reusable);
+    return this.hostScheduleSafe && !this.commands?.pending && (this.active !== undefined || this.hostScheduleSettled && this.foregroundReusable);
   }
   get waitingForCommand(): boolean {
-    return this.hostScheduleSafe && !this.active && this.hostScheduleSettled && this.foregroundReusable && this.commands?.pending === true;
+    return this.hostScheduleSafe && !this.active && this.hostScheduleSettled && this.commands?.pending === true;
+  }
+
+  private reportCommandState(): void {
+    if (!this.commands) return;
+    const outstanding = this.commands.outstandingCount;
+    const state = this.blocked ? 'unconfirmed' : outstanding ? 'waiting-exit' : this.commands.pending ? 'waiting-terminal' : 'settled';
+    if (state === this.commandState) return;
+    this.commandState = state;
+    console.debug('[AGY command]', { state, outstanding, correlation: this.commandCorrelation });
   }
 
   async start(): Promise<void> {
@@ -153,31 +165,37 @@ export class AgyAcpRuntime {
       if (!this.host && !this.chat) throw new Error('AGY hook arrived before session admission.');
       this.activity?.(); this.latestRecords = rows;
       let controls = rows;
-      if (this.commands && !this.hostScheduleUnsafe) {
+      const ordinaryHost = !this.options.worker && (!this.options.sessionId || this.options.validatedChatLoad === true);
+      const observeChat = !this.closing && !this.relayFault && !this.blocked;
+      if (this.commands && observeChat) {
         try {
-          controls = this.commands.observe(event, payload, rows, !!this.active, this.hostScheduleSafe && this.hostScheduleSettled);
+          if (payload.cwd !== this.options.cwd) throw new Error('AGY command working directory changed.');
+          controls = this.commands.observe(event, payload, rows, !!this.active, ordinaryHost || this.hostScheduleSafe && this.hostScheduleSettled);
           if (!this.active && event === 'Stop' && !this.commands.idleDecision && (payload.terminationReason !== 'NO_TOOL_CALL' || payload.error !== ''
-            || this.chat?.liveManagement && (payload.fullyIdle !== true || payload.continuationActive !== false))) {
-            this.hostScheduleUnsafe = true;
+            || payload.continuationActive !== false || !(payload.fullyIdle === true || payload.fullyIdle === false && this.commands.outstandingCount > 0))) {
+            throw new Error('AGY command notification Stop is unconfirmed.');
           }
-        } catch {
+        } catch (error) {
           this.hostScheduleUnsafe = true;
-          if (this.commands.liveDenial) this.chat?.fence('AGY idle command denial is unconfirmed.');
+          const reason = this.commands.liveDenial ? 'AGY idle command denial is unconfirmed.'
+            : error instanceof Error ? error.message : 'AGY command evidence is unconfirmed.';
+          this.chat?.fence(reason + ' Use explicit /clear to start a fresh conversation.');
         }
       } else if (this.options.hostScheduleChat && !this.active && event !== 'SessionStart') this.hostScheduleUnsafe = true;
       this.controlRecords = controls;
       if (this.options.hostScheduleChat && controls.some(row => row.source === 'SYSTEM' && row.type === 'SYSTEM_MESSAGE'
-          && /sender=/.test(row.content ?? '') && !nativeRestartNotice(row))) this.hostScheduleUnsafe = true;
-      if (this.chat?.liveManagement && this.hostScheduleUnsafe) this.chat.fence('AGY command management evidence changed; explicit clear is required.');
-      const idleDecision = !this.active && this.hostScheduleSafe ? this.commands?.idleDecision : undefined;
-      const ordinaryCommands = !this.options.sessionId && this.active?.hostScheduleSessionId === undefined
+          && /sender=/.test(row.content ?? '') && !nativeRestartNotice(row))) {
+        this.hostScheduleUnsafe = true;
+        this.chat?.fence('AGY command notification ownership is unconfirmed. Use explicit /clear to start a fresh conversation.');
+      }
+      const idleDecision = !this.active && observeChat && !this.blocked ? this.commands?.idleDecision : undefined;
+      const ordinaryCommands = ordinaryHost && this.active?.hostScheduleSessionId === undefined
         ? this.commands : undefined;
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
-          && !!this.options.hostScheduleChat && !this.options.worker && !this.hostScheduleUnsafe && !this.relayFault
-          && (!this.commands?.pending || !!ordinaryCommands?.ordinaryCommandsPending) && !this.closing && !this.settingsBusy && !this.scheduleOperations,
-          ordinaryCommands)
+          && !!this.options.hostScheduleChat && observeChat && !this.blocked
+          && !this.settingsBusy && !this.scheduleOperations, ordinaryCommands, rows)
           : this.host!.schedules.accept(event, payload, controls);
       if (!this.continuityUnsafe && (this.chat?.liveManagement || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
         || controls.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
@@ -204,11 +222,13 @@ export class AgyAcpRuntime {
           }
         }
         for (const [step, id] of this.tools) {
+          if (step === this.commands?.pendingStatusStep || this.blocked) continue;
           const row = rows.find(row => row.step_index === step && row.type === 'GENERIC' && row.status === 'DONE');
           if (row) { this.active.onToolResult?.({ tool_use_id: id, content: (row.content ?? '').slice(0, 32768), is_error: event === 'PostToolUse' && !!payload.error }); this.tools.delete(step); }
         }
       }
-      return idleDecision?.terminationBehavior && this.hostScheduleSafe ? idleDecision : decision;
+      this.reportCommandState();
+      return idleDecision?.terminationBehavior && !this.blocked ? idleDecision : decision;
     }, () => {
       this.relayFault = true;
       this.chat?.fence('AGY hook relay failed; chat state is unconfirmed.');
@@ -291,7 +311,10 @@ export class AgyAcpRuntime {
   async execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
     await this.start();
     if (this.active || this.settingsBusy) throw new Error('AGY foreground turn is already active.');
-    if (this.commands?.pending) throw new Error('AGY command completion is pending.');
+    if (this.commands?.pending) {
+      if (this.blocked) throw new Error(this.blocked);
+      throw new Error(this.commands.outstandingCount ? 'AGY command completion is pending.' : 'AGY command completion is pending. Waiting for the notification Stop.');
+    }
     this.active = options; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     this.hostScheduleSettled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;

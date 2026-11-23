@@ -42,7 +42,8 @@ export class AgyChatHost {
   }
   get blocked(): string | undefined { return this.failure ?? this.monitor.status.blocked; }
   fence(reason: string): void { this.failure ??= reason; }
-  accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false, commands?: AgyCommandTasks) {
+  accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false,
+    commands?: AgyCommandTasks, fullHistory = records) {
     this.records = records;
     if (this.managedThisTurn && this.active && !allowForegroundManagement) this.fence(denialFailure);
     if (this.managementDenials.size) this.verifyManagementDenials(event, payload, records);
@@ -67,15 +68,13 @@ export class AgyChatHost {
         && call.name === listCall.name && call.args && typeof call.args === 'object' && !Array.isArray(call.args)
         && planner && this.managementPlanner(planner, step, call.args)) {
         this.managedThisTurn = true;
+        if (commands?.admitStatus(step, call.id, call.args, fullHistory)) return { decision: 'allow' as const };
         if (commands?.admitKill(step, call.id, call.args, planner)) {
           this.admittedKill = true;
           return { decision: 'allow' as const };
         }
         let message = 'This native task management request is unavailable in ordinary chat';
         if (isDeepStrictEqual(call.args, listCall.args)) message = 'Native task listing is unavailable in ordinary chat';
-        else if (commands?.ordinaryCommandTarget(step, 'status', call.args) !== undefined) {
-          message = 'Background command completion is pending. Wait for its completion notification';
-        }
         const reason = message + ' (' + randomUUID() + ').';
         this.managementDenials.set(step, { planner: structuredClone(planner), reason });
         this.pendingDenialStep = step;

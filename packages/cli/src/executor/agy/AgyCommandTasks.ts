@@ -17,14 +17,19 @@ export class AgyCommandTasks {
   private readonly receipts = new Map<number, string>();
   private readonly outstanding = new Set<number>();
   private readonly posted = new Set<number>();
+  // Historical checkpoints restore receipt integrity only. This map is populated
+  // exclusively by creation hooks/receipts observed by this runtime instance.
+  private readonly owned = new Map<number, { cwd: string; lastStatus?: 'RUNNING' | 'DONE'; exitCode?: number }>();
+  private status?: { step: number; target: number; callId: string; posted: boolean; completedAtAdmission: boolean };
+  private statusHistory?: { through: number; digest: string };
   private kill?: { step: number; target: number; taskId: string; callId: string; cwd: string; posted: boolean; exitObserved: boolean };
   private provisional?: Set<number>;
   private idleInvocation = false;
-  private idleNotification = false;
+  private readonly notificationWakes = new Map<number, number>(); // command step -> wake step
   private restored = false;
   private foregroundStart?: number;
   private lastStep = -1;
-  private candidate?: { start: number; commandStep: number; cwd: string; history: string };
+  private candidate?: { start: number; wakeStep: number; cwd: string; history: string };
   private denial?: { reason: string; terminated: boolean };
   // A nonce-authenticated denial authorizes only this live host.
   liveDenial = false;
@@ -33,24 +38,71 @@ export class AgyCommandTasks {
   constructor(private readonly session: string, private readonly home: string,
     private readonly checkpoint?: AgyCommandCheckpoint) {}
 
-  get pending(): boolean { return !!this.kill || this.outstanding.size > 0 || this.idleInvocation || this.idleNotification; }
+  get pending(): boolean { return !!this.kill || !!this.status || this.outstanding.size > 0 || this.idleInvocation || this.notificationWakes.size > 0; }
+  get outstandingCount(): number { return this.outstanding.size; }
+  get pendingStatusStep(): number | undefined { return this.status?.step; }
 
   get ordinaryCommandsPending(): boolean {
-    return !this.idleInvocation && !this.idleNotification && this.outstanding.size > 0
+    return !this.idleInvocation && !this.notificationWakes.size && this.outstanding.size > 0
       && [...this.outstanding].every(step => this.calls.get(step)?.scheduled === false);
   }
 
-  ordinaryCommandTarget(step: number, action: 'status' | 'kill', args: unknown): number | undefined {
-    if (this.kill || !this.ordinaryCommandsPending || this.foregroundStart === undefined || step <= this.lastStep) return;
-    for (const target of this.outstanding) {
-      const taskId = this.session + '/task-' + target;
-      if (isDeepStrictEqual(args, { Action: action, TaskId: taskId })) return target;
+  private ordinaryCommandTarget(step: number, action: 'status' | 'kill', args: unknown): number | undefined {
+    if (this.kill || this.status || this.foregroundStart === undefined || step <= this.lastStep || step <= this.foregroundStart) return;
+    const id = (args as { TaskId?: unknown } | undefined)?.TaskId;
+    if (typeof id !== 'string') return;
+    const target = Number(/\/task-(\d+)$/.exec(id)?.[1]);
+    if (this.owned.has(target) && isDeepStrictEqual(args, { Action: action, TaskId: this.session + '/task-' + target })) return target;
+  }
+
+  admitStatus(step: number, callId: string, args: unknown, rows: TranscriptRecord[]): boolean {
+    const target = this.ordinaryCommandTarget(step, 'status', args);
+    if (target === undefined) return false;
+    if (rows.at(-1)?.step_index !== step - 1) return false;
+    const owned = this.owned.get(target)!;
+    this.status = { step, target, callId, posted: false, completedAtAdmission: owned.lastStatus === 'DONE' || owned.exitCode !== undefined };
+    this.statusHistory = { through: step - 1, digest: identity(rows) };
+    return true;
+  }
+
+  private observeStatus(event: string, payload: HookPayload, rows: TranscriptRecord[], foreground: boolean, commandPost: boolean): void {
+    const history = this.statusHistory;
+    if (history && history.digest !== identity(rows.filter(row => row.step_index <= history.through))) {
+      throw new Error('AGY status history changed.');
     }
+    const status = this.status;
+    if (!status) return;
+    // The shell may finish while its status lookup is in flight. Its own
+    // authenticated post cannot acknowledge the independent manage_task call.
+    if (commandPost && foreground && payload.stepIdx !== status.step) return;
+    const id = this.session + '/task-' + status.target;
+    const call = payload.toolCall as { id?: string; name?: string; args?: unknown } | undefined;
+    if (!foreground || event === 'PostToolUse' && (status.posted || payload.stepIdx !== status.step
+      || payload.cwd !== this.owned.get(status.target)?.cwd || payload.error || call?.id !== status.callId
+      || call.name !== 'manage_task' || !isDeepStrictEqual(call.args, { Action: 'status', TaskId: id }))) {
+      throw new Error('Unverified AGY status callback.');
+    }
+    if (event === 'PostToolUse') { status.posted = true; return; }
+    if (event !== 'PostInvocation' || !status.posted) throw new Error('AGY status callback is missing.');
+    const row = rows.find(r => r.step_index === status.step);
+    const text = receiptText(row);
+    const header = 'Task: ' + id + '\nStatus: ';
+    const state = text?.startsWith(header + 'DONE\n') ? 'DONE' : 'RUNNING';
+    const prefix = header + state + '\nLog: ' + this.log(status.target);
+    const suffix = text?.slice(prefix.length);
+    if (row?.status !== 'DONE' || row.tool_calls?.length || !text?.startsWith(prefix)
+      || !(suffix === '' || suffix === '\n' || suffix?.startsWith('\nLog output:\n'))
+      || status.completedAtAdmission && state !== 'DONE'
+      || rows.some(r => r.step_index > status.step && !nativeWake(r))) throw new Error('Unverified AGY status receipt.');
+    // A successful read is not an exit wake or a notification terminal.
+    this.owned.get(status.target)!.lastStatus = state;
+    this.statusHistory = { through: status.step, digest: identity(rows.filter(r => r.step_index <= status.step)) };
+    this.status = undefined;
   }
 
   admitKill(step: number, callId: string, args: unknown, planner: TranscriptRecord): boolean {
     const target = this.ordinaryCommandTarget(step, 'kill', args);
-    if (target === undefined) return false;
+    if (target === undefined || !this.ordinaryCommandsPending || !this.outstanding.has(target)) return false;
     this.kill = { step, target, taskId: this.session + '/task-' + target, callId, cwd: this.calls.get(target)!.cwd, posted: false, exitObserved: false };
     this.receipts.set(planner.step_index, identity(planner));
     return true;
@@ -62,11 +114,16 @@ export class AgyCommandTasks {
       throw new Error('AGY command hook identity changed.');
     }
     if (name === 'run_command' && this.foregroundStart !== undefined && step >= this.foregroundStart
-      && !prior && !this.receipts.has(step)) this.calls.set(step, { id, args: structuredClone(args), cwd, postSeen: false, scheduled });
+      && !prior && !this.receipts.has(step)) {
+      if (!id || id.length > 256 || !args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid AGY command identity.');
+      this.calls.set(step, { id, args: structuredClone(args), cwd, postSeen: false, scheduled });
+    }
   }
 
   endForeground(): void {
-    for (const step of this.calls.keys()) if (!this.outstanding.has(step)) this.calls.delete(step);
+    for (const [step, call] of this.calls) {
+      if (!this.outstanding.has(step) && (call.postSeen || !this.owned.has(step))) this.calls.delete(step);
+    }
     this.foregroundStart = undefined;
   }
 
@@ -89,12 +146,13 @@ export class AgyCommandTasks {
     return createHash('sha256').update(JSON.stringify([...this.receipts].sort(([a], [b]) => a - b))).digest('hex');
   }
   snapshot(): AgyCommandCheckpoint | undefined {
-    if (!this.pending && this.receipts.size) return { lastStep: Math.max(...this.receipts.keys()), digest: this.digest() };
+    if (!this.pending && !this.liveDenial && this.receipts.size) return { lastStep: Math.max(...this.receipts.keys()), digest: this.digest() };
     return undefined;
   }
 
   observe(event: string, payload: HookPayload, rows: TranscriptRecord[], foreground: boolean, allowIdleDenial = false): TranscriptRecord[] {
     this.idleDecision = undefined;
+    if (payload.conversationId !== this.session || payload.hookEventName !== event) throw new Error('AGY command hook identity changed.');
     if (foreground && event === 'PreInvocation' && Number.isSafeInteger(payload.initialNumSteps)) {
       this.foregroundStart = payload.initialNumSteps as number;
     }
@@ -114,7 +172,8 @@ export class AgyCommandTasks {
     const commandPost = event === 'PostToolUse' && !!prior && !prior.postSeen && payload.hookEventName === event
       && payload.conversationId === this.session && payload.cwd === prior.cwd && tool?.name === 'run_command'
       && tool.id === prior.id && isDeepStrictEqual(tool.args, prior.args);
-    const delayedPost = !foreground && commandPost && this.outstanding.has(hookStep);
+    const delayedPost = !foreground && commandPost && this.owned.has(hookStep);
+    this.observeStatus(event, payload, rows, foreground, commandPost);
     const kill = this.kill;
     if (kill && event === 'PostToolUse' && hookStep === kill.step) {
       if (!foreground || kill.posted || payload.error || payload.hookEventName !== event || payload.conversationId !== this.session
@@ -123,7 +182,7 @@ export class AgyCommandTasks {
       kill.posted = true;
     }
     const other: TranscriptRecord[] = [];
-    let seen = 0, newCompletion = false, candidateCompleted = false;
+    let seen = 0;
     for (const row of rows) {
       const step = row.step_index;
       if (this.receipts.has(step)) {
@@ -144,11 +203,12 @@ export class AgyCommandTasks {
         const id = `${this.session}/task-${step}`;
         const logLine = '\nTask logs are available at: ' + this.log(step);
         const marker = text.lastIndexOf('\nTask logs are available at: ');
-        if (!foreground || !this.calls.has(step) || row.status !== 'RUNNING'
+        if (!foreground || !this.calls.has(step) || row.status !== 'RUNNING' || row.tool_calls?.length
           || !text.startsWith(creationPrefix + id + '\nTask Description: ') || marker < 0
           || !text.startsWith(logLine, marker)
           || !['', '\n'].includes(text.charAt(marker + logLine.length))) throw new Error('Unowned AGY command receipt.');
         this.outstanding.add(step);
+        this.owned.set(step, { cwd: this.calls.get(step)!.cwd });
         if (this.calls.get(step)?.postSeen) this.posted.add(step);
         this.receipts.set(step, identity(row));
       } else if (nativeWake(row)) {
@@ -156,83 +216,92 @@ export class AgyCommandTasks {
         const taskStep = Number(/\/task-(\d+)$/.exec(wake.sender)?.[1]);
         const id = `${this.session}/task-${taskStep}`;
         const heading = `Task id "${id}" finished with result:\nCommand exited with code `;
-        if (!this.outstanding.has(taskStep) || step <= taskStep || wake.sender !== id || !wake.prompt.startsWith(heading)
+        if (!this.outstanding.has(taskStep) || step <= taskStep || wake.sender !== id || row.tool_calls?.length || !wake.prompt.startsWith(heading)
           || !/^\d+\.\n\n(?:Command output:\n[\s\S]*|No output from the command\.)\nLog: [^\r\n]+$/.test(wake.prompt.slice(heading.length))
           || !wake.prompt.endsWith('\nLog: ' + this.log(taskStep))) throw new Error('Unverified AGY command completion.');
         this.outstanding.delete(taskStep);
-        candidateCompleted = this.candidate?.commandStep === taskStep && this.provisional?.has(taskStep) === true
-          && step === this.candidate.start;
-        this.calls.delete(taskStep);
+        this.owned.get(taskStep)!.exitCode = Number.parseInt(wake.prompt.slice(heading.length), 10);
+        if (!foreground) this.notificationWakes.set(taskStep, step);
+        if (this.calls.get(taskStep)?.postSeen) this.calls.delete(taskStep);
         this.posted.delete(taskStep);
         if (this.provisional?.has(taskStep)) this.provisional = undefined;
         this.receipts.set(step, identity(row));
-        newCompletion = true;
       } else { other.push(row); continue; }
       seen++;
     }
     if (seen !== this.receipts.size) throw new Error('AGY command evidence is missing.');
     if (kill && kill.posted && kill.exitObserved) {
       this.outstanding.delete(kill.target);
+      this.owned.delete(kill.target);
       this.calls.delete(kill.target);
       this.posted.delete(kill.target);
       this.kill = undefined;
     }
     if (this.kill && event === 'Stop') throw new Error('AGY command cancellation was not confirmed.');
+    if (commandPost) {
+      prior.postSeen = true;
+      if (this.outstanding.has(hookStep)) this.posted.add(hookStep);
+      else if (this.owned.has(hookStep)) this.calls.delete(hookStep);
+    }
+    if (delayedPost && this.idleInvocation && rows.at(-1)?.step_index === this.lastStep) {
+      // A delayed command post does not advance the current notification.
+      if (this.candidate && identity(rows.filter(r => r.step_index < this.candidate!.wakeStep)) !== this.candidate.history) {
+        throw new Error('AGY command notification history changed.');
+      }
+      return other;
+    }
     if (this.candidate && !foreground && allowIdleDenial && (event === 'PreToolUse' || this.denial)) {
-      this.idleDecision = this.observeIdleDenial(event, payload, rows, other, candidateCompleted);
+      this.idleDecision = this.observeIdleDenial(event, payload, rows, other);
       this.lastStep = rows.at(-1)!.step_index;
       return other;
     }
     if (this.denial) throw new Error('AGY idle denial sequence was interrupted.');
     // An intervening callback ends eligibility for this specific deny/Stop
     // sequence. The ordinary completion path still verifies no-tool turns.
-    this.candidate = undefined;
-    if (!foreground && newCompletion && !this.idleInvocation) this.idleNotification = true;
-    if (!foreground && (event !== 'SessionStart' || newCompletion)) {
+    if (!delayedPost) this.candidate = undefined;
+    if (!foreground && (event !== 'SessionStart' || this.notificationWakes.size)) {
       if (other.some(row => row.step_index > this.lastStep && (row.source !== 'MODEL' || row.type !== 'PLANNER_RESPONSE'
         || row.tool_calls?.length || row.status !== 'DONE'))) throw new Error('Unexpected work during AGY command completion.');
     }
-    if (commandPost) {
-      prior.postSeen = true;
-      if (this.outstanding.has(hookStep)) this.posted.add(hookStep);
-    }
     if (!foreground && event !== 'SessionStart' && !delayedPost) {
-      if (event === 'PreInvocation' && !this.idleInvocation && (this.idleNotification || this.posted.size > 0)) {
+      if (event === 'PreInvocation' && !this.idleInvocation && (this.notificationWakes.size || this.posted.size > 0)) {
         // The wake may first be flushed during PostInvocation. Keep admission
         // pending until this invocation has the terminal of a posted command.
-        if (!this.idleNotification) this.provisional = new Set(this.posted);
-        const [commandStep] = this.posted;
-        const call = this.calls.get(commandStep);
-        const start = this.lastStep + 1;
-        if (allowIdleDenial && !this.idleNotification && this.outstanding.size === 1 && this.posted.size === 1
-          && call?.scheduled && payload.invocationNum === 0 && payload.initialNumSteps === start
-          && rows.at(-1)?.step_index === start - 1 && payload.cwd === call.cwd && payload.conversationId === this.session
-          && payload.hookEventName === event) this.candidate = { commandStep, start, cwd: call.cwd, history: identity(rows) };
+        if (!this.notificationWakes.size) this.provisional = new Set(this.posted);
+        const early = [...this.notificationWakes.values()];
+        const start = payload.initialNumSteps as number;
+        const wakeStep = early[0] ?? this.lastStep + 1;
+        if (allowIdleDenial && early.length <= 1 && payload.invocationNum === 0 && typeof payload.cwd === 'string'
+          && (start === wakeStep || early.length === 1 && start === wakeStep + 1)
+          && rows.at(-1)?.step_index === (early.length ? wakeStep : wakeStep - 1)) {
+          this.candidate = { start, wakeStep, cwd: payload.cwd, history: identity(rows.filter(r => r.step_index < wakeStep)) };
+        }
         this.idleInvocation = true;
-        this.idleNotification = false;
       } else if (!this.idleInvocation || !['PostInvocation', 'Stop'].includes(event)) throw new Error('Unattributed idle AGY hook.');
       if (event === 'Stop') {
         if (this.provisional) throw new Error('AGY notification Stop lacks the posted command completion.');
         this.idleInvocation = false;
+        this.notificationWakes.clear();
       }
     }
     if (rows.length) this.lastStep = rows[rows.length - 1].step_index;
     return other;
   }
 
-  private observeIdleDenial(event: string, payload: HookPayload, rows: TranscriptRecord[], other: TranscriptRecord[],
-    candidateCompleted: boolean): HookDecision {
-    const { start, cwd, history } = this.candidate!;
-    const step = start + 2;
+  private observeIdleDenial(event: string, payload: HookPayload, rows: TranscriptRecord[], other: TranscriptRecord[]): HookDecision {
+    const { start, wakeStep, cwd, history } = this.candidate!;
+    const step = wakeStep + 2;
     const tail = rows.at(-1);
+    const wake = this.notificationWakes.entries().next().value;
     if (payload.cwd !== cwd || payload.conversationId !== this.session || payload.hookEventName !== event
-      || !this.idleInvocation || this.outstanding.size || this.provisional || !tail
-      || identity(rows.filter(row => row.step_index < start)) !== history) throw new Error('Unowned AGY idle shell.');
+      || this.notificationWakes.size !== 1 || !wake || wake[1] !== wakeStep
+      || this.owned.get(wake[0])?.cwd !== cwd || !this.idleInvocation || this.provisional || !tail
+      || identity(rows.filter(row => row.step_index < wakeStep)) !== history) throw new Error('Unowned AGY idle shell.');
     // Native 1.5.13 flushes the owned completion and one planner call before
     // PreToolUse. Only that call and its nonce-bearing ERROR may follow the wake.
     if (event === 'PreToolUse' && !this.denial) {
       const call = payload.toolCall as { name?: string; args?: Record<string, unknown>; id?: string } | undefined;
-      if (!candidateCompleted || this.lastStep !== start - 1 || tail.step_index !== step - 1 || tail.source !== 'MODEL'
+      if (tail.step_index !== step - 1 || tail.source !== 'MODEL'
         || tail.type !== 'PLANNER_RESPONSE' || tail.status !== 'DONE' || payload.stepIdx !== step
         || typeof call?.id !== 'string' || !call.id || call.id.length > 256 || call.name !== 'run_command'
         || typeof call.args?.CommandLine !== 'string' || !isDeepStrictEqual(tail.tool_calls, [{ name: call.name, args: call.args }])) {
@@ -255,10 +324,12 @@ export class AgyCommandTasks {
       return { terminationBehavior: 'terminate' };
     }
     if (event === 'Stop' && denied?.terminated && tail.step_index === step && payload.terminationReason === 'TERMINAL_CUSTOM_HOOK'
-      && payload.error === '' && payload.fullyIdle === true && payload.continuationActive === false) {
+      && payload.error === '' && payload.continuationActive === false
+      && (payload.fullyIdle === true || payload.fullyIdle === false && this.outstanding.size > 0)) {
       this.denial = undefined;
       this.candidate = undefined;
       this.idleInvocation = false;
+      this.notificationWakes.delete(wake[0]);
       return {};
     }
     throw new Error('AGY idle shell denial was not confirmed.');

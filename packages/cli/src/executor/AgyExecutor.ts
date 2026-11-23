@@ -267,7 +267,7 @@ export class AgyExecutor implements IExecutor {
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
       sessionId: original ?? undefined, worker: this.delegationWorker,
-      hostScheduleChat, commandCheckpoint,
+      hostScheduleChat, commandCheckpoint, validatedChatLoad: !!cleanGeneration,
       beforeSessionLoad: original && (cleanGeneration || firstSetup) ? () => {
         const pointer = firstSetup ? this.hostSelection(original) : this.cleanHostSelection(original);
         if (pointer.hostGeneration !== (firstSetup?.generation ?? cleanGeneration)

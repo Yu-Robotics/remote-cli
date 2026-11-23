@@ -335,16 +335,16 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic', groups: ['scheduling'] }))
       .rejects.toThrow('reconnect was refused');
   });
-  it.each(['list', 'status'].flatMap(action =>
+  it.each(['list', 'send_input'].flatMap(action =>
     ['foreground completion', 'delayed completion', 'missing completion', 'active continuation'].map(timing => ({ action, timing }))))(
     'preserves only live chat after $action on an outstanding foreground command: $timing', async ({ action, timing }) => {
       const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
       const turn = runtime.execute('hold', {});
       await vi.waitFor(() => expect(last()?.release).toBeDefined());
       const client = last(), task = yieldCommand(client);
-      const { decision, payload } = manageCommand(client, action === 'status' ? { Action: action, TaskId: task.id } : { Action: action });
+      const { decision, payload } = manageCommand(client, action === 'send_input'
+        ? { Action: action, TaskId: task.id, Input: 'synthetic input\n' } : { Action: action });
       expect(decision.decision).toBe('deny');
-      if (action === 'status') expect(decision.reason).toContain('command completion is pending');
       client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
         'MODEL', 'ERROR', payload.stepIdx);
       client.hook('PostInvocation');
@@ -378,36 +378,33 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       await runtime.close();
       expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
     });
-  it.each(['foreign session', 'unknown target', 'extra argument', 'completed target', 'missing creation', 'worker',
-    'scheduled', 'loaded', 'planner mismatch', 'changed planner', 'missing denial', 'wrong nonce'])(
+  it.each(['foreign session', 'unknown target', 'extra argument', 'missing creation', 'worker', 'scheduled', 'planner mismatch'])(
     'checks target, scope and receipt for a status refusal: %s', async scenario => {
       const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home },
-        worker: scenario === 'worker', sessionId: scenario === 'loaded' ? native.sessionId : undefined });
+        worker: scenario === 'worker' });
       const turn = runtime.execute('hold', scenario === 'scheduled' ? { hostScheduleSessionId: native.sessionId } : {});
       await vi.waitFor(() => expect(last()?.release).toBeDefined());
       const client = last();
       const task = scenario === 'missing creation' ? undefined : yieldCommand(client);
-      if (scenario === 'completed target') completion(client, task!);
       const args: Record<string, string> = { Action: 'status', TaskId: task?.id ?? client.session + '/task-0' };
       if (scenario === 'foreign session') args.TaskId = 'other/task-0';
       if (scenario === 'unknown target') args.TaskId = client.session + '/task-999';
       if (scenario === 'extra argument') args.extra = 'unexpected';
       const { decision, payload } = manageCommand(client, args, scenario === 'planner mismatch' ? { Action: 'list' } : args);
       expect(decision.decision).toBe('deny');
-      const unavailable = ['foreign session', 'unknown target', 'extra argument', 'completed target', 'missing creation'].includes(scenario);
+      const unavailable = ['foreign session', 'unknown target', 'extra argument', 'missing creation'].includes(scenario);
       if (unavailable) {
         expect(decision.reason).toContain('request is unavailable');
-      } else if (['changed planner', 'missing denial', 'wrong nonce'].includes(scenario)) {
-        expect(decision.reason).toContain('command completion is pending');
+        // A refusal for another target never discloses this session's tasks.
+        expect(decision.reason).not.toContain(client.session);
       } else {
         expect(runtime.blocked).toBeTruthy();
       }
-      if (scenario === 'changed planner') args.TaskId = 'other/task-0';
-      if (scenario !== 'missing denial') client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: '
-        + (scenario === 'wrong nonce' ? 'unrelated' : decision.reason), 'MODEL', 'ERROR', payload.stepIdx);
+      client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+        'MODEL', 'ERROR', payload.stepIdx);
       client.hook('PostInvocation');
       client.hook('PreInvocation', { initialNumSteps: client.cursor });
-      if (unavailable && task && scenario !== 'completed target') completion(client, task);
+      if (unavailable && task) completion(client, task);
       client.finish(); client.release({ stopReason: 'end_turn' });
       if (unavailable) {
         await expect(turn).resolves.toMatchObject({ success: true });
@@ -424,6 +421,268 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       await runtime.close();
       expect(ownedSessionClosed).toHaveBeenCalledWith(client.session, undefined, undefined, undefined);
     });
+  // Native AGY 1.5.13 status shape (isolated ACP probe): a DONE GENERIC row at the
+  // manage_task step, prefixed by repeated timestamps, naming the task, status and log.
+  function statusReply(client: ReturnType<typeof last>, payload: { stepIdx: number }, task: { id: string; log: string },
+    state: 'RUNNING' | 'DONE', options: { target?: string; status?: string } = {}) {
+    const stamp = 'Created At: 2026-01-01T00:00:00Z\nCompleted At: 2026-01-01T00:00:00Z\n';
+    const output = state === 'DONE' ? 'Log output:\nFirst line\r\nSecond line\r\n\nLast progress: 1s ago\n' : '';
+    client.row('GENERIC', stamp + stamp + `Task: ${options.target ?? task.id}\nStatus: ${state}\nLog: ${task.log}\n` + output,
+      'MODEL', options.status ?? 'DONE', payload.stepIdx);
+  }
+  function ownedStatus(client: ReturnType<typeof last>, task: { id: string; log: string }, state: 'RUNNING' | 'DONE') {
+    const { payload, decision } = manageCommand(client, { Action: 'status', TaskId: task.id });
+    expect(decision.decision).toBe('allow');
+    statusReply(client, payload, task, state);
+    client.hook('PostToolUse', payload);
+    client.hook('PostInvocation');
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    return payload;
+  }
+  function deliverPost(client: ReturnType<typeof last>, task: { step: number }) {
+    client.hook('PostToolUse', { stepIdx: task.step, toolCall: { name: 'run_command', id: `call-${task.step}`, args: {} } });
+  }
+  /** A completion notification that proposes one more shell. The shell is always denied. */
+  function idleShell(client: ReturnType<typeof last>, task: { id: string; log: string; step: number }, post = true) {
+    if (post) deliverPost(client, task);
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    completion(client, task);
+    const args = { CommandLine: 'touch synthetic-extra-shell' };
+    client.row('PLANNER_RESPONSE', '');
+    client.rows.at(-1).tool_calls = [{ name: 'run_command', args }];
+    const step = client.cursor++;
+    const decision = client.hook('PreToolUse', { stepIdx: step, toolCall: { name: 'run_command', id: 'idle-shell-' + step, args } });
+    expect(decision.decision).toBe('deny');
+    client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason, 'MODEL', 'ERROR', step);
+    const ending = client.hook('PostInvocation');
+    expect(ending?.decision).not.toBe('allow');
+    if (ending?.terminationBehavior === 'terminate') {
+      client.hook('Stop', { terminationReason: 'TERMINAL_CUSTOM_HOOK', error: '', fullyIdle: true, continuationActive: false });
+    } else {
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      client.row('PLANNER_RESPONSE', 'The extra command was not run.');
+      client.hook('PostInvocation');
+      client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false });
+    }
+  }
+  function idleQuiet(client: ReturnType<typeof last>, task: { id: string; log: string; step: number }, post = true) {
+    if (post) deliverPost(client, task);
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    completion(client, task);
+    client.row('PLANNER_RESPONSE', 'Command finished.');
+    client.hook('PostInvocation');
+    client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false });
+  }
+  async function commandTurn(run: (prompt: string) => Promise<unknown>, count: number, complete: boolean) {
+    const turn = run('hold');
+    turn.catch(() => undefined);
+    await vi.waitFor(() => expect(last()?.prompts).toHaveLength(count));
+    const client = last(), task = yieldCommand(client);
+    if (complete) completion(client, task);
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(turn).resolves.toMatchObject({ success: true });
+    return { client, task };
+  }
+  it.each(['running', 'done', 'running then done', 'exit race', 'late query on a later turn'])(
+    'admits a read-only native status for an owned ordinary command: %s', async scenario => {
+      const { runtime } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
+      let prompts = ['hold'];
+      if (scenario === 'late query on a later turn') {
+        const { task } = await commandTurn(prompt => runtime.execute(prompt, {}), 1, true);
+        const turn = runtime.execute('hold', {});
+        turn.catch(() => undefined);
+        await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+        ownedStatus(last(), task, 'DONE');
+        last().finish(); last().release({ stopReason: 'end_turn' });
+        await expect(turn).resolves.toMatchObject({ success: true });
+        prompts = ['hold', 'hold'];
+      } else {
+        const turn = runtime.execute('hold', {});
+        turn.catch(() => undefined);
+        await vi.waitFor(() => expect(last()?.release).toBeDefined());
+        const client = last(), task = yieldCommand(client);
+        if (scenario === 'done') completion(client, task);
+        if (scenario === 'exit race') {
+          // Native looked up a running task, then reported its exit before flushing the wake.
+          const { payload, decision } = manageCommand(client, { Action: 'status', TaskId: task.id });
+          expect(decision.decision).toBe('allow');
+          statusReply(client, payload, task, 'DONE');
+          client.hook('PostToolUse', payload);
+          completion(client, task);
+          client.hook('PostInvocation');
+          client.hook('PreInvocation', { initialNumSteps: client.cursor });
+        } else {
+          ownedStatus(client, task, scenario === 'done' ? 'DONE' : 'RUNNING');
+        }
+        if (scenario === 'running then done') {
+          completion(client, task);
+          ownedStatus(client, task, 'DONE');
+          ownedStatus(client, task, 'DONE');
+        }
+        if (scenario === 'running') completion(client, task);
+        client.finish(); client.release({ stopReason: 'end_turn' });
+        await expect(turn).resolves.toMatchObject({ success: true, output: 'Synthetic result' });
+      }
+      expect(runtime.blocked).toBeUndefined();
+      await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
+      expect(last().prompts).toEqual([...prompts, 'next ordinary prompt']);
+      expect(native.clients).toHaveLength(1);
+      // A read-only query does not revoke the host's existing schedule eligibility.
+      expect(runtime.hostScheduleAvailable).toBe(true);
+    });
+  it.each(['wrong reply target', 'error reply', 'missing reply', 'changed reply', 'wrong callback', 'repeated callback', 'replayed step'])(
+    'fails closed when an admitted status has forged evidence: %s', async scenario => {
+      const { runtime } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
+      const turn = runtime.execute('hold', {});
+      turn.catch(() => undefined);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last(), task = yieldCommand(client);
+      const { payload, decision } = manageCommand(client, { Action: 'status', TaskId: task.id });
+      expect(decision.decision).toBe('allow');
+      if (scenario !== 'missing reply') statusReply(client, payload, task, 'RUNNING', {
+        target: scenario === 'wrong reply target' ? client.session + '/task-999' : undefined,
+        status: scenario === 'error reply' ? 'ERROR' : undefined });
+      client.hook('PostToolUse', scenario === 'wrong callback' ? { ...payload, toolCall: { ...payload.toolCall, id: 'another-call' } } : payload);
+      if (scenario === 'repeated callback') client.hook('PostToolUse', payload);
+      if (scenario === 'changed reply') client.rows.at(-1).content += 'changed';
+      if (scenario === 'replayed step') expect(client.hook('PreToolUse', payload).decision).toBe('deny');
+      completion(client, task);
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await turn.catch(() => undefined);
+      await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+      expect(client.prompts).toEqual(['hold']);
+      expect(runtime.hostScheduleAvailable).toBe(false);
+    });
+  it.each(['list', 'send_input', 'status'])(
+    'composes a prior %s request with a delayed completion that proposes another shell', async action => {
+      const { id } = await captureTimedSession();
+      const turn = executor.execute('hold');
+      turn.catch(() => undefined);
+      await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+      const client = last(), task = yieldCommand(client);
+      if (action === 'status') ownedStatus(client, task, 'RUNNING');
+      else {
+        const { payload, decision } = manageCommand(client, action === 'list' ? { Action: 'list' }
+          : { Action: 'send_input', TaskId: task.id, Input: 'synthetic input\n' });
+        expect(decision.decision).toBe('deny');
+        client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+          'MODEL', 'ERROR', payload.stepIdx);
+        client.hook('PostInvocation');
+        client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      }
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ success: true });
+      // A premature message stays outside ACP. A due timer waits only on an eligible host.
+      await expect(executor.execute('too soon')).rejects.toThrow('pending');
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      expect(executor.isHostScheduleWaitingForCommand(id, cwd)).toBe(action === 'status');
+      idleShell(client, task);
+      await expect(executor.execute('follow-up')).resolves.toMatchObject({ success: true });
+      await commandTurn(prompt => executor.execute(prompt), 4, true);
+      expect(client.prompts).toEqual(['hold', 'hold', 'follow-up', 'hold']);
+      expect(executor.getSessionId()).toBe(id);
+      expect(native.clients).toHaveLength(1);
+      if (action === 'status') {
+        executor.checkHostScheduleSession(id);
+        await expect(executor.execute('next slot', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+        expect(client.prompts.filter(prompt => prompt === 'next slot')).toHaveLength(1);
+      } else {
+        expect(() => executor.checkHostScheduleSession(id)).toThrow();
+        await expect(executor.execute('must not schedule', { hostScheduleSessionId: id })).rejects.toThrow();
+        expect(client.prompts).not.toContain('must not schedule');
+      }
+    });
+  it.each(['idle denial then status', 'status then idle denial', 'two idle denials'])(
+    'keeps live ordinary chat across repeated turns: %s', async scenario => {
+      const { runtime } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
+      const run = (prompt: string) => runtime.execute(prompt, {});
+      if (scenario === 'status then idle denial') {
+        const turn = run('hold');
+        turn.catch(() => undefined);
+        await vi.waitFor(() => expect(last()?.release).toBeDefined());
+        const client = last(), task = yieldCommand(client);
+        ownedStatus(client, task, 'RUNNING'); completion(client, task); ownedStatus(client, task, 'DONE');
+        client.finish(); client.release({ stopReason: 'end_turn' });
+        await expect(turn).resolves.toMatchObject({ success: true });
+      } else {
+        const first = await commandTurn(run, 1, false);
+        idleShell(first.client, first.task);
+      }
+      const turn = run('hold');
+      turn.catch(() => undefined);
+      await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+      const client = last(), task = yieldCommand(client);
+      if (scenario === 'idle denial then status') {
+        ownedStatus(client, task, 'RUNNING');
+        completion(client, task);
+      }
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ success: true });
+      if (scenario !== 'idle denial then status') idleShell(client, task);
+      await expect(run('next ordinary prompt')).resolves.toMatchObject({ success: true });
+      expect(client.prompts).toEqual(['hold', 'hold', 'next ordinary prompt']);
+      expect(native.clients).toHaveLength(1);
+      expect(runtime.blocked).toBeUndefined();
+    });
+  it.each([['A', 'B'], ['B', 'A']].flatMap(order => (['first', 'last'] as const).map(shell => ({ order, shell }))))(
+    'attributes two overlapping ordinary commands to their own exits: $order, shell on $shell notification', async ({ order, shell }) => {
+      const { runtime } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
+      const turn = runtime.execute('hold', {});
+      turn.catch(() => undefined);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      const tasks = { A: yieldCommand(client), B: yieldCommand(client) };
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ success: true });
+      deliverPost(client, tasks.A); deliverPost(client, tasks.B);
+      const [first, second] = order.map(name => tasks[name as 'A' | 'B']);
+      if (shell === 'first') idleShell(client, first, false); else idleQuiet(client, first, false);
+      expect(runtime.blocked).toBeUndefined();
+      await expect(runtime.execute('interim', {})).rejects.toThrow('pending');
+      expect(client.prompts).toEqual(['hold']);
+      if (shell === 'last') idleShell(client, second, false); else idleQuiet(client, second, false);
+      await expect(runtime.execute('next ordinary prompt', {})).resolves.toMatchObject({ success: true });
+      expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+      expect(native.clients).toHaveLength(1);
+    });
+  it.each(['new command', 'new command without status', 'stale target'])('observes commands admitted after an actual clean reload: %s', async scenario => {
+    const { id } = await captureTimedSession();
+    const { client: original, task: prior } = await commandTurn(prompt => executor.execute(prompt), 2, true);
+    native.loadedRows = structuredClone(original.rows);
+    await executor.destroy();
+    executor = make();
+    executor.checkHostScheduleSession(id);
+    const turn = executor.execute('hold');
+    turn.catch(() => undefined);
+    await vi.waitFor(() => expect(native.clients).toHaveLength(2));
+    await vi.waitFor(() => expect(last().release).toBeDefined());
+    const client = last();
+    expect(client.session).toBe(id);
+    if (scenario === 'stale target') {
+      // Earlier records stay historical: no ownership is inherited across the process boundary.
+      const { payload, decision } = manageCommand(client, { Action: 'status', TaskId: prior.id });
+      expect(decision.decision).toBe('deny');
+      expect(decision.reason).not.toContain('Status:');
+      client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+        'MODEL', 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await turn.catch(() => undefined);
+      expect(client.prompts).toEqual(['hold']);
+      return;
+    }
+    const task = yieldCommand(client);
+    if (scenario === 'new command') ownedStatus(client, task, 'RUNNING');
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(turn).resolves.toMatchObject({ success: true });
+    await expect(executor.execute('too soon')).rejects.toThrow('pending');
+    idleShell(client, task);
+    await expect(executor.execute('next ordinary prompt')).resolves.toMatchObject({ success: true });
+    expect(client.prompts).toEqual(['hold', 'next ordinary prompt']);
+    expect(executor.getSessionId()).toBe(id);
+    expect(native.clients).toHaveLength(2);
+  });
   it.each(['cancelled', 'after list', 'missing notice', 'wrong exit log', 'wrong sender', 'rewritten receipt', 'delayed receipt', 'missing receipt', 'wrong receipt', 'missing callback',
     'wrong callback', 'foreign target', 'extra argument', 'already completed', 'worker', 'scheduled', 'loaded'])(
     'limits native kill to an owned live foreground command: %s', async scenario => {
@@ -497,11 +756,12 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(client.hook('PreToolUse', { stepIdx: client.cursor, toolCall: original })).toMatchObject({ decision: 'deny' });
     expect(() => executor.checkHostScheduleSession(id)).toThrow();
   });
-  it.each(['confirmed', 'ordinary turn', 'different planner', 'wrong nonce', 'post-tool', 'changed history',
+  it.each(['confirmed', 'ordinary turn', 'ordinary wrong nonce', 'ordinary missing Stop', 'different planner', 'wrong nonce', 'post-tool', 'changed history',
     'extra row', 'missing Stop', 'wrong Stop', 'still busy', 'continued'])(
-    'admits the next slot only after a proven idle shell denial: %s', async scenario => {
+    'admits the next turn only after a proven idle shell denial: %s', async scenario => {
       const { id } = await captureTimedSession();
-      const running = executor.execute('hold', scenario === 'ordinary turn' ? {} : { hostScheduleSessionId: id });
+      const ordinary = scenario.startsWith('ordinary');
+      const running = executor.execute('hold', ordinary ? {} : { hostScheduleSessionId: id });
       await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
       const client = last();
       const task = yieldCommand(client);
@@ -518,16 +778,33 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       expect(decision.decision).toBe('deny');
       expect(() => executor.checkHostScheduleSession(id)).toThrow();
       client.row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' +
-        (scenario === 'wrong nonce' ? 'different' : decision.reason), 'MODEL', 'ERROR', step);
+        (scenario.endsWith('wrong nonce') ? 'different' : decision.reason), 'MODEL', 'ERROR', step);
       if (scenario === 'post-tool') client.hook('PostToolUse', { stepIdx: step });
       if (scenario === 'changed history') client.rows[0].content += 'changed';
       const ending = client.hook('PostInvocation');
-      if (scenario === 'confirmed') expect(ending).toEqual({ terminationBehavior: 'terminate' });
+      if (scenario === 'confirmed' || scenario === 'ordinary turn') expect(ending).toEqual({ terminationBehavior: 'terminate' });
       if (scenario === 'extra row') client.row('GENERIC', 'unexpected');
-      if (scenario !== 'missing Stop') client.hook('Stop', {
+      if (!scenario.endsWith('missing Stop')) client.hook('Stop', {
         terminationReason: scenario === 'wrong Stop' ? 'NO_TOOL_CALL' : 'TERMINAL_CUSTOM_HOOK',
         error: '', fullyIdle: scenario !== 'still busy', continuationActive: scenario === 'continued',
       });
+      if (ordinary) {
+        if (scenario === 'ordinary turn') {
+          executor.checkHostScheduleSession(id);
+          await expect(executor.execute('ordinary follow-up', {})).resolves.toMatchObject({ success: true });
+          expect(client.prompts).toEqual(['hold', 'hold', 'ordinary follow-up']);
+          expect(executor.getSessionId()).toBe(id);
+          executor.checkHostScheduleSession(id);
+          await executor.destroy();
+          expect(() => make().checkHostScheduleSession(id)).toThrow();
+        } else {
+          expect(() => executor.checkHostScheduleSession(id)).toThrow();
+          const reason = scenario === 'ordinary missing Stop' ? 'AGY command completion is pending.' : 'AGY idle command denial is unconfirmed.';
+          await expect(executor.execute('ordinary follow-up', {})).rejects.toThrow(reason);
+          expect(client.prompts).toEqual(['hold', 'hold']);
+        }
+        return;
+      }
       if (scenario !== 'confirmed') {
         expect(() => executor.checkHostScheduleSession(id)).toThrow();
         expect(client.prompts).toEqual(['hold', 'hold']);

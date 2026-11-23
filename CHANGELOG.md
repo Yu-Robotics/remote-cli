@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.280] - 2026-11-23
+
+### Fixed
+- Allow AGY to read the native status of an owned background command, including after exit. Track completion notifications independently of scheduling admission so a verified denial of an extra shell request permits the next ordinary message. An eligible pinned scheduled turn waits for verified idle before delivery.
+
 ## [1.6.279] - 2026-11-23
 
 ### Fixed
