@@ -407,6 +407,89 @@ describe('MessageHandler schedule management and delivery', () => {
     } finally { await executor.destroy(); agyActivity.clients.length = 0; }
   });
 
+  it('continues ordinary and next scheduled chat after an ordinary error inside a due occurrence', async () => {
+    f.setBackend('agy');
+    vi.spyOn(hooks, 'installAgyScheduleHooks').mockImplementation(syntheticAgyHooks.installAgyScheduleHooks);
+    vi.spyOn(hooks, 'AgyHookRelay').mockImplementation((home, accept) =>
+      new syntheticAgyHooks.AgyHookRelay(home, accept) as unknown as hooks.AgyHookRelay);
+    const first = 'First scheduled occurrence', second = 'Second scheduled occurrence', ordinary = 'Ordinary after error';
+    const prompts: string[] = [];
+    class Client extends SyntheticAgyActivityClient {
+      async prompt(session: string, blocks: { text: string }[]) {
+        expect(session).toBe(this.session);
+        const prompt = blocks[0].text;
+        prompts.push(prompt);
+        let initialNumSteps = this.rows.length;
+        const invocation = (event: string) => this.hook(event, { initialNumSteps, invocationNum: 0 });
+        const begin = () => { initialNumSteps = this.rows.length; invocation('PreInvocation'); };
+        const row = (type: string, content: string, status = 'DONE', source = 'MODEL') => {
+          this.rows.push({ step_index: this.rows.length, type, content, status, source });
+        };
+        const plan = (name: string, args: Record<string, string>) => {
+          row('PLANNER_RESPONSE', '');
+          this.rows.at(-1)!.tool_calls = [{ name, args }];
+          const stepIdx = this.rows.length;
+          const payload = { stepIdx, toolCall: { id: 'call-' + stepIdx, name, args } };
+          expect(this.hook('PreToolUse', payload)).toEqual({ decision: 'allow' });
+          return payload;
+        };
+        const finish = (text: string) => {
+          row('PLANNER_RESPONSE', text); invocation('PostInvocation');
+          this.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false });
+        };
+        this.hook('SessionStart'); begin();
+        if (prompt === first) {
+          const tool = plan('mcp_fixture_lookup', { query: 'synthetic' });
+          const error = 'synthetic scheduled tool failure';
+          this.hook('PostToolUse', { ...tool, error });
+          row('GENERIC', 'Encountered error in step execution: ' + error, 'ERROR');
+          invocation('PostInvocation'); begin(); finish('First scheduled answer');
+        } else finish(prompt === second ? 'Second scheduled answer' : prompt === ordinary ? 'Ordinary answer' : 'Ready');
+        return { stopReason: 'end_turn' };
+      }
+    }
+    vi.spyOn(acp, 'AcpClient').mockImplementation((command, args, cwd, callbacks) =>
+      new Client(command, args, cwd, callbacks!) as unknown as acp.AcpClient);
+    const executor = new AgyExecutor(new DirectoryGuard([f.cwd]), { threadId: 'thread-a', initialWorkingDirectory: f.cwd });
+    const execute = vi.spyOn(executor, 'execute');
+    vi.spyOn(f.pool, 'getExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    vi.spyOn(f.pool, 'getExistingExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    try {
+      await f.bind(); await expect(executor.execute('Initialize')).resolves.toMatchObject({ success: true });
+      await f.send('/schedule after 5m -- ' + first);
+      const [firstJob] = await records();
+      expect(firstJob.sessionId).toBe(executor.getSessionId());
+      const service = f.handler['schedules']!;
+      const now = vi.spyOn(service as any, 'now').mockReturnValue(firstJob.nextDueAt);
+      const dispatch = vi.spyOn(service as any, 'dispatchHost');
+      await service['wakeHosts']();
+      expect(dispatch).toHaveBeenCalledOnce();
+      await dispatch.mock.results[0].value;
+      await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
+      expect(f.scheduledResults()[0]).toMatchObject({ success: true, output: 'First scheduled answer' });
+      expect(prompts).toEqual(['Initialize', first]);
+      await expect(executor.execute(ordinary)).resolves.toMatchObject({ success: true, output: 'Ordinary answer' });
+      now.mockReturnValue(Date.now());
+      await f.send('/schedule after 5m -- ' + second);
+      expect(f.responses().at(-1).error).toBeUndefined();
+      expect(f.responses().at(-1)).toMatchObject({ success: true });
+      const jobs = await records();
+      const secondJob = jobs.find(job => job.id !== firstJob.id)!;
+      expect(secondJob).toBeDefined();
+      expect(secondJob.sessionId).toBe(firstJob.sessionId);
+      now.mockReturnValue(secondJob.nextDueAt);
+      await service['wakeHosts']();
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      await dispatch.mock.results[1].value;
+      await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(2));
+      expect(f.scheduledResults()[1]).toMatchObject({ success: true, output: 'Second scheduled answer' });
+      await service['wakeHosts'](); await service.retryDeliveries();
+      expect(prompts).toEqual(['Initialize', first, ordinary, second]);
+      expect(execute).toHaveBeenLastCalledWith(second, expect.objectContaining({ hostScheduleSessionId: firstJob.sessionId }));
+      expect(acp.AcpClient).toHaveBeenCalledOnce();
+    } finally { await executor.destroy(); agyActivity.clients.length = 0; }
+  });
+
   it('holds an occurrence while disconnected and accepts the original binding on reconnect', async () => {
     const { dispatch, deliver } = await dispatchFixture();
     const admit = vi.fn(async () => true);

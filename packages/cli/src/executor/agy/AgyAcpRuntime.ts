@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import type { AgyHookLease } from '../../scheduling/agy/AgyHookOwnership';
-import { AgyChatHost } from './AgyChatHost';
+import { AgyChatHost, restoreAgyToolErrors } from './AgyChatHost';
 import { agyHostScheduleHistory } from './AgySessionSelection';
 import { creationReceipt, nativeRestartNotice, nativeWake, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import { AgyCommandTasks, type AgyCommandCheckpoint } from './AgyCommandTasks';
@@ -28,6 +28,7 @@ export interface AgyAcpRuntimeOptions {
   /** Main chat whose schedule tools create host timers only. */
   hostScheduleChat?: boolean;
   commandCheckpoint?: AgyCommandCheckpoint;
+  toolErrorDigest?: string;
   validatedChatLoad?: boolean;
   beforeSessionLoad?(): void;
   saveSession(id: string): void | Promise<void>;
@@ -35,7 +36,7 @@ export interface AgyAcpRuntimeOptions {
   beforePrompt?(): void;
   settledPrompt?(reusable: boolean): void;
   /** Exact local group release only; this cannot certify empty native queues. */
-  ownedSessionClosed(id: string, cleanHistory?: string, unpromptedHistory?: string, commands?: AgyCommandCheckpoint): void;
+  ownedSessionClosed(id: string, cleanHistory?: string, unpromptedHistory?: string, commands?: AgyCommandCheckpoint, toolErrorDigest?: string): void;
   /** Persist before the native schedule tool can run, even if its receipt is lost. */
   retainScheduleOwner(sessionId: string, hostId: string, retired: boolean): void;
   mapTool(name: string, args: Record<string, unknown>): { name: string; input: Record<string, unknown> };
@@ -77,6 +78,7 @@ export class AgyAcpRuntime {
   private commands?: AgyCommandTasks;
   private controlRecords: TranscriptRecord[] = [];
   private readonly tracker = new ActivityTracker();
+  private nativeVersion?: string;
   private streamed = '';
   private question?: { args?: Record<string, unknown>; pendingCall?: string };
   private answerQuestion?: (answer: string | undefined) => void;
@@ -92,10 +94,12 @@ export class AgyAcpRuntime {
         }
       },
       onToolCall: (call: AcpToolCallUpdate & { name?: string }) => {
+        this.chat?.observeDispatch(call);
         if (this.question?.args && call.name === 'ask_question' && call.status === 'pending'
           && isDeepStrictEqual(this.question.args, call.rawInput)) this.question.pendingCall = call.toolCallId;
       },
-      onToolResult: call => {
+      onToolResult: (call: AcpToolCallUpdate & { name?: string }) => {
+        this.chat?.observeDispatch(call);
         const question = this.question;
         if (question && question.pendingCall === call.toolCallId) question.pendingCall = undefined;
       },
@@ -116,9 +120,12 @@ export class AgyAcpRuntime {
     return !this.continuityUnsafe && !this.blocked && !this.retained && (this.chat?.reusable
       ?? !this.controlRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'));
   }
-  // Live error proofs belong to this process. A reconnect or checkpoint cannot inherit them.
+  private get checkpointEligible(): boolean {
+    return this.foregroundReusable && !this.commands?.pending && !this.commands?.liveDenial;
+  }
+  // Managed-tool reconnection and control changes retain their own admission rules.
   get reusable(): boolean {
-    return this.foregroundReusable && !this.chat?.hasForegroundToolErrors && !this.commands?.pending && !this.commands?.liveDenial;
+    return this.checkpointEligible && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
   }
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
@@ -202,11 +209,14 @@ export class AgyAcpRuntime {
       const idleDecision = !this.active && observeChat && !this.blocked ? this.commands?.idleDecision : undefined;
       const ordinaryCommands = ordinaryHost && this.active?.hostScheduleSessionId === undefined
         ? this.commands : undefined;
+      const scheduledHost = ordinaryHost && this.active?.hostScheduleSessionId !== undefined
+        && this.active.hostScheduleSessionId === this.sessionId && this.hostScheduleSafe;
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
           && !!this.options.hostScheduleChat && observeChat && !this.blocked
-          && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, ordinaryCommands, rows)
+          && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, this.commands, rows,
+          (ordinaryHost || scheduledHost) && observeChat && !this.permissionDeclined)
           : this.host!.schedules.accept(event, payload, controls);
       if (!this.continuityUnsafe && (this.chat?.liveManagement
         || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
@@ -250,6 +260,14 @@ export class AgyAcpRuntime {
     this.restore = await installAgyScheduleHooks(this.options.home, await this.relay.start());
     if (this.closing) throw new Error('AGY startup was retired.');
     // Consume a clean checkpoint under the per-HOME kernel gate, before spawning.
+    let restoredErrors: ReturnType<typeof restoreAgyToolErrors> | undefined;
+    if (this.options.toolErrorDigest !== undefined) {
+      if (!this.options.validatedChatLoad || !this.options.sessionId || this.options.worker || !this.options.hostScheduleChat) {
+        throw new Error('AGY tool checkpoint requires the original main conversation.');
+      }
+      this.relay.bindSession(this.options.sessionId);
+      restoredErrors = restoreAgyToolErrors(await this.relay.readCheckpointTranscript(), this.options.toolErrorDigest);
+    }
     if (this.options.sessionId) this.options.beforeSessionLoad?.();
     const args = ['acp', '--stdio', '--process-per-session', '--disable-telemetry'];
     if (this.options.autoApprove) args.push('--dangerously-skip-permissions');
@@ -257,7 +275,8 @@ export class AgyAcpRuntime {
     this.client = this.restore.run(() => new AcpClient(this.options.command, args, this.options.cwd, this.callbacks, true,
       { env: this.options.env, delegationWorker: true, onStderr: () => {} }));
     setStage('initialize');
-    await this.client.initialize();
+    const agent = (await this.client.initialize() as { agentInfo?: { version?: unknown } } | undefined)?.agentInfo;
+    this.nativeVersion = typeof agent?.version === 'string' ? agent.version : undefined;
     if (this.closing) throw new Error('AGY startup was retired.');
     const setup: AcpSessionSetup = async (session, configure) => {
       if (typeof session?.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(session.sessionId)) throw new Error('AGY ACP returned no valid session identity.');
@@ -297,11 +316,11 @@ export class AgyAcpRuntime {
     setStage('host-admission');
     if (this.relayFault) throw new Error('AGY hook relay failed before session admission.');
     if (this.options.worker || this.options.sessionId || this.options.hostScheduleChat) {
-      this.chat = new AgyChatHost(this.client, session.sessionId, this.options.cwd, this.options.threadId);
+      this.chat = new AgyChatHost(this.client, session.sessionId, this.options.cwd, this.options.threadId, [], restoredErrors, this.nativeVersion);
       if (this.options.hostScheduleChat && !this.options.worker) {
         this.commands = new AgyCommandTasks(session.sessionId, this.options.home, this.options.commandCheckpoint);
       }
-      this.relay.bindSession(session.sessionId);
+      if (!restoredErrors) this.relay.bindSession(session.sessionId);
     } else {
     this.host = new AgyScheduleHost(this.client, session.sessionId, {
       threadId: this.options.threadId, cwd: this.options.cwd,
@@ -346,7 +365,7 @@ export class AgyAcpRuntime {
       const result = await work;
       if (result.stopReason === 'cancelled' && !this.retained && !this.relayFault && !this.continuityUnsafe && !this.chat
         && this.host?.schedules.status.blocked?.startsWith('AGY foreground cancelled:')) {
-        this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords);
+        this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords, [], this.nativeVersion);
         this.host = undefined;
       }
       this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled');
@@ -441,7 +460,7 @@ export class AgyAcpRuntime {
         effort: requested.resetEffort ? this.defaults?.effort : requested.effort };
       if (requested.resetModel && !selection.model || requested.resetEffort && !selection.effort) throw new Error('AGY native setting default is unavailable.');
       // Controls revoke the original scheduling token. No later setting recreates it.
-      if (!this.chat) this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords);
+      if (!this.chat) this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords, [], this.nativeVersion);
       this.host = undefined;
       await applyAgySessionSettings(this.settings!, async (id, value) => {
         const result = await this.client!.setConfigOption(this.sessionId!, id, value);
@@ -473,7 +492,7 @@ export class AgyAcpRuntime {
     }
     let cleanHistory: string | undefined;
     let unpromptedHistory: string | undefined;
-    if (this.options.hostScheduleChat && !this.hostScheduleUnsafe && !this.commands?.liveDenial && !this.relayFault && this.reusable && this.sessionId && this.relay) {
+    if (this.options.hostScheduleChat && !this.hostScheduleUnsafe && !this.relayFault && this.checkpointEligible && this.sessionId && this.relay) {
       try {
         if (this.hostScheduleSettled) {
           const history = agyHostScheduleHistory(this.options.home, this.sessionId);
@@ -487,9 +506,10 @@ export class AgyAcpRuntime {
     await this.restore?.(); this.restore = undefined;
     if (!this.reusable) this.options.settledPrompt?.(false);
     if (this.host || this.chat) {
-      const safe = !this.hostScheduleUnsafe && !this.relayFault && this.reusable;
+      const safe = !this.hostScheduleUnsafe && !this.relayFault && this.checkpointEligible;
+      const errors = safe && cleanHistory ? this.chat?.checkpointToolErrors() : undefined;
       this.options.ownedSessionClosed(this.sessionId!, safe ? cleanHistory : undefined, safe ? unpromptedHistory : undefined,
-        safe && cleanHistory ? this.commands?.snapshot() : undefined);
+        safe && cleanHistory ? this.commands?.snapshot() : undefined, ...(errors ? [errors] : []));
     }
     this.closed = true;
 

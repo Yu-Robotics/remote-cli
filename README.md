@@ -668,12 +668,15 @@ notification requests another shell command, the CLI denies that request.
 After all owned commands and their notifications settle, the same chat can
 accept the next message. An already eligible scheduled turn can then run on
 its original session. Reading status does not give a session new permissions.
-From CLI 1.6.281, an ordinary tool error with matching native callbacks and a
-confirmed final answer allows the same live AGY chat and its eligible timers to
-continue. Commands still wait for their completion notification. This evidence
-is local to the running process. After it exits, the conversation cannot resume
-from these receipts. Missing hooks, including argument rejections before tool
-execution, still prevent reuse.
+From CLI 1.6.282, an ordinary tool error with matching native callbacks and a
+confirmed final answer allows the same main conversation to continue after
+either a manual or a host-timed turn. Commands still wait for their completion
+notification. After a clean shutdown, the CLI can resume the original session
+when its saved evidence, native history and configuration still match. Resuming
+does not retry the earlier tool call. On AGY 1.5.13, the CLI also recognizes
+verified argument rejections before file reads, writes, edits and web searches.
+The model can correct the call in the original session. Unknown schemas and
+missing or contradictory execution evidence still withhold reuse.
 
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when

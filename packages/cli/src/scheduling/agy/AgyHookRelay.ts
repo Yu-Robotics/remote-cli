@@ -45,6 +45,9 @@ export class AgyHookRelay {
     await new Promise<void>(resolve => this.server.close(() => resolve()));
     await this.chain;
   }
+  readCheckpointTranscript(): Promise<TranscriptRecord[]> {
+    return this.read(this.transcriptPath(), 'Stop');
+  }
   /** After group exit, confirm the native transcript still matches the last authenticated hook. */
   async confirmsTerminal(records: TranscriptRecord[]): Promise<boolean> {
     await this.chain;

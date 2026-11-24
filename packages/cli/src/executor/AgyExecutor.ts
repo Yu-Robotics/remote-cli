@@ -1,6 +1,8 @@
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
 import { agyHostScheduleHistory, agyOwnershipReview, agySavedSelectionDeletion, assertAgySelectionResettable, detachAgySelection } from './agy/AgySessionSelection';
 import { createHash, randomUUID } from 'crypto';
+import { isDeepStrictEqual } from 'util';
+import type { AgyCommandCheckpoint } from './agy/AgyCommandTasks';
 import { syncDirectory } from '../delegation/OwnershipRuntime';
 import { execFile } from 'child_process';
 import * as fs from 'fs';
@@ -165,16 +167,20 @@ export class AgyExecutor implements IExecutor {
     if (pointer.id !== id || pointer.transport !== 'acp') throw new Error('The original AGY conversation changed.');
     return pointer;
   }
-  private checkpointConfiguration(): string {
+  private checkpointConfiguration(errors?: { id: string; generation: string; history: string; commands?: AgyCommandCheckpoint; digest: string }): string {
     return createHash('sha256').update(JSON.stringify([this.threadId, this.agyHome, this.currentWorkingDirectory,
-      this.agyCommand, this.model, this.effort, this.autoApprove])).digest('hex');
+      this.agyCommand, this.model, this.effort, this.autoApprove, ...(errors ? [errors] : [])])).digest('hex');
   }
   private cleanHostSelection(id: string) {
     const pointer = this.hostSelection(id);
     const checkpoint = pointer.hostScheduleCheckpoint;
-    if (!this.agyHome || !checkpoint || checkpoint.policy !== 'host-timed-chat-v1'
+    const digest = checkpoint?.toolErrorDigest;
+    const withErrors = checkpoint?.policy === 'host-timed-chat-v2';
+    if (!this.agyHome || !checkpoint || (withErrors ? typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)
+      : checkpoint.policy !== 'host-timed-chat-v1' || digest !== undefined)
       || typeof pointer.hostGeneration !== 'string' || checkpoint.generation !== pointer.hostGeneration
-      || checkpoint.configuration !== this.checkpointConfiguration()
+      || checkpoint.configuration !== this.checkpointConfiguration(withErrors ? { id, generation: checkpoint.generation,
+        history: checkpoint.history, commands: checkpoint.commands, digest } : undefined)
       || checkpoint.history !== agyHostScheduleHistory(this.agyHome, id)) {
       throw new Error('Saved AGY ACP chat cannot safely resume: the clean host-timed checkpoint is missing or changed.');
     }
@@ -227,14 +233,14 @@ export class AgyExecutor implements IExecutor {
       ? 'Legacy AGY worker history cannot execute over ACP. Use this worker card Clear action or parent /clear after task/artifact closeout; original history is retained.'
       : 'Legacy AGY conversation cannot execute over ACP. Use explicit /clear to start fresh; original native history is retained.');
     let cleanGeneration: string | undefined;
-    let commandCheckpoint: import('./agy/AgyCommandTasks').AgyCommandCheckpoint | undefined;
+    let savedCheckpoint: { commands?: AgyCommandCheckpoint; toolErrorDigest?: string } | undefined;
     if (this.conversationId) {
       if (this.scheduleOwner) throw new Error('AGY saved chat cannot safely resume: native notifications remain unconfirmed. Use a new thread.');
       const proof = this.workerProof;
       if (!this.delegationWorker && this.hostSelection(this.conversationId).hostScheduleCheckpoint) {
         const pointer = this.cleanHostSelection(this.conversationId);
         cleanGeneration = pointer.hostGeneration;
-        commandCheckpoint = pointer.hostScheduleCheckpoint.commands;
+        savedCheckpoint = pointer.hostScheduleCheckpoint;
       }
       if (!cleanGeneration && !this.resumeCurrent && !(this.delegationWorker && proof?.sessionId === this.conversationId
         && proof.policy === 'hook-denial-v2' && proof.settled && proof.closed)) {
@@ -267,10 +273,12 @@ export class AgyExecutor implements IExecutor {
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
       sessionId: original ?? undefined, worker: this.delegationWorker,
-      hostScheduleChat, commandCheckpoint, validatedChatLoad: !!cleanGeneration,
+      hostScheduleChat, commandCheckpoint: savedCheckpoint?.commands, toolErrorDigest: savedCheckpoint?.toolErrorDigest,
+      validatedChatLoad: !!cleanGeneration,
       beforeSessionLoad: original && (cleanGeneration || firstSetup) ? () => {
         const pointer = firstSetup ? this.hostSelection(original) : this.cleanHostSelection(original);
         if (pointer.hostGeneration !== (firstSetup?.generation ?? cleanGeneration)
+          || cleanGeneration && !isDeepStrictEqual(pointer.hostScheduleCheckpoint, savedCheckpoint)
           || firstSetup && firstSetup.history !== agyHostScheduleHistory(this.agyHome!, original, true)) {
           throw new Error('AGY host-timed checkpoint was replaced.');
         }
@@ -325,7 +333,7 @@ export class AgyExecutor implements IExecutor {
       },
       beforePrompt: () => { if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); } },
       settledPrompt: reusable => { if (this.workerProof) { this.workerProof.settled = reusable; this.saveWorkerProof(); } },
-      ownedSessionClosed: (id, cleanHistory, unpromptedHistory, commands) => {
+      ownedSessionClosed: (id, cleanHistory, unpromptedHistory, commands, toolErrorDigest) => {
         if (id === this.conversationId) this.acpLeaseUnconfirmed = false;
         // The deletion path rechecks the installed pointer after exit. Writing
         // a checkpoint here could replace an intervening selection.
@@ -336,8 +344,10 @@ export class AgyExecutor implements IExecutor {
           if (pointer.hostGeneration !== this.hostGeneration) throw new Error('AGY host-timed selection changed before retirement.');
           if (cleanHistory) {
             this.writeNativeState(this.sessionFilePath, { ...pointer, hostScheduleCheckpoint: {
-              policy: 'host-timed-chat-v1', generation: this.hostGeneration, configuration: this.checkpointConfiguration(),
-              history: cleanHistory, commands,
+              policy: toolErrorDigest ? 'host-timed-chat-v2' : 'host-timed-chat-v1', generation: this.hostGeneration,
+              configuration: this.checkpointConfiguration(toolErrorDigest ? { id, generation: this.hostGeneration,
+                history: cleanHistory, commands, digest: toolErrorDigest } : undefined),
+              history: cleanHistory, commands, toolErrorDigest,
             } });
           } else if (unpromptedHistory && this.transitioning) {
             // Only a controlled reconnect can carry settings-only provenance across group retirement.

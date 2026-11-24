@@ -1,14 +1,34 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import type { AcpTransport } from '../acp/AcpClient';
 import type { AcpContentBlock } from '../acp/AcpTypes';
 import type { AgyCommandTasks } from './AgyCommandTasks';
 import { AgySessionSchedules, type HookPayload } from '../../scheduling/agy/AgySessionSchedules';
 import { creationReceipt, nativeWake, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
+import { agyDispatchConflicts, agyValidationRejection, type AgyValidationRejection } from './AgyValidationRejection';
 
 const listCall = { name: 'manage_task', args: { Action: 'list' } };
 const denialFailure = 'AGY tool denial enforcement is unconfirmed; explicit clear is required before reuse.';
 const foregroundFailure = 'AGY foreground tool outcome is unconfirmed; explicit clear is required before reuse.';
+
+type ToolError = { planner: TranscriptRecord; receipt: TranscriptRecord };
+
+function toolErrorDigest(errors: ToolError[]): string {
+  return createHash('sha256').update(JSON.stringify(errors.sort((a, b) => a.receipt.step_index - b.receipt.step_index))).digest('hex');
+}
+
+/** The transcript supplies the rows; only the retired foreground host supplies their authority. */
+export function restoreAgyToolErrors(records: TranscriptRecord[], digest: string): ToolError[] {
+  const errors: ToolError[] = [];
+  for (const [index, receipt] of records.entries()) {
+    if (receipt.type !== 'GENERIC' || !['ERROR', 'INVALID'].includes(receipt.status)) continue;
+    const planner = records[index - 1];
+    if (!planner || planner.step_index !== receipt.step_index - 1) throw new Error(foregroundFailure);
+    errors.push({ planner, receipt });
+  }
+  if (!errors.length || toolErrorDigest(errors) !== digest) throw new Error('AGY checkpoint tool evidence changed.');
+  return errors;
+}
 
 /** Ordinary ACP chat with scheduling permanently unavailable. The hook terminal
  * remains authoritative. This host never supplies original schedule admission. */
@@ -16,6 +36,7 @@ export class AgyChatHost {
   private records: TranscriptRecord[] = [];
   private turnStart?: number;
   private readonly observedTools = new Set<number>();
+  private readonly postedTools = new Set<number>();
   private monitor: AgySessionSchedules;
   private failure?: string;
   // Live evidence only. A newly loaded session cannot inherit these exceptions.
@@ -23,21 +44,32 @@ export class AgyChatHost {
   private pendingDenialStep?: number;
   private requiredTerminal?: string;
   private readonly ordinaryCalls = new Map<number, { call: unknown; planner: TranscriptRecord; error?: string }>();
-  private readonly toolErrors = new Map<number, { planner: TranscriptRecord; receipt: TranscriptRecord }>();
+  private readonly toolErrors = new Map<number, ToolError>();
+  private checkingLoadedHistory: boolean;
+  // Native argument rejections before dispatch. They have no tool hooks by design.
+  private readonly turnRejections: AgyValidationRejection[] = [];
+  private readonly dispatches: Array<{ name?: unknown; rawInput?: unknown }> = [];
+  private invocationStart?: number;
   private admittedKill = false;
   get reusable(): boolean { return !this.blocked && this.pendingDenialStep === undefined && !this.records.some(row =>
     creationReceipt(row, this.sessionId, row.step_index) || nativeWake(row)
     || row.type === 'GENERIC' && row.status !== 'DONE' && !this.managementDenials.has(row.step_index)
       && !this.toolErrors.has(row.step_index)); }
   get hasForegroundToolErrors(): boolean { return this.toolErrors.size > 0; }
+  checkpointToolErrors(): string | undefined {
+    return this.hasForegroundToolErrors ? toolErrorDigest([...this.toolErrors.values()]) : undefined;
+  }
   get liveManagement(): boolean { return this.managementDenials.size > 0 || this.admittedKill; }
   private active = false;
   private cancelled = false;
   private rejectCancel?: (error: Error) => void;
   private timer?: ReturnType<typeof setTimeout>;
   constructor(private readonly client: AcpTransport, readonly sessionId: string,
-    private readonly cwd: string, private readonly threadId: string, initialRecords: TranscriptRecord[] = []) {
+    private readonly cwd: string, private readonly threadId: string, initialRecords: TranscriptRecord[] = [],
+    restoredErrors: ToolError[] = [], private readonly nativeVersion?: string) {
     this.records = initialRecords;
+    for (const proof of restoredErrors) this.toolErrors.set(proof.receipt.step_index, proof);
+    this.checkingLoadedHistory = restoredErrors.length > 0;
     this.monitor = this.newMonitor();
   }
   private newMonitor(): AgySessionSchedules {
@@ -48,27 +80,35 @@ export class AgyChatHost {
   get blocked(): string | undefined { return this.failure ?? this.monitor.status.blocked; }
   fence(reason: string): void { this.failure ??= reason; }
   accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false,
-    commands?: AgyCommandTasks, fullHistory = records) {
+    commands?: AgyCommandTasks, fullHistory = records, ordinaryForeground = allowForegroundManagement) {
     this.records = records;
-    if (this.requiredTerminal && this.active && !allowForegroundManagement) this.fence(this.requiredTerminal);
+    if (this.checkingLoadedHistory) {
+      if (!['SessionStart', 'PreInvocation'].includes(event) || !this.reusable) this.fence(foregroundFailure);
+      if (event === 'PreInvocation') this.checkingLoadedHistory = false;
+    }
+    if (this.requiredTerminal && this.active && !allowForegroundManagement && !ordinaryForeground) this.fence(this.requiredTerminal);
     if (this.managementDenials.size) this.verifyManagementDenials(event, payload, records);
     if (event === 'PreInvocation' && this.turnStart === undefined && Number.isSafeInteger(payload.initialNumSteps)) this.turnStart = payload.initialNumSteps as number;
+    if (event === 'PreInvocation') this.invocationStart = this.active && Number.isSafeInteger(payload.initialNumSteps) ? payload.initialNumSteps as number : undefined;
     const duplicateTool = this.observedTools.has(payload.stepIdx as number);
     if (event === 'PreToolUse' && Number.isSafeInteger(payload.stepIdx)) this.observedTools.add(payload.stepIdx as number);
-    if (event === 'Stop' && records.some(row => row.type === 'GENERIC' && row.step_index >= (this.turnStart ?? Infinity) && !this.observedTools.has(row.step_index))) {
+    if (event === 'PostToolUse' && Number.isSafeInteger(payload.stepIdx)) this.postedTools.add(payload.stepIdx as number);
+    if (event === 'Stop' && records.some(row => row.type === 'GENERIC' && row.step_index >= (this.turnStart ?? Infinity)
+      && !this.observedTools.has(row.step_index) && !(row.status === 'INVALID' && this.toolErrors.has(row.step_index)))) {
       this.fence('AGY tool hook coverage is incomplete; this conversation is not reusable.');
     }
     const start = this.turnStart ?? Infinity;
-    if (event === 'Stop' && this.active && records.some(row => row.step_index >= start && this.toolErrors.has(row.step_index))) {
+    if (event === 'Stop' && this.active && records.some(row => row.step_index >= start
+      && this.toolErrors.has(row.step_index))) {
       const last = records.at(-1);
-      const settled = payload.fullyIdle === true || payload.fullyIdle === false && commands?.ordinaryCommandsPending;
+      const settled = payload.fullyIdle === true || payload.fullyIdle === false && !!commands?.outstandingCount;
       if (payload.continuationActive !== false || !settled || last?.type !== 'PLANNER_RESPONSE'
         || last.source !== 'MODEL' || last.status !== 'DONE' || last.tool_calls?.length) this.fence(foregroundFailure);
     }
     if (records.some(nativeWake)) this.fence('Unexpected native reminders were observed; this conversation is not reusable.');
     if (records.some(row => creationReceipt(row, this.sessionId, row.step_index))) this.fence('AGY background-task creation was observed; explicit clear is required before reuse.');
     const decision = this.monitor.accept(event, payload, records);
-    this.observeOrdinaryTool(event, payload, records, allowForegroundManagement && this.active && !this.cancelled
+    this.observeOrdinaryTool(event, payload, records, ordinaryForeground && this.active && !this.cancelled
       && !this.blocked, decision.decision === 'allow' && !duplicateTool);
     // A relay decision is only a request: native hook execution can fail open
     // after receiving it. Never grant continuity from a later DONE/Stop success.
@@ -133,6 +173,7 @@ export class AgyChatHost {
         } else this.fence(foregroundFailure);
       }
       this.ordinaryCalls.clear();
+      if (foreground) this.observeRejections(payload, records);
       return;
     }
     const step = payload.stepIdx as number;
@@ -158,6 +199,27 @@ export class AgyChatHost {
       this.ordinaryCalls.set(step, { call: structuredClone(call), planner: structuredClone(tail) });
     }
   }
+  /** Native AGY flushes an argument rejection by the PostInvocation of its own invocation. */
+  private observeRejections(payload: HookPayload, records: TranscriptRecord[]): void {
+    const start = payload.initialNumSteps;
+    if (!Number.isSafeInteger(start) || start !== this.invocationStart || (start as number) < (this.turnStart ?? Infinity)) return;
+    for (const [index, row] of records.entries()) {
+      const step = row.step_index;
+      if (step <= (start as number) || row.type !== 'GENERIC' || row.status !== 'INVALID' || this.toolErrors.has(step)
+        || this.observedTools.has(step) || this.postedTools.has(step)) continue;
+      const rejection = agyValidationRejection(this.nativeVersion, records[index - 1], row);
+      if (!rejection || records[index - 1].step_index < (start as number)) continue;
+      this.requiredTerminal ??= foregroundFailure;
+      this.toolErrors.set(step, { planner: structuredClone(records[index - 1]), receipt: structuredClone(row) });
+      this.turnRejections.push(rejection);
+    }
+  }
+  /** ACP tool updates of the active turn. A rejected call must never appear as dispatched. */
+  observeDispatch(update: { name?: unknown; rawInput?: unknown }): void {
+    if (!this.active) return;
+    this.dispatches.push({ name: update.name, rawInput: structuredClone(update.rawInput) });
+    if (this.dispatches.length > 4096) this.fence(foregroundFailure);
+  }
   private managementPlanner(row: TranscriptRecord | undefined, step: number, args: unknown): boolean {
     return row?.step_index === step - 1 && row.source === 'MODEL' && row.type === 'PLANNER_RESPONSE'
       && row.status === 'DONE' && isDeepStrictEqual(row.tool_calls, [{ name: listCall.name, args }]);
@@ -178,7 +240,8 @@ export class AgyChatHost {
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
     if (this.active || this.blocked || !this.reusable) throw new Error(this.blocked ?? 'AGY chat is busy or has unsettled native work.');
-    this.turnStart = undefined; this.observedTools.clear(); this.requiredTerminal = undefined;
+    this.turnStart = undefined; this.observedTools.clear(); this.postedTools.clear(); this.requiredTerminal = undefined;
+    this.turnRejections.length = 0; this.dispatches.length = 0; this.invocationStart = undefined;
     this.monitor.beginForeground(); this.active = true; this.cancelled = false;
     try {
       const terminal = await Promise.race([promptNative(blocks), new Promise<never>((_, reject) => { this.rejectCancel = reject; })]);
@@ -190,6 +253,10 @@ export class AgyChatHost {
         return { success: false, output: 'AGY foreground cancelled; completed side effects remain.', stopReason: 'cancelled' };
       }
       const result = this.monitor.endForeground();
+      // The ACP prompt response follows every update of its turn.
+      if (this.turnRejections.some(rejection => this.dispatches.some(update => agyDispatchConflicts(rejection, update)))) {
+        this.fence(foregroundFailure);
+      }
       if (this.requiredTerminal && (terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable || this.ordinaryCalls.size)) {
         this.fence(this.requiredTerminal);
       }

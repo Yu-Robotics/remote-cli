@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.282] - 2026-11-24
+
+### Fixed
+- Preserve AGY conversation continuity for verified ordinary tool failures in host-timed turns and allow eligible original sessions to resume after a verified clean shutdown.
+- Recognize verified pre-dispatch argument errors for AGY 1.5.13 file reads, writes, edits and web searches so the model can correct its arguments on the original session.
+
 ## [1.6.281] - 2026-11-24
 
 ### Fixed
