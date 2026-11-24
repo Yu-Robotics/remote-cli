@@ -4,12 +4,18 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/prom
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
+import { AgyExecutor } from '../src/executor/AgyExecutor';
+import * as acp from '../src/executor/acp/AcpClient';
+import * as hooks from '../src/scheduling/agy/AgyHookRelay';
+import { NOTIFICATION_PREFIX } from '../src/scheduling/agy/transcript';
+import { agyActivity, SyntheticAgyActivityClient, syntheticAgyHooks } from './executor/agyActivityFixture';
 import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import type { Thread } from '../src/thread/types';
-import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
+import { ScheduleService, SCHEDULE_CATALOG_FILE, HOST_SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
 
 const backends = ['claude', 'dsh', 'agy', 'codex', 'kimi', 'opencode', 'pi', 'zcode'] as const;
 const binding = { deviceId: 'fixture-device', openId: 'owner', epoch: 'original-binding' };
@@ -23,6 +29,7 @@ async function fixture() {
   let backend = 'claude';
   let sandbox: { mode: string } | undefined;
   let connected = true;
+  let autoAck = true;
   let executorBusy = false;
   const busyThreads = new Set<string>();
   const executor = { getSessionId: vi.fn((): string | null => 'bound'), checkHostScheduleSession: vi.fn((_id: string) => {}),
@@ -56,7 +63,7 @@ async function fixture() {
       if (!connected) throw new Error('Disconnected');
       if (message.type === 'schedule_tool_card') queueMicrotask(() => { void handler.handleMessage({ type: 'schedule_tool_card_ack', messageId: message.messageId, success: true } as any); });
       if (message.type === 'queue_started' && message.queueStarted?.source === 'schedule') scheduledMessages.add(message.messageId);
-      if (message.type === 'response' && scheduledMessages.has(message.messageId)) {
+      if (autoAck && message.type === 'response' && scheduledMessages.has(message.messageId)) {
         for (const acknowledge of acknowledgements) acknowledge(message.messageId);
       }
       return true;
@@ -81,7 +88,7 @@ async function fixture() {
       ...(cards ? { scheduleCardsV1: true } : {}), ...(tools ? { scheduleToolCardsV1: true } : {}) } } } as any);
   const responses = () => ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'response');
   return { cwd, threads, get handler() { return handler; }, pool, manager, ws, send, bind, responses, executor, config,
-    acknowledgements, closeHandlers,
+    acknowledgements, closeHandlers, holdResultAck: () => { autoAck = false; },
     restart: async () => { await handler.destroy(); handler = makeHandler(); scheduledMessages.clear(); ws.send.mockClear(); },
     setBackend: (value: string) => { backend = value; }, setSandbox: (value: { mode: string }) => { sandbox = value; },
     setExecutorBusy: (value: boolean) => { executorBusy = value; },
@@ -298,6 +305,106 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(await dispatch()).toMatchObject({ success: true, output: 'Foreground result' });
     expect(await dispatch()).toBeUndefined();
     expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each(['DONE', 'ERROR'])('delivers one pinned AGY occurrence after a foreground %s and command exit', async status => {
+    f.setBackend('agy');
+    vi.spyOn(hooks, 'installAgyScheduleHooks').mockImplementation(syntheticAgyHooks.installAgyScheduleHooks);
+    vi.spyOn(hooks, 'AgyHookRelay').mockImplementation((home, accept) =>
+      new syntheticAgyHooks.AgyHookRelay(home, accept) as unknown as hooks.AgyHookRelay);
+    const scheduled = 'Report the synthetic scheduled result';
+    const prompts: string[] = [];
+    let completeCommand!: () => void;
+    class Client extends SyntheticAgyActivityClient {
+      async prompt(session: string, blocks: { text: string }[]) {
+        expect(session).toBe(this.session);
+        const prompt = blocks[0].text;
+        prompts.push(prompt);
+        let initialNumSteps = this.rows.length;
+        const invocation = (event: string) => this.hook(event, { initialNumSteps, invocationNum: 0 });
+        const begin = () => { initialNumSteps = this.rows.length; invocation('PreInvocation'); };
+        const row = (type: string, content: string, status = 'DONE', source = 'MODEL') => {
+          this.rows.push({ step_index: this.rows.length, type, content, status, source });
+        };
+        const plan = (name: string, args: Record<string, string>) => {
+          row('PLANNER_RESPONSE', '');
+          this.rows.at(-1)!.tool_calls = [{ name, args }];
+          const stepIdx = this.rows.length;
+          const payload = { stepIdx, toolCall: { id: 'call-' + stepIdx, name, args } };
+          expect(this.hook('PreToolUse', payload)).toEqual({ decision: 'allow' });
+          return payload;
+        };
+        const finish = (text: string, fullyIdle = true) => {
+          row('PLANNER_RESPONSE', text); invocation('PostInvocation');
+          this.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle, continuationActive: false });
+        };
+        this.hook('SessionStart'); begin();
+        if (prompt === 'Ordinary foreground') {
+          const tool = plan('write_file', { Path: path.join(f.cwd, 'synthetic.txt'), Content: 'fixture' });
+          const error = 'synthetic write failure';
+          this.hook('PostToolUse', { ...tool, error: status === 'ERROR' ? error : '' });
+          row('GENERIC', status === 'ERROR' ? 'Encountered error in step execution: ' + error : 'File written', status);
+          invocation('PostInvocation'); begin();
+          const shell = plan('run_command', { CommandLine: 'echo synthetic' });
+          const task = session + '/task-' + shell.stepIdx;
+          const log = pathToFileURL(path.join(f.cwd, '.remote-cli', 'agy-homes', 'thread-a', '.gemini',
+            'antigravity-cli', 'brain', session, '.system_generated', 'tasks', 'task-' + shell.stepIdx + '.log')).href;
+          row('GENERIC', 'Tool is running as a background task with task id: ' + task
+            + '\nTask Description: Synthetic command\nTask logs are available at: ' + log, 'RUNNING');
+          invocation('PostInvocation'); begin(); finish('Foreground answer', false);
+          completeCommand = () => {
+            this.hook('PostToolUse', shell); begin();
+            row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + '[Message] timestamp=2030-01-01T00:00:00Z sender=' + task
+              + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + task
+              + '" finished with result:\nCommand exited with code 0.\n\nNo output from the command.\nLog: ' + log + '\n</SYSTEM_MESSAGE>', 'DONE', 'SYSTEM');
+            finish('Command completed');
+          };
+        } else finish(prompt === scheduled ? 'Scheduled answer' : 'Ready');
+        return { stopReason: 'end_turn' };
+      }
+    }
+    vi.spyOn(acp, 'AcpClient').mockImplementation((command, args, cwd, callbacks) =>
+      new Client(command, args, cwd, callbacks!) as unknown as acp.AcpClient);
+    const executor = new AgyExecutor(new DirectoryGuard([f.cwd]), { threadId: 'thread-a', initialWorkingDirectory: f.cwd });
+    const execute = vi.spyOn(executor, 'execute');
+    vi.spyOn(f.pool, 'getExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    vi.spyOn(f.pool, 'getExistingExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    try {
+      await f.bind(); await expect(executor.execute('Initialize')).resolves.toMatchObject({ success: true });
+      await f.send('/schedule after 5m -- ' + scheduled);
+      expect(f.responses().at(-1)).toMatchObject({ success: true });
+      const [job] = await records();
+      expect(job.sessionId).toBe(executor.getSessionId());
+      await expect(executor.execute('Ordinary foreground')).resolves.toMatchObject({ success: true, output: 'Foreground answer' });
+      const service = f.handler['schedules']!;
+      const now = vi.spyOn(service as any, 'now').mockReturnValue(job.nextDueAt);
+      const dispatch = vi.spyOn(service as any, 'dispatchHost');
+      await service['wakeHosts']();
+      expect(dispatch).toHaveBeenCalledOnce();
+      await dispatch.mock.results[0].value;
+      expect(await service.list(job)).toMatchObject([{ state: 'active', nextDueAt: job.nextDueAt }]);
+      expect(f.scheduledResults()).toEqual([]);
+      expect(prompts).toEqual(['Initialize', 'Ordinary foreground']);
+      completeCommand();
+      f.holdResultAck();
+      now.mockReturnValue(job.nextDueAt! + 2000);
+      await service['wakeHosts']();
+      const id = job.id + ':host-' + job.nextDueAt;
+      await vi.waitFor(() => expect(f.scheduledResults()).toMatchObject([
+        { messageId: id, success: true, output: 'Scheduled answer', threadId: 'thread-a', openId: 'owner' },
+      ]));
+      const file = path.join(f.handler['scheduleDirectory'](), HOST_SCHEDULE_CATALOG_FILE);
+      const catalog = async () => JSON.parse(await readFile(file, 'utf8'));
+      expect(await catalog()).toMatchObject({ records: [{ id: job.id, state: 'completed' }],
+        pending: [{ id, scheduleId: job.id, output: 'Scheduled answer' }] });
+      for (const acknowledge of f.acknowledgements) acknowledge(id);
+      await vi.waitFor(async () => expect((await catalog()).pending).toEqual([]));
+      await service['wakeHosts'](); await service.retryDeliveries();
+      expect(prompts).toEqual(['Initialize', 'Ordinary foreground', scheduled]);
+      expect(execute).toHaveBeenLastCalledWith(scheduled, expect.objectContaining({ hostScheduleSessionId: job.sessionId }));
+      expect(acp.AcpClient).toHaveBeenCalledOnce();
+      expect(f.scheduledResults()).toHaveLength(1);
+    } finally { await executor.destroy(); agyActivity.clients.length = 0; }
   });
 
   it('holds an occurrence while disconnected and accepts the original binding on reconnect', async () => {

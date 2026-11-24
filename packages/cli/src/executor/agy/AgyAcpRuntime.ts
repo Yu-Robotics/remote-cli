@@ -99,16 +99,27 @@ export class AgyAcpRuntime {
         const question = this.question;
         if (question && question.pendingCall === call.toolCallId) question.pendingCall = undefined;
       },
-      onPermissionRequest: (title, choices) => this.permissions.request(title, choices, this.active, this.options.autoApprove),
+      onPermissionRequest: async (title, choices) => {
+        const turn = this.active;
+        const index = await this.permissions.request(title, choices, turn, this.options.autoApprove);
+        if (turn && this.active === turn && !choices[index]?.kind.startsWith('allow')) this.permissionDeclined = true;
+        return index;
+      },
     };
   }
   get sessionId(): string | undefined { return this.host?.sessionId ?? this.chat?.sessionId; }
   get hasJobs(): boolean { return this.retained; }
   get busy(): boolean { return this.settingsBusy || this.scheduleOperations > 0 || !this.closed && (!!this.active || !!this.starting || !this.blocked && !!this.host?.schedules.busy); }
   get blocked(): string | undefined { return this.chat?.blocked ?? this.host?.schedules.status.blocked; }
-  private get foregroundReusable(): boolean { return !this.continuityUnsafe && !this.blocked && !this.retained && (this.chat?.reusable ?? true)
-    && !this.controlRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'); }
-  get reusable(): boolean { return this.foregroundReusable && !this.commands?.pending && !this.commands?.liveDenial; }
+  private permissionDeclined = false;
+  private get foregroundReusable(): boolean {
+    return !this.continuityUnsafe && !this.blocked && !this.retained && (this.chat?.reusable
+      ?? !this.controlRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'));
+  }
+  // Live error proofs belong to this process. A reconnect or checkpoint cannot inherit them.
+  get reusable(): boolean {
+    return this.foregroundReusable && !this.chat?.hasForegroundToolErrors && !this.commands?.pending && !this.commands?.liveDenial;
+  }
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
   /** Admission to retire our host, never proof that the host has already exited. */
@@ -195,9 +206,10 @@ export class AgyAcpRuntime {
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
           && !!this.options.hostScheduleChat && observeChat && !this.blocked
-          && !this.settingsBusy && !this.scheduleOperations, ordinaryCommands, rows)
+          && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, ordinaryCommands, rows)
           : this.host!.schedules.accept(event, payload, controls);
-      if (!this.continuityUnsafe && (this.chat?.liveManagement || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
+      if (!this.continuityUnsafe && (this.chat?.liveManagement
+        || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
         || controls.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
         this.continuityUnsafe = true;
         this.options.settledPrompt?.(false);
@@ -315,7 +327,7 @@ export class AgyAcpRuntime {
       if (this.blocked) throw new Error(this.blocked);
       throw new Error(this.commands.outstandingCount ? 'AGY command completion is pending.' : 'AGY command completion is pending. Waiting for the notification Stop.');
     }
-    this.active = options; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
+    this.active = options; this.permissionDeclined = false; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     this.hostScheduleSettled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inactive: ReturnType<typeof setTimeout> | undefined;

@@ -442,6 +442,117 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   function deliverPost(client: ReturnType<typeof last>, task: { step: number }) {
     client.hook('PostToolUse', { stepIdx: task.step, toolCall: { name: 'run_command', id: `call-${task.step}`, args: {} } });
   }
+  function ordinaryTool(client: ReturnType<typeof last>, name: string) {
+    const args = name === 'write_file' ? { Path: path.join(cwd, 'synthetic'), Content: 'fixture' } : { query: 'synthetic' };
+    client.row('PLANNER_RESPONSE', '');
+    client.rows.at(-1).tool_calls = [{ name, args }];
+    const stepIdx = client.cursor++;
+    return { stepIdx, toolCall: { id: 'ordinary-' + stepIdx, name, args } };
+  }
+  it('continues the same main chat after foreground tool failures and two settled status reads', async () => {
+    const { id } = await captureTimedSession();
+    const turn = executor.execute('hold');
+    turn.catch(() => undefined);
+    await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+    const client = last();
+    for (const name of ['read_file', 'write_file', 'search_web', 'mcp_fixture_lookup', 'previously_unseen_tool']) {
+      const payload = ordinaryTool(client, name);
+      expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+      client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
+      client.row('GENERIC', 'Completed At: synthetic\nEncountered error in step execution: synthetic failure', 'MODEL', 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    }
+    const first = yieldCommand(client), second = yieldCommand(client);
+    for (const task of [first, second]) {
+      deliverPost(client, task);
+      completion(client, task);
+      ownedStatus(client, task, 'DONE');
+    }
+    client.finish('Synthetic final answer'); client.release({ stopReason: 'end_turn' });
+    await expect(turn).resolves.toMatchObject({ success: true, output: 'Synthetic final answer' });
+    await expect(executor.execute('ordinary follow-up')).resolves.toMatchObject({ success: true });
+    expect(executor.getSessionId()).toBe(id);
+    expect(client.prompts).toEqual(['hold', 'hold', 'ordinary follow-up']);
+    expect(native.clients).toHaveLength(1);
+    executor.checkHostScheduleSession(id);
+    await expect(executor.execute('scheduled follow-up', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(client.prompts.filter((prompt: string) => prompt === 'scheduled follow-up')).toHaveLength(1);
+    await expect(executor.configureManagedTools()).rejects.toThrow('reconnect was refused');
+    await executor.destroy();
+    expect(native.confirmTranscript).not.toHaveBeenCalled();
+    await expect(make().execute('unsafe reload')).rejects.toThrow();
+    expect(native.clients).toHaveLength(1);
+  });
+  it.each(['missing pre', 'duplicate pre', 'duplicate post', 'permission declined', 'missing post and receipt', 'missing post', 'wrong call', 'different error', 'denial text', 'foreign row', 'unfinished',
+    'rewritten planner', 'rewritten receipt', 'missing receipt', 'missing Stop', 'continued Stop', 'cancelled'])(
+    'refuses main chat reuse with unconfirmed ordinary tool evidence: %s', async scenario => {
+      const turn = executor.execute('hold');
+      turn.catch(() => undefined);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      const task = yieldCommand(client);
+      completion(client, task);
+      ownedStatus(client, task, 'DONE');
+      const payload = ordinaryTool(client, 'write_file');
+      const error = scenario === 'denial text' ? 'tool call denied by pre-tool hook: synthetic' : 'synthetic failure';
+      if (scenario !== 'missing pre') expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+      if (scenario === 'duplicate pre') client.hook('PreToolUse', payload);
+      if (scenario === 'permission declined') {
+        expect(await client.callbacks.onPermissionRequest('Synthetic permission', [{ optionId: 'deny', kind: 'reject_once' }])).toBe(-1);
+      }
+      if (!scenario.startsWith('missing post')) client.hook('PostToolUse', { ...payload, error, toolCall: {
+        ...payload.toolCall, id: scenario === 'wrong call' ? 'unrelated' : payload.toolCall.id } });
+      if (scenario === 'duplicate post') client.hook('PostToolUse', { ...payload, error });
+      if (scenario !== 'missing receipt' && scenario !== 'missing post and receipt') client.row('GENERIC',
+        'Encountered error in step execution: ' + (scenario === 'different error' ? 'another failure' : error),
+        scenario === 'foreign row' ? 'SYSTEM' : 'MODEL', scenario === 'unfinished' ? 'RUNNING' : 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation');
+      if (scenario === 'rewritten planner') client.rows.at(-2).content += 'changed';
+      if (scenario === 'rewritten receipt') client.rows.at(-1).status = 'DONE';
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      client.row('PLANNER_RESPONSE', 'Final answer'); client.hook('PostInvocation');
+      if (scenario !== 'missing Stop') client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '',
+        fullyIdle: true, continuationActive: scenario === 'continued Stop' });
+      client.release({ stopReason: scenario === 'cancelled' ? 'cancelled' : 'end_turn' });
+      const failure = await turn.catch(error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure.message).not.toContain('denial enforcement');
+      await expect(executor.execute('next ordinary prompt')).rejects.toThrow();
+      expect(client.prompts).toEqual(['hold']);
+      expect(() => executor.checkHostScheduleSession(client.session)).toThrow();
+    });
+  it('withholds reuse after a native validation rejection without independently observed tool evidence', async () => {
+    const turn = executor.execute('hold');
+    turn.catch(() => undefined);
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last();
+    client.row('PLANNER_RESPONSE', '');
+    client.rows.at(-1).tool_calls = [{ name: 'read_file', args: {} }];
+    client.row('GENERIC', "Error invalid tool call: invalid arguments:\n- missing property 'Path'", 'MODEL', 'INVALID');
+    client.hook('PostInvocation');
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(turn).rejects.toThrow('hook coverage is incomplete');
+    await expect(executor.execute('follow-up')).rejects.toThrow();
+    expect(client.prompts).toEqual(['hold']);
+  });
+  it.each(['worker', 'scheduled'])('keeps ordinary failed-tool evidence scoped away from a %s turn', async scope => {
+    const { runtime } = initialRuntime({ worker: scope === 'worker', hostScheduleChat: scope === 'scheduled' });
+    const turn = runtime.execute('hold', scope === 'scheduled' ? { hostScheduleSessionId: native.sessionId } : {});
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last(), payload = ordinaryTool(client, 'write_file');
+    expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+    client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
+    client.row('GENERIC', 'Encountered error in step execution: synthetic failure', 'MODEL', 'ERROR', payload.stepIdx);
+    client.hook('PostInvocation');
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await turn;
+    await expect(runtime.execute('next ordinary prompt', {})).rejects.toThrow();
+    expect(runtime.reusable).toBe(false);
+    expect(client.prompts).toEqual(['hold']);
+  });
   /** A completion notification that proposes one more shell. The shell is always denied. */
   function idleShell(client: ReturnType<typeof last>, task: { id: string; log: string; step: number }, post = true) {
     if (post) deliverPost(client, task);

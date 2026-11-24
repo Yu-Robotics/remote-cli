@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.281] - 2026-11-24
+
+### Fixed
+- Preserve live AGY main chat and existing host-timer eligibility after a verified ordinary foreground tool error and successful native turn completion. Worker reuse and process restart still require their own evidence.
+
 ## [1.6.280] - 2026-11-23
 
 ### Fixed
