@@ -15,6 +15,7 @@ export const HOST_SCHEDULE_CATALOG_FILE = 'host-schedule-catalog.json';
 const OUTPUT_BYTES = 16 * 1024;
 const ERROR_BYTES = 4096;
 const HOST_BUSY_RETRY_MS = 1000;
+const MAX_LIVE_HOST_SCHEDULES = 30;
 const LIVE = new Set<ScheduleRecord['state']>(['creating', 'active', 'running']);
 const STATES = new Set<ScheduleRecord['state']>([...LIVE, 'completed', 'cancelled', 'interrupted', 'failed']);
 const RESTART_REASON = 'Native schedule interrupted by service restart; not recreated or resumed.';
@@ -201,7 +202,7 @@ export class ScheduleService {
       if (!Number.isInteger(result) || result < 1 || result > ceiling) throw new Error('Invalid schedule capacity.');
       return result;
     };
-    this.maxLive = limit(options.maxLiveSchedules, 5, 5);
+    this.maxLive = limit(options.maxLiveSchedules, MAX_LIVE_HOST_SCHEDULES, MAX_LIVE_HOST_SCHEDULES);
     this.maxRecords = limit(options.maxRecords, 100, 1000);
     this.maxPending = limit(options.maxPendingDeliveries, 100, 1000);
     this.maxOccurrences = limit(options.maxOccurrencesPerSchedule, 1000, 10_000);

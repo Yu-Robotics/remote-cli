@@ -83,6 +83,17 @@ describe('ScheduleService', () => {
     });
     afterEach(() => vi.useRealTimers());
 
+    it('shares 30 live slots across threads and releases a slot on cancellation', async () => {
+      const service = await run(vi.fn());
+      const sibling = { ...owner, threadId: 'thread-b' };
+      for (let index = 0; index < 30; index++) {
+        await service.create(index % 2 === 0 ? owner : sibling, hostInput(`host-${index}`));
+      }
+      await expect(service.create(sibling, hostInput('next'))).rejects.toThrow('Live host schedule limit');
+      await service.cancel(owner, 'host-0');
+      await expect(service.create(sibling, hostInput('next'))).resolves.toMatchObject({ state: 'active' });
+    });
+
     it('serializes host creation limits and snapshots the original request', async () => {
       const service = await run(vi.fn(), { maxLiveSchedules: 1, maxRecords: 2 });
       const request = hostInput('first'), original = { ...owner };

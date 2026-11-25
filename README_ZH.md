@@ -784,6 +784,8 @@ remote-cli timer and does not modify the installed backend or global settings.
 /schedule cancel <id>
 ```
 
+Each CLI instance supports up to 30 active CLI-managed schedules across all threads and backends.
+
 Foreground conversations can also request managed schedules in natural language,
 for example: "In ten minutes, check the build and summarize failures" or
 "Every weekday at 09:00 Asia/Shanghai, review the outstanding tasks." The current

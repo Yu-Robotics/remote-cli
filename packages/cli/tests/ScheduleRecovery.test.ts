@@ -69,7 +69,7 @@ describe('schedule interruption without restart restoration', () => {
   it.each(['agy', 'dsh'] as const)('keeps %s historical uncertainty out of live quota and management admission', async backend => {
     cleanupFor = undefined;
     await write({ version: 2, records: Array.from({ length: 5 }, (_, i) => ({ ...row(`old-${i}`), backend, recovery: undefined })), pending: [] });
-    const next = make({ hostDispatch: vi.fn() }); await next.initialize();
+    const next = make({ hostDispatch: vi.fn(), maxLiveSchedules: 5 }); await next.initialize();
     expect(next.hasActiveSchedules()).toBe(false);
     expect(next.canCancel(owner, 'old-0')).toBe(false);
     await expect(next.cancel(owner, 'old-0')).rejects.toThrow('unconfirmed');
