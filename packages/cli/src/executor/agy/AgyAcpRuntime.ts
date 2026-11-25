@@ -121,11 +121,12 @@ export class AgyAcpRuntime {
       ?? !this.controlRecords.some(row => nativeWake(row) || row.type === 'GENERIC' && row.status !== 'DONE'));
   }
   private get checkpointEligible(): boolean {
-    return this.foregroundReusable && !this.commands?.pending && !this.commands?.liveDenial;
+    return this.foregroundReusable && !this.commands?.pending;
   }
   // Managed-tool reconnection and control changes retain their own admission rules.
   get reusable(): boolean {
-    return this.checkpointEligible && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
+    return this.checkpointEligible && !this.commands?.liveDenial && !this.options.commandCheckpoint?.idleDenialHistory
+      && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
   }
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
@@ -136,7 +137,7 @@ export class AgyAcpRuntime {
   get running(): boolean { return !!this.client && !this.closed; }
 
   private get hostScheduleSafe(): boolean {
-    return this.options.hostScheduleChat === true && !!this.chat && !this.closing && !this.closed
+    return this.options.hostScheduleChat === true && !this.options.commandCheckpoint?.idleDenialHistory && !!this.chat && !this.closing && !this.closed
       && !this.hostScheduleUnsafe && !this.continuityUnsafe && !this.relayFault && !this.blocked && !this.retained
       && !this.settingsBusy;
   }
@@ -261,12 +262,18 @@ export class AgyAcpRuntime {
     if (this.closing) throw new Error('AGY startup was retired.');
     // Consume a clean checkpoint under the per-HOME kernel gate, before spawning.
     let restoredErrors: ReturnType<typeof restoreAgyToolErrors> | undefined;
-    if (this.options.toolErrorDigest !== undefined) {
+    const idleHistory = this.options.commandCheckpoint?.idleDenialHistory;
+    if (this.options.toolErrorDigest !== undefined || idleHistory !== undefined) {
       if (!this.options.validatedChatLoad || !this.options.sessionId || this.options.worker || !this.options.hostScheduleChat) {
         throw new Error('AGY tool checkpoint requires the original main conversation.');
       }
       this.relay.bindSession(this.options.sessionId);
-      restoredErrors = restoreAgyToolErrors(await this.relay.readCheckpointTranscript(), this.options.toolErrorDigest);
+      let rows = await this.relay.readCheckpointTranscript();
+      if (idleHistory !== undefined) {
+        this.commands = new AgyCommandTasks(this.options.sessionId, this.options.home, this.options.commandCheckpoint);
+        rows = this.commands.restoreHistory(rows);
+      }
+      if (this.options.toolErrorDigest !== undefined) restoredErrors = restoreAgyToolErrors(rows, this.options.toolErrorDigest);
     }
     if (this.options.sessionId) this.options.beforeSessionLoad?.();
     const args = ['acp', '--stdio', '--process-per-session', '--disable-telemetry'];
@@ -318,9 +325,9 @@ export class AgyAcpRuntime {
     if (this.options.worker || this.options.sessionId || this.options.hostScheduleChat) {
       this.chat = new AgyChatHost(this.client, session.sessionId, this.options.cwd, this.options.threadId, [], restoredErrors, this.nativeVersion);
       if (this.options.hostScheduleChat && !this.options.worker) {
-        this.commands = new AgyCommandTasks(session.sessionId, this.options.home, this.options.commandCheckpoint);
+        this.commands ??= new AgyCommandTasks(session.sessionId, this.options.home, this.options.commandCheckpoint);
       }
-      if (!restoredErrors) this.relay.bindSession(session.sessionId);
+      if (!restoredErrors && idleHistory === undefined) this.relay.bindSession(session.sessionId);
     } else {
     this.host = new AgyScheduleHost(this.client, session.sessionId, {
       threadId: this.options.threadId, cwd: this.options.cwd,
@@ -509,7 +516,7 @@ export class AgyAcpRuntime {
       const safe = !this.hostScheduleUnsafe && !this.relayFault && this.checkpointEligible;
       const errors = safe && cleanHistory ? this.chat?.checkpointToolErrors() : undefined;
       this.options.ownedSessionClosed(this.sessionId!, safe ? cleanHistory : undefined, safe ? unpromptedHistory : undefined,
-        safe && cleanHistory ? this.commands?.snapshot() : undefined, ...(errors ? [errors] : []));
+        safe && cleanHistory ? this.commands?.snapshot(this.latestRecords) : undefined, ...(errors ? [errors] : []));
     }
     this.closed = true;
 

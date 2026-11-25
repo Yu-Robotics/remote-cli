@@ -5,9 +5,10 @@ import { pathToFileURL } from 'url';
 import { deletionReceipt, nativeWake, NOTIFICATION_PREFIX, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import type { HookDecision, HookPayload } from '../../scheduling/agy/AgySessionSchedules';
 
-export interface AgyCommandCheckpoint { lastStep: number; digest: string }
+export interface AgyCommandCheckpoint { lastStep: number; digest: string; idleDenialHistory?: string }
 
 const creationPrefix = 'Tool is running as a background task with task id: ';
+const idleDenialMessage = 'AGY command notifications cannot start another tool';
 const identity = (records: TranscriptRecord | TranscriptRecord[]) => createHash('sha256').update(JSON.stringify(records)).digest('hex');
 
 /** Only a foreground tool hook can introduce an owned command. Its RUNNING
@@ -31,14 +32,14 @@ export class AgyCommandTasks {
   private lastStep = -1;
   private candidate?: { start: number; wakeStep: number; cwd: string; history: string };
   private denial?: { reason: string; terminated: boolean };
-  // A nonce-authenticated denial authorizes only this live host.
+  // Historical denials continue to exclude settings changes and controlled reconnect.
   liveDenial = false;
   idleDecision?: HookDecision;
 
   constructor(private readonly session: string, private readonly home: string,
     private readonly checkpoint?: AgyCommandCheckpoint) {}
 
-  get pending(): boolean { return !!this.kill || !!this.status || this.outstanding.size > 0 || this.idleInvocation || this.notificationWakes.size > 0; }
+  get pending(): boolean { return !!this.denial || !!this.kill || !!this.status || this.outstanding.size > 0 || this.idleInvocation || this.notificationWakes.size > 0; }
   get outstandingCount(): number { return this.outstanding.size; }
   get pendingStatusStep(): number | undefined { return this.status?.step; }
 
@@ -145,9 +146,33 @@ export class AgyCommandTasks {
   private digest(): string {
     return createHash('sha256').update(JSON.stringify([...this.receipts].sort(([a], [b]) => a - b))).digest('hex');
   }
-  snapshot(): AgyCommandCheckpoint | undefined {
-    if (!this.pending && !this.liveDenial && this.receipts.size) return { lastStep: Math.max(...this.receipts.keys()), digest: this.digest() };
+  snapshot(records: TranscriptRecord[]): AgyCommandCheckpoint | undefined {
+    if (!this.pending && this.receipts.size) return { lastStep: Math.max(...this.receipts.keys()), digest: this.digest(),
+      ...(this.liveDenial && { idleDenialHistory: identity(records) }) };
     return undefined;
+  }
+
+  /** Reconstruct immutable row hashes only. No historical task is added to owned. */
+  restoreHistory(rows: TranscriptRecord[]): TranscriptRecord[] {
+    const checkpoint = this.checkpoint!;
+    if (checkpoint.idleDenialHistory && identity(rows) !== checkpoint.idleDenialHistory) throw new Error('AGY idle denial history changed.');
+    let foundDenial = false;
+    for (const [index, row] of rows.entries()) {
+      if (row.step_index > checkpoint.lastStep) continue;
+      if (receiptText(row)?.startsWith(creationPrefix) || nativeWake(row)) this.receipts.set(row.step_index, identity(row));
+      else if (checkpoint.idleDenialHistory && row.status === 'ERROR'
+        && receiptText(row)?.startsWith('Encountered error in step execution: tool call denied by pre-tool hook: ' + idleDenialMessage + ' (')) {
+        const planner = rows[index - 1];
+        if (planner?.step_index !== row.step_index - 1) throw new Error('AGY idle denial planner is missing.');
+        this.receipts.set(planner.step_index, identity(planner));
+        this.receipts.set(row.step_index, identity(row));
+        foundDenial = true;
+      }
+    }
+    if (this.digest() !== checkpoint.digest || !!checkpoint.idleDenialHistory !== foundDenial) throw new Error('AGY command history changed during load.');
+    this.liveDenial = foundDenial;
+    this.restored = true;
+    return rows.filter(row => !this.receipts.has(row.step_index));
   }
 
   observe(event: string, payload: HookPayload, rows: TranscriptRecord[], foreground: boolean, allowIdleDenial = false): TranscriptRecord[] {
@@ -156,14 +181,7 @@ export class AgyCommandTasks {
     if (foreground && event === 'PreInvocation' && Number.isSafeInteger(payload.initialNumSteps)) {
       this.foregroundStart = payload.initialNumSteps as number;
     }
-    if (this.checkpoint && !this.restored) {
-      for (const row of rows) {
-        if (row.step_index > this.checkpoint.lastStep) continue;
-        if (receiptText(row)?.startsWith(creationPrefix) || nativeWake(row)) this.receipts.set(row.step_index, identity(row));
-      }
-      if (this.digest() !== this.checkpoint.digest) throw new Error('AGY command history changed during load.');
-      this.restored = true;
-    }
+    if (this.checkpoint && !this.restored) this.restoreHistory(rows);
     // Native can deliver PostToolUse after the foreground Stop and before the
     // command's completion row. Authenticate against the original admitted call.
     const hookStep = payload.stepIdx as number;
@@ -307,7 +325,7 @@ export class AgyCommandTasks {
         || typeof call.args?.CommandLine !== 'string' || !isDeepStrictEqual(tail.tool_calls, [{ name: call.name, args: call.args }])) {
         throw new Error('Unverified AGY idle shell request.');
       }
-      const reason = 'AGY command notifications cannot start another tool (' + randomUUID() + ').';
+      const reason = idleDenialMessage + ' (' + randomUUID() + ').';
       this.receipts.set(tail.step_index, identity(tail));
       other.pop();
       this.denial = { reason, terminated: false };

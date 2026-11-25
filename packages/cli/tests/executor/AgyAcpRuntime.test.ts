@@ -782,6 +782,78 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     client.hook('PostInvocation');
     client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false });
   }
+  it.each(['two restarts', 'with tool error', 'changed planner', 'changed nonce', 'missing Stop', 'unconfirmed exit'])(
+    'restores only clean ordinary chat after an idle shell refusal: %s', async scenario => {
+      const { id } = await captureTimedSession();
+      const { client, task } = await commandTurn(prompt => executor.execute(prompt), 2, false);
+      if (scenario === 'missing Stop') {
+        const hook = client.hook.bind(client);
+        client.hook = (event: string, ...args: unknown[]) => event === 'Stop' ? {} : hook(event, ...args);
+      }
+      idleShell(client, task);
+      if (scenario === 'with tool error') {
+        const turn = executor.execute('hold');
+        await vi.waitFor(() => expect(client.prompts).toHaveLength(3));
+        const payload = ordinaryTool(client, 'read_file');
+        expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+        client.hook('PostToolUse', { ...payload, error: 'synthetic error' });
+        client.row('GENERIC', 'Encountered error in step execution: synthetic error', 'MODEL', 'ERROR', payload.stepIdx);
+        client.hook('PostInvocation');
+        client.hook('PreInvocation', { initialNumSteps: client.cursor });
+        client.finish(); client.release({ stopReason: 'end_turn' });
+        await expect(turn).resolves.toMatchObject({ success: true });
+      }
+      const pointer = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+      for (let restart = 1; restart <= 2; restart++) {
+        const rows = structuredClone(last().rows) as TranscriptRecord[];
+        const denied = rows.findIndex(row => row.content?.includes('tool call denied by pre-tool hook'));
+        expect(denied).toBeGreaterThan(0);
+        if (scenario === 'changed nonce') rows[denied].content += 'changed';
+        if (scenario === 'changed planner') rows[denied - 1].content += 'changed';
+        // Model a mismatch even when the filesystem fingerprint at retirement is intact.
+        await fs.writeFile(transcriptPath(last().launch.env.HOME, id), rows.map(row => JSON.stringify(row)).join('\n'));
+        native.loadedRows = rows;
+        if (scenario === 'unconfirmed exit') {
+          native.exitConfirmed = false;
+          await expect(executor.destroy()).rejects.toThrow();
+          expect(JSON.parse(await fs.readFile(pointer, 'utf8')).hostScheduleCheckpoint).toBeUndefined();
+          return;
+        }
+        await executor.destroy();
+        executor = make();
+        expect(() => executor.checkHostScheduleSession(id)).toThrow();
+        if (scenario === 'missing Stop') {
+          await expect(executor.execute('unconfirmed')).rejects.toThrow('pending work is unconfirmed');
+          expect(native.clients).toHaveLength(1);
+          return;
+        }
+        const saved = JSON.parse(await fs.readFile(pointer, 'utf8')).hostScheduleCheckpoint;
+        expect(saved).toMatchObject({ policy: 'host-timed-chat-v3', commands: { idleDenialHistory: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+        if (scenario.startsWith('changed')) {
+          await expect(executor.execute('changed evidence')).rejects.toThrow();
+          expect(native.clients).toHaveLength(1);
+          expect(JSON.parse(await fs.readFile(pointer, 'utf8')).hostScheduleCheckpoint).toEqual(saved);
+          return;
+        }
+        await expect(executor.setModel('synthetic-model')).rejects.toThrow('idle chat');
+        const prompt = 'ordinary restart ' + restart;
+        await expect(executor.execute(prompt)).resolves.toMatchObject({ success: true });
+        expect(executor.getSessionId()).toBe(id);
+        expect(native.clients).toHaveLength(restart + 1);
+        expect(last().prompts).toEqual([prompt]);
+        expect(() => executor.checkHostScheduleSession(id)).toThrow();
+        await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-new', groups: [] }))
+          .rejects.toThrow('reconnect was refused');
+      }
+      const stale = executor.execute('hold');
+      await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+      const { decision, payload } = manageCommand(last(), { Action: 'status', TaskId: task.id });
+      expect(decision.decision).toBe('deny');
+      last().row('GENERIC', 'Encountered error in step execution: tool call denied by pre-tool hook: ' + decision.reason,
+        'MODEL', 'ERROR', payload.stepIdx);
+      last().finish(); last().release({ stopReason: 'end_turn' });
+      await expect(stale).resolves.toMatchObject({ success: true });
+    });
   async function commandTurn(run: (prompt: string) => Promise<unknown>, count: number, complete: boolean) {
     const turn = run('hold');
     turn.catch(() => undefined);

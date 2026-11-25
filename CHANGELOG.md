@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.284] - 2026-11-25
+
+### Fixed
+- Resume the original AGY main chat after a clean restart when a background command's completion notification tried to start another shell command and the CLI verified the denial and completion.
+
 ## [1.6.283] - 2026-11-25
 
 ### Changed

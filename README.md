@@ -677,6 +677,12 @@ does not retry the earlier tool call. On AGY 1.5.13, the CLI also recognizes
 verified argument rejections before file reads, writes, edits and web searches.
 The model can correct the call in the original session. Unknown schemas and
 missing or contradictory execution evidence still withhold reuse.
+From CLI 1.6.284, a main chat can also resume after a clean restart when a
+background command's completion notification attempted another shell command.
+The CLI checks that the request was denied, the notification finished, and
+all tracked commands settled. The denied command is never replayed. This
+restores ordinary chat only. Scheduled turns and live model or effort changes
+remain unavailable on that restored conversation.
 
 AGY hook overlays use a per-HOME kernel gate and durable child-process ownership
 journal. After a crash, explicit clear can be followed by fresh startup only when

@@ -167,7 +167,7 @@ export class AgyExecutor implements IExecutor {
     if (pointer.id !== id || pointer.transport !== 'acp') throw new Error('The original AGY conversation changed.');
     return pointer;
   }
-  private checkpointConfiguration(errors?: { id: string; generation: string; history: string; commands?: AgyCommandCheckpoint; digest: string }): string {
+  private checkpointConfiguration(errors?: { id: string; generation: string; history: string; commands?: AgyCommandCheckpoint; digest?: string }): string {
     return createHash('sha256').update(JSON.stringify([this.threadId, this.agyHome, this.currentWorkingDirectory,
       this.agyCommand, this.model, this.effort, this.autoApprove, ...(errors ? [errors] : [])])).digest('hex');
   }
@@ -175,11 +175,13 @@ export class AgyExecutor implements IExecutor {
     const pointer = this.hostSelection(id);
     const checkpoint = pointer.hostScheduleCheckpoint;
     const digest = checkpoint?.toolErrorDigest;
-    const withErrors = checkpoint?.policy === 'host-timed-chat-v2';
-    if (!this.agyHome || !checkpoint || (withErrors ? typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)
-      : checkpoint.policy !== 'host-timed-chat-v1' || digest !== undefined)
+    const idleHistory = checkpoint?.commands?.idleDenialHistory;
+    const bound = digest !== undefined || idleHistory !== undefined;
+    const policy = idleHistory !== undefined ? 'host-timed-chat-v3' : digest !== undefined ? 'host-timed-chat-v2' : 'host-timed-chat-v1';
+    if (!this.agyHome || !checkpoint || checkpoint.policy !== policy
+      || [digest, idleHistory].some(hash => hash !== undefined && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)))
       || typeof pointer.hostGeneration !== 'string' || checkpoint.generation !== pointer.hostGeneration
-      || checkpoint.configuration !== this.checkpointConfiguration(withErrors ? { id, generation: checkpoint.generation,
+      || checkpoint.configuration !== this.checkpointConfiguration(bound ? { id, generation: checkpoint.generation,
         history: checkpoint.history, commands: checkpoint.commands, digest } : undefined)
       || checkpoint.history !== agyHostScheduleHistory(this.agyHome, id)) {
       throw new Error('Saved AGY ACP chat cannot safely resume: the clean host-timed checkpoint is missing or changed.');
@@ -188,7 +190,12 @@ export class AgyExecutor implements IExecutor {
   }
   checkHostScheduleSession(id: string): void {
     this.assertHostScheduleOwner(id);
-    if (!this.acp) { this.cleanHostSelection(id); return; }
+    if (!this.acp) {
+      if (this.cleanHostSelection(id).hostScheduleCheckpoint.commands?.idleDenialHistory) {
+        throw new Error('AGY idle denial checkpoint permits ordinary chat only.');
+      }
+      return;
+    }
     if (!this.acp.hostScheduleAvailable || this.acp.sessionId !== id || !this.hostGeneration
       || this.hostSelection(id).hostGeneration !== this.hostGeneration) {
       throw new Error('AGY host timing requires a verified foreground conversation with no uncertain native work.');
@@ -344,8 +351,8 @@ export class AgyExecutor implements IExecutor {
           if (pointer.hostGeneration !== this.hostGeneration) throw new Error('AGY host-timed selection changed before retirement.');
           if (cleanHistory) {
             this.writeNativeState(this.sessionFilePath, { ...pointer, hostScheduleCheckpoint: {
-              policy: toolErrorDigest ? 'host-timed-chat-v2' : 'host-timed-chat-v1', generation: this.hostGeneration,
-              configuration: this.checkpointConfiguration(toolErrorDigest ? { id, generation: this.hostGeneration,
+              policy: commands?.idleDenialHistory ? 'host-timed-chat-v3' : toolErrorDigest ? 'host-timed-chat-v2' : 'host-timed-chat-v1', generation: this.hostGeneration,
+              configuration: this.checkpointConfiguration(toolErrorDigest || commands?.idleDenialHistory ? { id, generation: this.hostGeneration,
                 history: cleanHistory, commands, digest: toolErrorDigest } : undefined),
               history: cleanHistory, commands, toolErrorDigest,
             } });
