@@ -436,6 +436,12 @@ volumes, the CLI can erase the old history on startup after a subsequent host
 reboot if it can still verify the files and their ownership. On other platforms
 or when ownership is uncertain, it keeps the files under the deleted thread's ID.
 
+From CLI 1.6.287, a successful idle native Stop and ACP end_turn on the original
+main chat allow a fresh authenticated Feishu follow-up despite incomplete tool
+receipts. Keep automation, worker reuse, process-group cleanup and durable
+checkpoints on their separate ownership checks. A failed or unconfirmed
+native terminal cannot provide this foreground admission.
+
 Per-thread HOME links share authentication/configuration and programs while native
 conversation storage remains per-thread. These links are not an OS sandbox.
 Preserve current-owned-host retirement before clear, exact group joins, in-turn

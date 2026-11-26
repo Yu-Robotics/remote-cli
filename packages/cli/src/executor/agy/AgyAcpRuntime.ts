@@ -30,6 +30,7 @@ export interface AgyAcpRuntimeOptions {
   mcpServers?: AcpMcpServer[];
   sessionId?: string;
   worker?: boolean;
+  managedCoordinator?: boolean;
   /** Main chat whose schedule tools create host timers only. */
   hostScheduleChat?: boolean;
   commandCheckpoint?: AgyCommandCheckpoint;
@@ -67,11 +68,16 @@ export class AgyAcpRuntime {
   private closePromise?: Promise<void>;
   private activity?: () => void;
   private closed = false;
+  private idleChatExited = false;
+  /** Transport exit observed between settled main-chat turns. Group and lease still require close(). */
+  get exitedBetweenTurns(): boolean { return this.idleChatExited; }
   private allocationStarted = false;
   get allocationUnconfirmed(): boolean { return this.allocationStarted && !this.allocatedSessionId; }
   private relayFault = false;
   private continuityUnsafe = false;
   private manualTurnPending: boolean;
+  private humanQueryAdmission?: { open?: () => void };
+  private ordinaryMain = false;
   private idleStop = false;
   private recoveredHistory?: { count: number; lastStep: number; digest: string };
   private readonly acceptedMessages = new Map<number, TranscriptRecord>();
@@ -140,6 +146,11 @@ export class AgyAcpRuntime {
     return this.checkpointEligible && !this.commands?.liveDenial && !this.options.commandCheckpoint?.idleDenialHistory
       && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
   }
+  get needsHumanContinuation(): boolean {
+    return !!this.chat?.humanContinuation && !this.chat.reusable && !this.commands?.pending && !this.blocked
+      && !this.retained && !this.closing && !this.closed && !this.relayFault && !this.permissionDeclined;
+  }
+
   get pendingMutation(): boolean { return !!this.host?.schedules.pendingMutation; }
   get cleanupMutationPending(): boolean { return !!this.host?.schedules.cleanupMutationPending; }
   /** Admission to retire our host, never proof that the host has already exited. */
@@ -150,7 +161,7 @@ export class AgyAcpRuntime {
 
   private get hostScheduleSafe(): boolean {
     return this.options.hostScheduleChat === true && !this.options.commandCheckpoint?.idleDenialHistory && !!this.chat && !this.closing && !this.closed
-      && !this.hostScheduleUnsafe && !this.continuityUnsafe && !this.relayFault && !this.blocked && !this.retained
+      && !this.chat.restrictedToHuman && !this.hostScheduleUnsafe && !this.continuityUnsafe && !this.relayFault && !this.blocked && !this.retained
       && !this.settingsBusy;
   }
   get hostScheduleAvailable(): boolean {
@@ -228,7 +239,7 @@ export class AgyAcpRuntime {
       if (this.commands && observeChat) {
         try {
           if (payload.cwd !== this.options.cwd) throw new Error('AGY command working directory changed.');
-          controls = this.commands.observe(event, payload, controls, !!this.active, ordinaryHost || this.hostScheduleSafe && this.hostScheduleSettled);
+          controls = this.commands.observe(event, payload, controls, !!this.active, ordinaryHost || this.hostScheduleSafe && this.hostScheduleSettled, this.ordinaryMain);
           if (!this.active && event === 'Stop' && !this.commands.idleDecision && (payload.terminationReason !== 'NO_TOOL_CALL' || payload.error !== ''
             || payload.continuationActive !== false || !(payload.fullyIdle === true || payload.fullyIdle === false && this.commands.outstandingCount > 0))) {
             throw new Error('AGY command notification Stop is unconfirmed.');
@@ -251,16 +262,20 @@ export class AgyAcpRuntime {
         if (!this.manualTurnPending || !this.active) this.chat?.fence('AGY command notification ownership is unconfirmed. Use explicit /clear to start a fresh conversation.');
       }
       const idleDecision = !this.active && observeChat && !this.blocked ? this.commands?.idleDecision : undefined;
-      const ordinaryCommands = ordinaryHost && this.active?.hostScheduleSessionId === undefined
+      const ordinaryCommands = ordinaryHost && !this.chat?.restrictedToHuman && this.active?.hostScheduleSessionId === undefined
         ? this.commands : undefined;
       const scheduledHost = ordinaryHost && this.active?.hostScheduleSessionId !== undefined
         && this.active.hostScheduleSessionId === this.sessionId && this.hostScheduleSafe;
+      // The verified prefix was excluded above. Track tool outcomes from this live
+      // human turn even when the recovered history permanently excludes timers.
+      const recoveredForeground = !!history && !this.options.worker && !!this.active
+        && this.active.hostScheduleSessionId === undefined;
       const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
           && !!this.options.hostScheduleChat && observeChat && !this.blocked
           && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, this.commands, rows,
-          (ordinaryHost || scheduledHost) && observeChat && !this.permissionDeclined)
+          (ordinaryHost || scheduledHost || recoveredForeground) && observeChat && !this.permissionDeclined)
           : this.host!.schedules.accept(event, payload, controls);
       if (!this.continuityUnsafe && (this.chat?.liveManagement
         || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
@@ -293,6 +308,8 @@ export class AgyAcpRuntime {
           if (row) { this.active.onToolResult?.({ tool_use_id: id, content: (row.content ?? '').slice(0, 32768), is_error: event === 'PostToolUse' && !!payload.error }); this.tools.delete(step); }
         }
       }
+      if (event === 'Stop') this.humanQueryAdmission = undefined;
+      if (event === 'PreInvocation' && !this.blocked && !decision.terminationBehavior) this.humanQueryAdmission?.open?.();
       this.reportCommandState();
       return idleDecision?.terminationBehavior && !this.blocked ? idleDecision : decision;
     }, () => {
@@ -392,17 +409,27 @@ export class AgyAcpRuntime {
     }
     void this.client.waitForExit!().then(() => {
       this.answerQuestion?.(undefined);
-      if (!this.closing) { this.host?.schedules.processClosed(false); this.chat?.fence('AGY process closed unexpectedly.'); }
+      if (!this.closing) {
+        this.idleChatExited = !!this.chat && !!this.options.hostScheduleChat && !this.options.worker
+          && !this.busy && !this.relayFault && !this.permissionDeclined && !this.commands?.pending && !this.retained
+          && (this.chat.humanContinuation || this.hostScheduleSettled && this.checkpointEligible);
+        this.host?.schedules.processClosed(false);
+        this.chat?.fence('AGY process closed unexpectedly.');
+      }
     });
   }
 
-  async execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
+  async execute(prompt: string, options: ExecuteOptions, confirmHuman?: () => void): Promise<ExecuteResult> {
     await this.start();
     if (this.active || this.settingsBusy) throw new Error('AGY foreground turn is already active.');
+    if (confirmHuman && (options.hostScheduleSessionId !== undefined || !this.needsHumanContinuation)) {
+      throw new Error('The AGY foreground is no longer eligible for human continuation.');
+    }
     if (this.commands?.pending) {
       if (this.blocked) throw new Error(this.blocked);
       throw new Error(this.commands.outstandingCount ? 'AGY command completion is pending.' : 'AGY command completion is pending. Waiting for the notification Stop.');
     }
+    if (this.chat && !this.chat.reusable && this.permissionDeclined) throw new Error('AGY permission outcome prevents continuation.');
     this.active = options; this.permissionDeclined = false; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     this.hostScheduleSettled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -417,9 +444,27 @@ export class AgyAcpRuntime {
       this.options.beforePrompt?.();
       const blocks = [{ type: 'text', text: options.resolvePrompt?.(this.sessionId ?? null) ?? prompt },
         ...(options.attachments ?? []).filter(item => item.type === 'image').map(item => ({ type: 'image', data: item.data, mimeType: item.mimeType }))];
+      if (confirmHuman) this.restore!.run(confirmHuman);
       this.prompted = true;
-      const work = (this.chat ?? this.host!).prompt(blocks, input => this.manualTurnPending
-        ? this.client!.prompt(this.sessionId!, input) : this.promptWithQuestions(input));
+      const dispatch = (input: AcpContentBlock[]) => {
+        const onAdmitted = options.onAgyHumanPromptAdmitted;
+        if (onAdmitted && (this.manualTurnPending || confirmHuman) && !this.options.worker && options.hostScheduleSessionId === undefined) {
+          // Arm only at dispatch. The authenticated PreInvocation opens this turn's
+          // read scope once, and Stop or cancellation invalidates its identity.
+          const grant: NonNullable<typeof this.humanQueryAdmission> = {};
+          grant.open = () => {
+            grant.open = undefined;
+            onAdmitted(() => this.humanQueryAdmission === grant && this.active === options && !this.blocked
+              && !this.closing && !this.closed && !this.relayFault && !this.permissionDeclined);
+          };
+          this.humanQueryAdmission = grant;
+        }
+        return this.manualTurnPending ? this.client!.prompt(this.sessionId!, input) : this.promptWithQuestions(input);
+      };
+      this.ordinaryMain = !this.options.worker && options.hostScheduleSessionId === undefined
+        && (!this.options.managedCoordinator || options.agyHumanMessage || this.manualTurnPending || !!confirmHuman);
+      const admission = confirmHuman ? 'confirmed-human' : this.ordinaryMain ? 'main' : 'strict';
+      const work = this.chat ? this.chat.prompt(blocks, dispatch, admission) : this.host!.prompt(blocks, dispatch);
       const result = await work;
       if (result.stopReason === 'cancelled' && !this.retained && !this.relayFault && !this.continuityUnsafe && !this.chat
         && this.host?.schedules.status.blocked?.startsWith('AGY foreground cancelled:')) {
@@ -463,6 +508,8 @@ export class AgyAcpRuntime {
       if (inactive) clearTimeout(inactive);
       this.permissions.cancel(); this.answerQuestion?.(undefined); this.question = undefined;
       this.tracker.reset(); this.tracker.setCallback(undefined); this.activity = undefined; this.active = undefined; this.tools.clear();
+      this.humanQueryAdmission = undefined;
+      this.ordinaryMain = false;
       this.commands?.endForeground();
     }
   }
@@ -495,6 +542,7 @@ export class AgyAcpRuntime {
     return this.cancelForeground();
   }
   private cancelForeground(): boolean {
+    this.humanQueryAdmission = undefined;
     if (this.answerQuestion) {
       this.continuityUnsafe = true;
       this.chat?.fence('AGY question cancellation could not be confirmed.');
@@ -557,7 +605,7 @@ export class AgyAcpRuntime {
   private async finishClose(): Promise<void> {
     this.closing = true;
     if (this.host) await this.host.close();
-    else { this.client?.destroy(); await this.client?.waitForExit?.(); }
+    else if (!this.idleChatExited) { this.client?.destroy(); await this.client?.waitForExit?.(); }
     if (this.client && !this.client.waitForManagedProcessGroupExit) throw new Error('AGY exact process-group retirement cannot be confirmed.');
     await this.client?.waitForManagedProcessGroupExit?.();
     if (this.host) {

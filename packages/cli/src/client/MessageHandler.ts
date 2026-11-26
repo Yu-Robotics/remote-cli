@@ -145,6 +145,7 @@ interface QueuedCommand {
   attachments?: Attachment[];
   openId?: string;
   binding?: DeviceBinding;
+  humanSource?: IncomingMessage['humanSource'];
 }
 
 interface PendingQueueConfirmation {
@@ -1043,11 +1044,10 @@ export class MessageHandler {
         await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
         return;
       }
-      if (resumeMessage || isSlashCommand || content?.trim().startsWith('/')) {
+      if (isSlashCommand || content?.trim().startsWith('/')) {
         this.sendResponse(messageId, resolvedThreadId, {
           success: false,
-          error: resumeMessage ? 'Wait for the thread to become idle, then send your message again.'
-            : `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use /queue to inspect queued messages.`,
+          error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use /queue to inspect queued messages.`,
         });
       } else {
         if ((this.threadQueues.get(resolvedThreadId)?.length ?? 0) >= MAX_THREAD_QUEUE_LENGTH) {
@@ -1065,6 +1065,7 @@ export class MessageHandler {
           openId,
           messageId,
           executor,
+          message.humanSource,
         );
         this.sendResponse(messageId, resolvedThreadId, {
           success: false,
@@ -1166,7 +1167,9 @@ export class MessageHandler {
 
       const expandedContent = this.expandCommandShortcuts(content!);
       const processedContent = processFileReadContent(expandedContent);
-      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
+      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments, false, {
+        agyHumanMessage: !!message.humanSource && this.threadPool.getBackendKey(resolvedThreadId) === 'agy',
+      });
     } catch (error) {
       if (this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(resolvedThreadId)?.token !== operationToken) return;
       this.threadPool.setThreadError(resolvedThreadId, true);
@@ -1914,6 +1917,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     openId: string | undefined,
     messageId: string,
     executor: IExecutor,
+    humanSource?: IncomingMessage['humanSource'],
   ): QueueConfirmationInfo {
     this.removeExpiredQueueConfirmations();
     const id = uuidv4();
@@ -1929,7 +1933,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     };
     this.pendingQueueConfirmations.set(id, {
       info,
-      command: { messageId, threadId, content, attachments, openId, binding: this.scheduleBinding },
+      command: { messageId, threadId, content, attachments, openId, binding: this.scheduleBinding, humanSource },
     });
     setTimeout(() => {
       const pending = this.pendingQueueConfirmations.get(id);
@@ -2188,8 +2192,29 @@ You can also use natural language commands to control Claude Code CLI.`,
           timestamp: Date.now(),
         } satisfies OutgoingMessage);
       };
+      const source = command.humanSource;
+      const agyUserMessage = !!source && this.threadPool.getBackendKey(threadId) === 'agy';
+      const authorized = () => {
+        const binding = this.scheduleBinding;
+        const now = Date.now();
+        return !!source && current() && !this.isDestroyed && this.wsClient.isConnected() && !!binding
+          && binding.deviceId === source.deviceId && binding.epoch === source.bindingEpoch
+          && binding.openId === command.openId && !!this.authenticatedRegistration
+          && source.registrationId === this.authenticatedRegistration && source.createdAt <= now && source.createdAt > now - 300_000
+          && (source.threadId ?? this.threadManager.getDefaultThread().id) === threadId
+          && this.threadPool.getExistingExecutor(threadId) === executor && this.threadPool.getBackendKey(threadId) === 'agy';
+      };
+      const recover = agyUserMessage && executor.needsAgyHumanRecovery?.(source.originalMessageId);
+      const recoverHumanTurn = recover ? (_prompt: string, options: ExecuteOptions) => {
+        if (!executor.resumeAgyChat) throw new Error('This AGY executor does not support recovery from a Feishu message.');
+        if (!authorized()) throw new Error('The original Feishu message expired or its route changed.');
+        return executor.resumeAgyChat(command.content, options, { originalMessageId: source.originalMessageId,
+          createdAt: source.createdAt, current: authorized });
+      } : undefined;
       const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
-      await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments, { current, start, take });
+      await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments, { current, start, take }, {
+        recoverHumanTurn, agyHumanMessage: agyUserMessage && authorized(),
+      });
     } catch (error) {
       if (!current() || this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(threadId)?.token !== operationToken) return;
       take();
@@ -2936,7 +2961,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor,
     attachments?: Attachment[],
     fromQueue: false | { current(): boolean; start(): void; take(): void } = false,
-    { goalRequest, goalActivation, recoverHumanTurn }: {
+    { goalRequest, goalActivation, recoverHumanTurn, agyHumanMessage }: {
+      agyHumanMessage?: boolean;
       goalRequest?: ExecutorGoalRunRequest;
       goalActivation?: { cancelled: boolean };
       recoverHumanTurn?: IExecutor['execute'];
@@ -2964,6 +2990,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (!fromQueue) this.sendStreamContext(messageId, threadId, executor);
     let delegationScope: DelegationScope | undefined;
     let scheduleScope: ScheduleToolScope | undefined;
+    let humanQueryCurrent: (() => boolean) | undefined;
     let clearScheduleModelOverride: (() => void) | undefined;
     let delegationBridge: DelegationBridge | undefined;
     let retireActivation: (() => void) | undefined;
@@ -3126,7 +3153,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           current: () => {
             try {
               const latest = this.threadManager.getThread(threadId);
-              return isCurrent() && !this.abortOperations.has(threadId) && !this.automaticUpdateInProgress && this.wsClient.isConnected()
+              return isCurrent() && (!recoverHumanTurn || humanQueryCurrent?.() === true)
+                && !this.abortOperations.has(threadId) && !this.automaticUpdateInProgress && this.wsClient.isConnected()
                 && epoch === this.imageConnectionEpoch && this.scheduleOwnerCurrent(owner)
                 && this.threadPool.getBackendKey(threadId) === backend && this.threadPool.getExistingExecutor(threadId) === executor && !!latest
                 && JSON.stringify({ config: this.executorConfiguration(), models: latest.models, model: latest.model, efforts: latest.efforts }) === settings;
@@ -3146,7 +3174,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           const connection = await delegationBridge.start(['scheduling']);
           assertCurrent(); await executor.configureManagedTools(connection); assertCurrent();
         }
-        scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, bindingEpoch: this.scheduleBinding?.epoch, current: context.current,
+        scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, readOnly: !!recoverHumanTurn, bindingEpoch: this.scheduleBinding?.epoch, current: context.current,
           nativeAction: id => executor.nativeScheduleAction?.(id),
           deleteCleanup: (command, id) => this.runReviewedNativeCleanup(owner, command, id, context.current) as Promise<{ absentIds: string[]; warning: string }>,
           listCleanup: async () => (await (await this.initializeSchedules()).listCleanup(owner)).map(cleanupSummary),
@@ -3285,6 +3313,13 @@ You can also use natural language commands to control Claude Code CLI.`,
         const canPublish = () => isCurrent() && active && (!scope || (!scope.isClosed() && !scope.hasPendingResults()));
         const guardedOptions: ExecuteOptions = {
           ...options,
+          ...(recoverHumanTurn && scheduleScope && {
+            onAgyHumanPromptAdmitted: (current: () => boolean) => {
+              if (humanQueryCurrent || !active || !isCurrent() || !current()) return;
+              humanQueryCurrent = () => active && current();
+              retireActivation = delegationBridge?.activate((name, args) => scheduleScope!.invoke(name, args));
+            },
+          }),
           onDisplayText: text => { if (canPublish()) options.onDisplayText?.(text); },
           onActivity: options.onActivity ? snapshot => {
             if (!isCurrent() || !active || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)) return;
@@ -3333,6 +3368,10 @@ You can also use natural language commands to control Claude Code CLI.`,
           const guidedPrompt = attachments ? `${prompt}\n\n${ATTACHMENT_GUIDANCE}` : prompt;
           const guidedGoal = goalRequest && attachments && goalRequest.objective
             ? { ...goalRequest, objective: `${goalRequest.objective}\n\n${ATTACHMENT_GUIDANCE}` } : goalRequest;
+          if (agyHumanMessage) {
+            guardedOptions.agyHumanMessage = true;
+            agyHumanMessage = false;
+          }
           const result = guidedGoal
             ? await executor.executeGoal!(guidedGoal, guardedOptions)
             : recoverHumanTurn ? await recoverHumanTurn(prompt, guardedOptions) : await executor.execute(guidedPrompt, guardedOptions);

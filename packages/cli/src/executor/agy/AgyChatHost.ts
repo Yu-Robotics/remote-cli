@@ -11,7 +11,41 @@ const listCall = { name: 'manage_task', args: { Action: 'list' } };
 const denialFailure = 'AGY tool denial enforcement is unconfirmed; explicit clear is required before reuse.';
 const foregroundFailure = 'AGY foreground tool outcome is unconfirmed; explicit clear is required before reuse.';
 
-type ToolError = { planner: TranscriptRecord; receipt: TranscriptRecord };
+// Bound per-call planner and sibling snapshots for a single parallel batch.
+const maxToolBatch = 64;
+type ToolError = { planner: TranscriptRecord; receipt: TranscriptRecord; siblings?: TranscriptRecord[] };
+
+/** Native reserves one consecutive receipt step per planner call, in planner order.
+ * During the tool hooks only a prefix of those receipts may have been flushed. */
+function toolPlanner(rows: TranscriptRecord[], end: number, step: number): TranscriptRecord | undefined {
+  if (!Number.isSafeInteger(step) || end < 0 || rows[end].step_index >= step) return;
+  for (let i = end; i >= 0; i--) {
+    const row = rows[i];
+    if (step - row.step_index > maxToolBatch) return;
+    if (row.source !== 'MODEL' || rows[end].step_index - row.step_index !== end - i) return;
+    if (row.type === 'PLANNER_RESPONSE' && row.status === 'DONE') {
+      const count = row.tool_calls?.length ?? 0;
+      if (count <= maxToolBatch && step - row.step_index <= count) return row;
+      return;
+    }
+    if (row.type !== 'GENERIC' || row.tool_calls?.length) return;
+  }
+}
+
+function toolErrorAt(rows: TranscriptRecord[], index: number): ToolError | undefined {
+  const receipt = rows[index];
+  if (!receipt || rows[index - 1]?.step_index !== receipt.step_index - 1) return;
+  const planner = toolPlanner(rows, index - 1, receipt.step_index);
+  if (!planner) return;
+  const count = planner.tool_calls!.length;
+  if (count === 1) return { planner, receipt };
+  const first = index - (receipt.step_index - planner.step_index - 1);
+  const batch = rows.slice(first, first + count);
+  if (batch.length !== count || batch.some((row, offset) => row.step_index !== planner.step_index + 1 + offset
+    || row.source !== 'MODEL' || row.type !== 'GENERIC' || row.tool_calls?.length
+    || !['DONE', 'ERROR'].includes(row.status))) return;
+  return { planner, receipt, siblings: batch.filter(row => row !== receipt) };
+}
 
 function toolErrorDigest(errors: ToolError[]): string {
   return createHash('sha256').update(JSON.stringify(errors.sort((a, b) => a.receipt.step_index - b.receipt.step_index))).digest('hex');
@@ -22,9 +56,9 @@ export function restoreAgyToolErrors(records: TranscriptRecord[], digest: string
   const errors: ToolError[] = [];
   for (const [index, receipt] of records.entries()) {
     if (receipt.type !== 'GENERIC' || !['ERROR', 'INVALID'].includes(receipt.status)) continue;
-    const planner = records[index - 1];
-    if (!planner || planner.step_index !== receipt.step_index - 1) throw new Error(foregroundFailure);
-    errors.push({ planner, receipt });
+    const proof = toolErrorAt(records, index);
+    if (!proof) throw new Error(foregroundFailure);
+    errors.push(proof);
   }
   if (!errors.length || toolErrorDigest(errors) !== digest) throw new Error('AGY checkpoint tool evidence changed.');
   return errors;
@@ -51,10 +85,26 @@ export class AgyChatHost {
   private readonly dispatches: Array<{ name?: unknown; rawInput?: unknown }> = [];
   private invocationStart?: number;
   private admittedKill = false;
-  get reusable(): boolean { return !this.blocked && this.pendingDenialStep === undefined && !this.records.some(row =>
+  // Same-process human admission never grants management, worker or checkpoint
+  // authority. Only the current foreground's paired hook and ACP terminals set it.
+  private ordinaryMain = false;
+  private policyFailure?: string;
+  private idleStop = false;
+  // A human-only terminal is local to this host and its unchanged native history.
+  private humanHistory?: { count: number; digest: string };
+  private settledHumanTurn = false;
+  get humanContinuation(): boolean { return this.settledHumanTurn && !this.blocked && !this.active; }
+
+  private restrictReuse(reason: string): void {
+    if (this.ordinaryMain && this.active) this.policyFailure ??= reason;
+    else this.fence(reason);
+  }
+
+  get reusable(): boolean { return !this.policyFailure && !this.blocked && this.pendingDenialStep === undefined && !this.records.some(row =>
     creationReceipt(row, this.sessionId, row.step_index) || nativeWake(row)
     || row.type === 'GENERIC' && row.status !== 'DONE' && !this.managementDenials.has(row.step_index)
       && !this.toolErrors.has(row.step_index)); }
+  get restrictedToHuman(): boolean { return !!this.policyFailure; }
   get hasForegroundToolErrors(): boolean { return this.toolErrors.size > 0; }
   checkpointToolErrors(): string | undefined {
     return this.hasForegroundToolErrors ? toolErrorDigest([...this.toolErrors.values()]) : undefined;
@@ -82,6 +132,14 @@ export class AgyChatHost {
   accept(event: string, payload: HookPayload, records: TranscriptRecord[], allowForegroundManagement = false,
     commands?: AgyCommandTasks, fullHistory = records, ordinaryForeground = allowForegroundManagement) {
     this.records = records;
+    if (this.humanHistory) {
+      const prefix = fullHistory.slice(0, this.humanHistory.count);
+      if (createHash('sha256').update(JSON.stringify(prefix)).digest('hex') !== this.humanHistory.digest) {
+        this.fence('AGY foreground history changed after its confirmed terminal.');
+      }
+    }
+    this.settledHumanTurn = false;
+    this.idleStop = this.active && event === 'Stop' && payload.fullyIdle === true && payload.continuationActive === false;
     if (this.checkingLoadedHistory) {
       if (!['SessionStart', 'PreInvocation'].includes(event) || !this.reusable) this.fence(foregroundFailure);
       if (event === 'PreInvocation') this.checkingLoadedHistory = false;
@@ -95,18 +153,21 @@ export class AgyChatHost {
     if (event === 'PostToolUse' && Number.isSafeInteger(payload.stepIdx)) this.postedTools.add(payload.stepIdx as number);
     if (event === 'Stop' && records.some(row => row.type === 'GENERIC' && row.step_index >= (this.turnStart ?? Infinity)
       && !this.observedTools.has(row.step_index) && !(row.status === 'INVALID' && this.toolErrors.has(row.step_index)))) {
-      this.fence('AGY tool hook coverage is incomplete; this conversation is not reusable.');
+      this.restrictReuse('AGY tool hook coverage is incomplete; this conversation is not reusable.');
     }
+    if (event === 'Stop' && this.active && this.ordinaryMain && (payload.continuationActive === true
+      || payload.fullyIdle === false && !commands?.outstandingCount)) this.fence('AGY native foreground still has active work.');
     const start = this.turnStart ?? Infinity;
     if (event === 'Stop' && this.active && records.some(row => row.step_index >= start
       && this.toolErrors.has(row.step_index))) {
       const last = records.at(-1);
       const settled = payload.fullyIdle === true || payload.fullyIdle === false && !!commands?.outstandingCount;
-      if (payload.continuationActive !== false || !settled || last?.type !== 'PLANNER_RESPONSE'
-        || last.source !== 'MODEL' || last.status !== 'DONE' || last.tool_calls?.length) this.fence(foregroundFailure);
+      if (payload.continuationActive !== false || !settled) this.fence(foregroundFailure);
+      else if (last?.type !== 'PLANNER_RESPONSE' || last.source !== 'MODEL' || last.status !== 'DONE'
+        || last.tool_calls?.length) this.restrictReuse(foregroundFailure);
     }
-    if (records.some(nativeWake)) this.fence('Unexpected native reminders were observed; this conversation is not reusable.');
-    if (records.some(row => creationReceipt(row, this.sessionId, row.step_index))) this.fence('AGY background-task creation was observed; explicit clear is required before reuse.');
+    if (records.some(nativeWake)) this.restrictReuse('Unexpected native reminders were observed; this conversation is not reusable.');
+    if (records.some(row => creationReceipt(row, this.sessionId, row.step_index))) this.restrictReuse('AGY background-task creation was observed; explicit clear is required before reuse.');
     const decision = this.monitor.accept(event, payload, records);
     this.observeOrdinaryTool(event, payload, records, ordinaryForeground && this.active && !this.cancelled
       && !this.blocked, decision.decision === 'allow' && !duplicateTool);
@@ -140,6 +201,9 @@ export class AgyChatHost {
       }
       this.fence(denialFailure);
     }
+    if (this.idleStop && this.ordinaryMain && !this.reusable && !this.blocked) {
+      this.humanHistory = { count: fullHistory.length, digest: createHash('sha256').update(JSON.stringify(fullHistory)).digest('hex') };
+    }
     if (this.failure) return event === 'PreInvocation' ? { terminationBehavior: 'terminate' as const }
       : event === 'PreToolUse' ? { decision: 'deny' as const, reason: this.failure } : {};
     return decision;
@@ -151,25 +215,34 @@ export class AgyChatHost {
       let verified = 0;
       for (const [index, row] of records.entries()) {
         const proof = this.toolErrors.get(row.step_index);
-        if (proof && isDeepStrictEqual(row, proof.receipt) && isDeepStrictEqual(records[index - 1], proof.planner)) verified++;
+        if (proof && isDeepStrictEqual(toolErrorAt(records, index), proof)) verified++;
       }
       if (verified !== this.toolErrors.size || (event === 'PreToolUse' || event === 'PostToolUse')
         && this.toolErrors.has(payload.stepIdx as number)) this.fence(foregroundFailure);
     }
-    const tail = records.at(-1);
     // The error hook precedes its transcript receipt. Join it at the end of the same invocation.
     if (event === 'PostInvocation') {
       for (const [step, pending] of this.ordinaryCalls) {
         const index = records.findIndex(row => row.step_index === step);
         const row = records[index];
         if (!pending.error) {
-          if (row?.status !== 'DONE') this.fence(foregroundFailure);
+          if (row?.status !== 'DONE') this.restrictReuse(foregroundFailure);
           continue;
         }
-        if (foreground && row?.status === 'ERROR' && !row.tool_calls?.length
-          && isDeepStrictEqual(records[index - 1], pending.planner)
+        const proof = toolErrorAt(records, index);
+        if (foreground && proof && row?.status === 'ERROR' && !row.tool_calls?.length
+          && isDeepStrictEqual(proof.planner, pending.planner)
           && receiptText(row) === 'Encountered error in step execution: ' + pending.error) {
-          this.toolErrors.set(step, { planner: pending.planner, receipt: structuredClone(row) });
+          if (proof.siblings?.some(sibling => !this.observedTools.has(sibling.step_index) || !this.postedTools.has(sibling.step_index))) {
+            this.restrictReuse(foregroundFailure);
+          } else this.toolErrors.set(step, structuredClone(proof));
+        } else if (foreground && (!row || row.source === 'MODEL')
+          && (!receiptText(row)?.startsWith('Encountered error in step execution: ')
+            || receiptText(row) === 'Encountered error in step execution: ' + pending.error)
+          && isDeepStrictEqual(records.find(r => r.step_index === pending.planner.step_index), pending.planner)) {
+          // A new receipt shape has no durable tool proof. A contradictory
+          // authenticated hook or rewritten planner still fences the live host.
+          this.restrictReuse(foregroundFailure);
         } else this.fence(foregroundFailure);
       }
       this.ordinaryCalls.clear();
@@ -182,21 +255,25 @@ export class AgyChatHost {
       if (!payload.error && !pending.error) { this.ordinaryCalls.delete(step); return; }
       this.requiredTerminal ??= foregroundFailure;
       if (!foreground || pending.error || !isDeepStrictEqual(payload.toolCall, pending.call)
-        || !isDeepStrictEqual(tail, pending.planner) || typeof payload.error !== 'string' || !payload.error.trim()
+        || !isDeepStrictEqual(records.find(row => row.step_index === pending.planner.step_index), pending.planner)
+        || typeof payload.error !== 'string' || !payload.error.trim()
         || payload.error.startsWith('tool call denied by pre-tool hook:')) this.fence(foregroundFailure);
       else pending.error = payload.error;
       return;
     }
-    if (!foreground || !tail) return;
+    if (!foreground) return;
     if (pending && event === 'PreToolUse') { this.fence(foregroundFailure); return; }
     const call = payload.toolCall as { id?: unknown; name?: unknown; args?: unknown } | undefined;
     const start = this.monitor.foregroundInvocationStart;
-    if (event === 'PreToolUse' && admitted && start !== undefined && step > start && tail.step_index === step - 1
+    if (event === 'PreToolUse' && admitted && !this.postedTools.has(step) && start !== undefined && step > start
       && typeof call?.name === 'string' && !['run_command', 'manage_task', 'schedule', 'ask_question'].includes(call.name)
       && typeof call.id === 'string' && call.id.length > 0 && call.id.length <= 256
-      && call.args && typeof call.args === 'object' && !Array.isArray(call.args) && tail.source === 'MODEL'
-      && tail.type === 'PLANNER_RESPONSE' && tail.status === 'DONE' && isDeepStrictEqual(tail.tool_calls, [{ name: call.name, args: call.args }])) {
-      this.ordinaryCalls.set(step, { call: structuredClone(call), planner: structuredClone(tail) });
+      && call.args && typeof call.args === 'object' && !Array.isArray(call.args)) {
+      const planner = toolPlanner(records, records.length - 1, step);
+      if (planner && planner.step_index >= start && isDeepStrictEqual(planner.tool_calls?.[step - planner.step_index - 1],
+        { name: call.name, args: call.args })) {
+        this.ordinaryCalls.set(step, { call: structuredClone(call), planner: structuredClone(planner) });
+      }
     }
   }
   /** Native AGY flushes an argument rejection by the PostInvocation of its own invocation. */
@@ -238,8 +315,12 @@ export class AgyChatHost {
     this.pendingDenialStep = undefined;
   }
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
-  async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input)): Promise<{ success: boolean; output: string; stopReason: string }> {
-    if (this.active || this.blocked || !this.reusable) throw new Error(this.blocked ?? 'AGY chat is busy or has unsettled native work.');
+  async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input),
+    admission: 'strict' | 'main' | 'confirmed-human' = 'strict'): Promise<{ success: boolean; output: string; stopReason: string }> {
+    if (this.active || this.blocked || !this.reusable && !(admission === 'confirmed-human' && this.humanContinuation)) throw new Error(this.blocked ?? this.policyFailure ?? 'AGY chat is busy or has unsettled native work.');
+    this.ordinaryMain = admission !== 'strict';
+    this.settledHumanTurn = false;
+    this.idleStop = false;
     this.turnStart = undefined; this.observedTools.clear(); this.postedTools.clear(); this.requiredTerminal = undefined;
     this.turnRejections.length = 0; this.dispatches.length = 0; this.invocationStart = undefined;
     this.monitor.beginForeground(); this.active = true; this.cancelled = false;
@@ -257,10 +338,20 @@ export class AgyChatHost {
       if (this.turnRejections.some(rejection => this.dispatches.some(update => agyDispatchConflicts(rejection, update)))) {
         this.fence(foregroundFailure);
       }
-      if (this.requiredTerminal && (terminal.stopReason !== 'end_turn' || !result?.success || !this.reusable || this.ordinaryCalls.size)) {
+      const completed = terminal.stopReason === 'end_turn' && result?.success === true;
+      const settled = this.ordinaryMain && this.idleStop && completed;
+      const ordinaryTerminal = settled && this.requiredTerminal === foregroundFailure;
+      if (this.requiredTerminal && (!completed || !this.reusable && !ordinaryTerminal || this.ordinaryCalls.size)) {
         this.fence(this.requiredTerminal);
       }
       if (!result || this.blocked) throw new Error(this.blocked ?? 'AGY foreground hook terminal is missing.');
+      if (!this.reusable && !settled && this.policyFailure) throw new Error(this.policyFailure);
+      if (this.ordinaryMain && !completed) {
+        this.fence('AGY native foreground did not complete successfully.');
+        return { ...result, success: false, stopReason: terminal.stopReason };
+      }
+      if (settled && !this.reusable) this.policyFailure ??= foregroundFailure;
+      this.settledHumanTurn = settled;
       return { ...result, stopReason: terminal.stopReason };
     } catch (error) {
       this.fence('AGY chat outcome is unconfirmed; retained history cannot be resumed automatically.'); throw error;

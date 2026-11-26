@@ -706,6 +706,16 @@ and deliver your message. AGY can process pending native messages and their
 tool requests alongside yours. The CLI verifies the message source and the
 original conversation before loading it.
 
+From CLI 1.6.287, the next ordinary message can continue the same AGY main
+conversation once the foreground turn ends and AGY confirms it is idle.
+Errors, parallel tool calls and unfamiliar tool results in a completed turn
+do not by themselves keep the conversation busy. Automated turns and worker
+reuse continue to require their own evidence. A fresh human message can also
+resume the same chat after an idle AGY process exits and its process group
+and hook lease are released. When the thread is busy, an eligible text message
+can join the confirmed queue. Recovery rechecks its original route at dispatch.
+During that foreground reply, you can also ask to see this thread’s managed schedules.
+
 A timer cannot initiate this recovery. If a timer comes due while the chat
 is waiting for your next message, the CLI skips that occurrence and keeps
 future recurring slots. After recovery, a verified, idle text-only conversation

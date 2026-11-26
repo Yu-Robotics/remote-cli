@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import path from 'path';
 import { isDeepStrictEqual } from 'util';
 import { pathToFileURL } from 'url';
-import { deletionReceipt, nativeWake, NOTIFICATION_PREFIX, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
+import { creationReceipt, deletionReceipt, nativeWake, NOTIFICATION_PREFIX, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import type { HookDecision, HookPayload } from '../../scheduling/agy/AgySessionSchedules';
 
 export interface AgyCommandCheckpoint { lastStep: number; digest: string; idleDenialHistory?: string }
@@ -175,7 +175,7 @@ export class AgyCommandTasks {
     return rows.filter(row => !this.receipts.has(row.step_index));
   }
 
-  observe(event: string, payload: HookPayload, rows: TranscriptRecord[], foreground: boolean, allowIdleDenial = false): TranscriptRecord[] {
+  observe(event: string, payload: HookPayload, rows: TranscriptRecord[], foreground: boolean, allowIdleDenial = false, ordinaryForeground = false): TranscriptRecord[] {
     this.idleDecision = undefined;
     if (payload.conversationId !== this.session || payload.hookEventName !== event) throw new Error('AGY command hook identity changed.');
     if (foreground && event === 'PreInvocation' && Number.isSafeInteger(payload.initialNumSteps)) {
@@ -221,6 +221,12 @@ export class AgyCommandTasks {
         const id = `${this.session}/task-${step}`;
         const logLine = '\nTask logs are available at: ' + this.log(step);
         const marker = text.lastIndexOf('\nTask logs are available at: ');
+        // An authenticated foreground transcript can include another tool's native
+        // background receipt. It supplies no command ownership or timer authority.
+        if (ordinaryForeground && foreground && !this.calls.has(step) && creationReceipt(row, this.session, step)) {
+          other.push(row);
+          continue;
+        }
         if (!foreground || !this.calls.has(step) || row.status !== 'RUNNING' || row.tool_calls?.length
           || !text.startsWith(creationPrefix + id + '\nTask Description: ') || marker < 0
           || !text.startsWith(logLine, marker)

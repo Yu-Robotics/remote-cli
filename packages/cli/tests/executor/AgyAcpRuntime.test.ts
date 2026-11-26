@@ -10,7 +10,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
 import type { HookPayload } from '../../src/scheduling/agy/AgySessionSchedules';
-import type { NativeScheduleEvent } from '../../src/scheduling/types';
+import { AgyManualResumeScheduleSkip, type NativeScheduleEvent } from '../../src/scheduling/types';
 import type { TranscriptRecord } from '../../src/scheduling/agy/transcript';
 import { NOTIFICATION_PREFIX, parseTranscript } from '../../src/scheduling/agy/transcript';
 import { createExecutor } from '../../src/executor';
@@ -28,7 +28,7 @@ const native = vi.hoisted(() => ({
   clients: [] as any[], accept: undefined as any, fault: undefined as any,
   restore: vi.fn(async () => {}), configure: vi.fn(async () => {}), bind: vi.fn(),
   settingFailure: false, settingWait: undefined as Promise<void> | undefined, sessionId: 'synthetic-session',
-  realHooks: false, nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
+  duringLoad: undefined as (() => Promise<void>) | undefined, realHooks: false, nativeAvailable: true, exitConfirmed: true, home: '', initializeWait: undefined as Promise<void> | undefined,
   loadedRows: undefined as TranscriptRecord[] | undefined, agentVersion: undefined as string | undefined,
   confirmTranscript: vi.fn(async (_records: TranscriptRecord[]) => true),
 }));
@@ -88,6 +88,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   }
   async loadSession() { throw new Error('Unqualified saved ACP resume is forbidden'); }
   async loadSessionWithSetup(id: string, _cwd: string, _servers: unknown, setup: AcpSessionSetup) {
+    await native.duringLoad?.();
     if (native.loadedRows) {
       this.rows = structuredClone(native.loadedRows);
       this.cursor = Math.max(...this.rows.map(row => row.step_index)) + 1;
@@ -187,7 +188,7 @@ beforeEach(async () => {
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'agy-entry-'))); cwd = path.join(home, 'work'); await fs.mkdir(cwd);
   native.home = home; vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
   native.realHooks = false; native.clients.length = 0; native.initializeWait = undefined; native.nativeAvailable = true; native.exitConfirmed = true;
-  native.loadedRows = undefined; native.agentVersion = undefined;
+  native.duringLoad = undefined; native.loadedRows = undefined; native.agentVersion = undefined;
   native.confirmTranscript.mockReset().mockResolvedValue(true);
   native.settingFailure = false; native.settingWait = undefined; native.sessionId = 'synthetic-session';
   native.restore.mockClear(); native.configure.mockClear(); native.bind.mockClear();
@@ -532,8 +533,13 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
         fullyIdle: true, continuationActive: scenario === 'continued Stop' });
       client.release({ stopReason: scenario === 'cancelled' ? 'cancelled' : 'end_turn' });
       const failure = await turn.catch(error => error);
-      expect(failure).toBeInstanceOf(Error);
-      expect(failure.message).not.toContain('denial enforcement');
+      if (['missing pre', 'missing post and receipt', 'missing post', 'missing receipt', 'unfinished'].includes(scenario)) {
+        expect(failure).toMatchObject({ success: true });
+        expect(executor.needsAgyHumanRecovery('next-human-message')).toBe(true);
+      } else {
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.message).not.toContain('denial enforcement');
+      }
       await expect(executor.execute('next ordinary prompt')).rejects.toThrow();
       expect(client.prompts).toEqual(['hold']);
       expect(() => executor.checkHostScheduleSession(client.session)).toThrow();
@@ -650,7 +656,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       expect(client.prompts).toEqual(['hold']);
       expect(runtime.reusable).toBe(false);
     });
-  it('withholds reuse after a native validation rejection without independently observed tool evidence', async () => {
+  it('requires a fresh human message to continue after a terminal with missing tool evidence', async () => {
     const turn = executor.execute('hold');
     turn.catch(() => undefined);
     await vi.waitFor(() => expect(last()?.release).toBeDefined());
@@ -661,7 +667,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     client.hook('PostInvocation');
     client.hook('PreInvocation', { initialNumSteps: client.cursor });
     client.finish(); client.release({ stopReason: 'end_turn' });
-    await expect(turn).rejects.toThrow('hook coverage is incomplete');
+    await expect(turn).resolves.toMatchObject({ success: true });
     await expect(executor.execute('follow-up')).rejects.toThrow();
     expect(client.prompts).toEqual(['hold']);
   });
@@ -1292,7 +1298,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(last().prompts).toEqual(['first timed task']);
     expect(last().session).toBe(id);
   });
-  it.each(['intact', 'changed digest', 'missing digest', 'changed generation', 'changed configuration', 'changed stored history',
+  it.each(['intact', 'intact parallel', 'changed parallel sibling', 'changed digest', 'missing digest', 'changed generation', 'changed configuration', 'changed stored history',
     'changed saved planner', 'missing saved receipt', 'changed loaded receipt', 'extra loaded error', 'unconfirmed terminal', 'unconfirmed exit'])(
     'binds ordinary tool error history to its clean retirement: %s', async scenario => {
       const { id, db } = await captureTimedSession();
@@ -1300,6 +1306,15 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
       const client = last();
       const payload = ordinaryTool(client, 'read_file');
+      if (scenario === 'intact parallel' || scenario === 'changed parallel sibling') {
+        const sibling = { name: 'run_command', args: {} };
+        client.rows.at(-1).tool_calls.unshift(sibling);
+        const command = { stepIdx: payload.stepIdx, toolCall: { ...sibling, id: 'command' } };
+        payload.stepIdx = client.cursor++;
+        expect(client.hook('PreToolUse', command).decision).toBe('allow');
+        client.hook('PostToolUse', command);
+        client.row('GENERIC', 'Synthetic command output', 'MODEL', 'DONE', command.stepIdx);
+      }
       expect(client.hook('PreToolUse', payload).decision).toBe('allow');
       client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
       client.row('GENERIC', 'Encountered error in step execution: synthetic failure', 'MODEL', 'ERROR', payload.stepIdx);
@@ -1338,6 +1353,7 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
         selected.hostGeneration = selected.hostScheduleCheckpoint.generation = 'replacement-generation';
         await fs.writeFile(file, JSON.stringify(selected));
       }
+      if (scenario === 'changed parallel sibling') native.loadedRows.find(row => row.step_index === payload.stepIdx - 1)!.content += 'changed';
       if (scenario === 'changed loaded receipt') {
         native.loadedRows.find(row => row.step_index === payload.stepIdx)!.content += 'changed';
       }
@@ -1345,13 +1361,13 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
         content: 'unexpected', step_index: native.loadedRows.at(-1)!.step_index + 1 });
       executor = scenario === 'changed configuration'
         ? new AgyExecutor(new DirectoryGuard([cwd]), { threadId: 'synthetic-thread', initialWorkingDirectory: cwd, model: 'different-model' }) : make();
-      if (scenario === 'intact') {
+      if (scenario === 'intact' || scenario === 'intact parallel') {
         await expect(executor.execute('new request', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
         expect(last().session).toBe(id);
         expect(last().prompts).toEqual(['new request']);
       } else {
         await expect(executor.execute('stale request')).rejects.toThrow();
-        if (scenario !== 'changed loaded receipt' && scenario !== 'extra loaded error') expect(native.clients).toHaveLength(1);
+        if (scenario !== 'changed loaded receipt' && scenario !== 'extra loaded error' && scenario !== 'changed parallel sibling') expect(native.clients).toHaveLength(1);
       }
     });
   it('installs scheduling tools on the first allocation even when settings open it before chat', async () => {
@@ -1423,12 +1439,12 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const config = { type: 'agy' as const };
     const threads = await ThreadManager.initialize(home);
     const thread = target === 'named' ? await threads.createThread('named', cwd) : threads.getDefaultThread();
-    await threads.updateThread(thread.id, { workingDirectory: cwd, delegation: false });
+    await threads.updateThread(thread.id, { workingDirectory: cwd, delegation: target === 'named' });
     const { id } = await savedManualChat(thread.id);
     const guard = new DirectoryGuard([cwd]);
     const pool = new ThreadExecutorPool(threads, guard, config);
     const send = vi.fn();
-    const cli = new MessageHandler({ send, trackTask: vi.fn(), isConnected: () => true } as any, pool, threads, guard,
+    const cli = new MessageHandler({ send, trackTask: vi.fn(), onTaskResultAck: () => () => {}, onClose: () => () => {}, isConnected: () => true } as any, pool, threads, guard,
       { get: (key: string) => key === 'executor' ? config : key === 'deviceId' ? device : undefined, getConfigDir: () => home } as any);
     const router = new FeishuLongConnHandler({ appId: 'fixture', appSecret: 'fixture', store });
     const registration = { openId: owner, registrationId: 'registered' };
@@ -1443,20 +1459,259 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     vi.spyOn(router as any, 'sendStreamingStart').mockResolvedValue('fixture-card');
     vi.spyOn(router as any, 'replyToMessage').mockResolvedValue(undefined);
     const event = { sender: { sender_type: 'user', sender_id: { open_id: owner } }, message: {
-      message_type: 'text', create_time: String(Date.now()), message_id: 'original-human', content: JSON.stringify({ text: 'Continue here' }),
+      message_type: 'text', create_time: String(Date.now()), message_id: 'original-human', content: JSON.stringify({ text: 'hold' }),
     } };
     try {
       await cli.handleMessage({ type: 'binding_confirm', data: { success: true, registrationId: registration.registrationId,
         scheduleBinding: { openId: owner, deviceId: device, epoch }, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true } } } as any);
-      await router['handleMessageEvent'](event);
+      const call = async (name: string, args: Record<string, unknown> = {}) => {
+        const env = last().launch.env;
+        const response = await fetch(env.REMOTE_CLI_DELEGATION_URL, { method: 'POST',
+          headers: { authorization: 'Bearer ' + env.REMOTE_CLI_DELEGATION_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ name, args, callId: randomUUID() }) });
+        return { status: response.status, body: await response.json() };
+      };
+      native.duringLoad = async () => {
+        expect(await call('remote_cli_schedule_list', { requestId: 'before-load' })).toMatchObject({ status: 409 });
+      };
+      const recovery = router['handleMessageEvent'](event);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      expect(await call('remote_cli_schedule_capabilities')).toMatchObject({ status: 200, body: { backend: 'agy' } });
+      const originalRegistration = cli['authenticatedRegistration'];
+      cli['authenticatedRegistration'] = 'different-registration';
+      expect(await call('remote_cli_schedule_capabilities')).toMatchObject({ status: 400 });
+      cli['authenticatedRegistration'] = originalRegistration;
+      const listed = await call('remote_cli_schedule_list', { requestId: 'inventory' });
+      expect(listed).toMatchObject({ status: 200, body: { status: 'succeeded', records: [] } });
+      expect(await call('remote_cli_schedule_operation', { requestId: 'inventory' })).toEqual(listed);
+      for (const name of ['create', 'cancel', 'purge', 'cleanup_review', 'cleanup_delete']) {
+        expect(await call('remote_cli_schedule_' + name, { requestId: 'forbidden' })).toMatchObject({ status: 400, body: { error: expect.stringContaining('Only schedule list') } });
+      }
+      expect(await call('remote_cli_schedule_operation', { requestId: 'forbidden' })).toMatchObject({ status: 400 });
+      if (target === 'named') {
+        expect(await call('remote_cli_delegate', { task: 'Synthetic task' })).toMatchObject({
+          status: 400, body: { error: expect.stringContaining('Only schedule list') },
+        });
+      }
+      client.row('PLANNER_RESPONSE', '');
+      client.rows.at(-1).tool_calls = [{ name: 'run_command', args: {} }, { name: 'unknown_tool', args: {} }];
+      client.row('GENERIC', 'Historical command output', 'MODEL', 'DONE');
+      client.row('GENERIC', 'Historical error', 'MODEL', 'ERROR');
+      client.row('UNKNOWN_TOOL_RESULT', 'Additional output', 'MODEL', 'UNKNOWN');
+      client.finish();
+      expect(await call('remote_cli_schedule_capabilities')).toMatchObject({ status: 400 });
+      client.release({ stopReason: 'end_turn' });
+      await recovery;
       expect(send.mock.calls.filter(([frame]) => frame.type === 'response').at(-1)?.[0]).toMatchObject({ threadId: thread.id, success: true });
       expect(last().session).toBe(id);
-      expect(last().prompts).toEqual(['Continue here']);
+      expect(last().prompts).toEqual(['hold']);
       await router['handleMessageEvent'](event);
       await cli.handleMessage(delivered!);
       expect(native.clients).toHaveLength(1);
-      expect(last().prompts).toEqual(['Continue here']);
+      expect(last().prompts).toEqual(['hold']);
+      for (const text of ['first follow-up\nhold', 'second follow-up']) {
+        const prior = client.prompts.length;
+        const next = router['handleMessageEvent']({ ...event, message: { ...event.message, message_id: 'next-' + prior,
+          content: JSON.stringify({ text }) } });
+        if (text.endsWith('hold')) {
+          await vi.waitFor(() => expect(client.prompts).toHaveLength(prior + 1));
+          expect(await call('remote_cli_schedule_operation', { requestId: 'inventory' })).toMatchObject({ status: 400 });
+          expect(await call('remote_cli_schedule_list', { requestId: 'another-list' })).toMatchObject({ status: 200, body: { status: 'succeeded' } });
+          client.finish(); client.release({ stopReason: 'end_turn' });
+        }
+        await next;
+        expect(send.mock.calls.filter(([frame]) => frame.type === 'response').at(-1)?.[0]).toMatchObject({ success: true });
+        await cli.handleMessage(delivered!);
+      }
+      expect(last().session).toBe(id);
+      expect(native.clients).toHaveLength(1);
+      expect(client.prompts).toEqual(['hold', 'first follow-up\nhold', 'second follow-up']);
+      const live = pool.getExecutor(thread.id) as AgyExecutor;
+      expect(() => live.checkHostScheduleSession(id)).toThrow();
+      await expect(live.execute('automatic continuation')).rejects.toThrow();
+      const first = last();
+      first.onExit();
+      await Promise.resolve();
+      await router['handleMessageEvent']({ ...event, message: { ...event.message, create_time: String(Date.now()),
+        message_id: 'next-human-message', content: JSON.stringify({ text: 'Continue after exit' }) } });
+      expect(send.mock.calls.filter(([frame]) => frame.type === 'response').at(-1)?.[0]).toMatchObject({ threadId: thread.id, success: true });
+      expect(native.clients).toHaveLength(2);
+      expect(first.prompts).toEqual(['hold', 'first follow-up\nhold', 'second follow-up']);
+      expect(last().session).toBe(id);
+      expect(last().prompts).toEqual(['Continue after exit']);
     } finally { await cli.destroy(); await store.flush(); }
+  });
+
+  it('continues a freshly allocated main host after historical background work without granting timer or command ownership', async () => {
+    const { id } = await captureTimedSession();
+    const work = executor.execute('hold');
+    await vi.waitFor(() => expect(last().prompts).toHaveLength(2));
+    const client = last(), step = client.cursor;
+    client.row('GENERIC', 'Tool is running as a background task with task id: ' + id + '/task-' + step
+      + '\nTask Description: Synthetic tool\nTask logs are available at: file:///fixture', 'MODEL', 'RUNNING');
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(work).resolves.toMatchObject({ success: true });
+    const source = humanConfirmation();
+    expect(executor.needsAgyHumanRecovery(source.originalMessageId)).toBe(true);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.resumeAgyChat('expired route', {}, { ...source, current: () => false })).rejects.toThrow();
+    await expect(executor.resumeAgyChat('next human request', {}, source)).resolves.toMatchObject({ success: true });
+    expect(() => executor.needsAgyHumanRecovery(source.originalMessageId)).toThrow();
+    expect(client.prompts).toEqual(['hold', 'hold', 'next human request']);
+    expect(native.clients).toHaveLength(1);
+  });
+
+  it.each(['active continuation', 'not idle', 'failed Stop', 'wrong session', 'missing PostInvocation',
+    'relay fault', 'missing Stop', 'ACP limit', 'permission declined', 'outstanding command', 'worker', 'coordinator', 'timer'])(
+    'withholds human continuation despite historical tool records when there is %s', async scenario => {
+      const { runtime } = initialRuntime({ hostScheduleChat: true, env: { HOME: home },
+        worker: scenario === 'worker', managedCoordinator: scenario === 'coordinator' });
+      const work = runtime.execute('hold', scenario === 'timer' ? { hostScheduleSessionId: native.sessionId } : {});
+      work.catch(() => undefined);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      client.row('GENERIC', 'Unobserved result', 'MODEL', 'ERROR');
+      if (scenario === 'outstanding command') yieldCommand(client);
+      if (scenario === 'permission declined') {
+        await client.callbacks.onPermissionRequest('Synthetic permission', [{ optionId: 'deny', kind: 'reject_once' }]);
+      }
+      if (scenario === 'relay fault') native.fault();
+      client.row('PLANNER_RESPONSE', 'Synthetic final output');
+      if (scenario !== 'missing PostInvocation') client.hook('PostInvocation');
+      if (scenario !== 'missing Stop') client.hook('Stop', { terminationReason: scenario === 'failed Stop' ? 'ERROR' : 'NO_TOOL_CALL',
+        error: scenario === 'failed Stop' ? 'Synthetic error' : '', fullyIdle: scenario !== 'not idle',
+        continuationActive: scenario === 'active continuation', conversationId: scenario === 'wrong session' ? 'other' : client.session });
+      client.release({ stopReason: scenario === 'ACP limit' ? 'max_turn_requests' : 'end_turn' });
+      await work.catch(() => undefined);
+      expect(runtime.needsHumanContinuation).toBe(false);
+      const confirm = vi.fn();
+      await expect(runtime.execute('human follow-up', {}, confirm)).rejects.toThrow();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(client.prompts).toEqual(['hold']);
+      expect(runtime.hostScheduleAvailable).toBe(false);
+    });
+
+  it.each(['pointer', 'transcript'])('fences an authenticated live continuation when its %s changes', async changed => {
+    const { id, pointer } = await savedManualChat();
+    const work = resume('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last();
+    client.row('GENERIC', 'Unobserved result', 'MODEL', 'ERROR');
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(work).resolves.toMatchObject({ success: true });
+    if (changed === 'pointer') {
+      const replacement = pointer + '.replacement';
+      await fs.copyFile(pointer, replacement); await fs.rename(replacement, pointer);
+    } else {
+      client.rows.at(-2).content = 'Changed tool result';
+      client.hook('SessionStart');
+    }
+    await expect(resume('follow-up')).rejects.toThrow();
+    expect(client.prompts).toEqual(['hold']);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+  });
+
+  it.each(['confirmed', 'group unknown', 'lease unknown'] as const)(
+    'recovers the same idle chat only after exact retirement: %s', async evidence => {
+      const { id } = await savedManualChat();
+      const previous = humanConfirmation();
+      await executor.resumeAgyChat('previous input', {}, previous);
+      const oldClient = last();
+      const next = humanConfirmation();
+      expect(executor.needsAgyHumanRecovery(next.originalMessageId)).toBe(false);
+      oldClient.onExit();
+      await Promise.resolve();
+      expect(executor.needsAgyHumanRecovery(next.originalMessageId)).toBe(true);
+      expect(() => executor.needsAgyHumanRecovery(previous.originalMessageId)).toThrow('already resumed');
+      await expect(executor.execute('scheduled work', { hostScheduleSessionId: id })).rejects.toThrow();
+      await expect(executor.execute('unverified input')).rejects.toThrow();
+      if (evidence === 'group unknown') native.exitConfirmed = false;
+      if (evidence === 'lease unknown') native.restore.mockRejectedValueOnce(new Error('Unconfirmed hook lease'));
+      if (evidence !== 'confirmed') {
+        await expect(executor.resumeAgyChat('withheld input', {}, next)).rejects.toThrow();
+        expect(native.clients).toHaveLength(1);
+        expect(executor.needsAgyHumanRecovery(next.originalMessageId)).toBe(true);
+        native.exitConfirmed = true;
+      }
+      await expect(executor.resumeAgyChat('fresh input', {}, next)).resolves.toMatchObject({ success: true });
+      expect(native.clients).toHaveLength(2);
+      expect(oldClient.prompts).toEqual(['previous input']);
+      expect(last().session).toBe(id);
+      expect(last().token).toBeUndefined();
+      expect(last().prompts).toEqual(['fresh input']);
+      expect(() => executor.needsAgyHumanRecovery(next.originalMessageId)).toThrow('already resumed');
+    });
+
+  it('preserves the original selection when a fresh main host exits before its first recovery', async () => {
+    native.realHooks = true;
+    const { id } = await captureTimedSession();
+    const first = last();
+    native.loadedRows = structuredClone(first.rows);
+    await fs.writeFile(transcriptPath(first.launch.env.HOME, id), first.rows.map((row: TranscriptRecord) => JSON.stringify(row)).join('\n'));
+    first.onExit();
+    await Promise.resolve();
+    const source = humanConfirmation();
+    expect(executor.needsAgyHumanRecovery(source.originalMessageId)).toBe(true);
+    await expect(executor.execute('timer', { hostScheduleSessionId: id })).rejects.toBeInstanceOf(AgyManualResumeScheduleSkip);
+    await expect(executor.resumeAgyChat('next human', {}, source)).resolves.toMatchObject({ success: true });
+    expect(first.prompts).toEqual(['hold']);
+    expect(last().session).toBe(id);
+    expect(last().prompts).toEqual(['next human']);
+  });
+
+  it('rechecks the human route after cleanup before starting a successor', async () => {
+    await savedManualChat();
+    await resume('previous input');
+    last().onExit();
+    await Promise.resolve();
+    let current = true;
+    native.restore.mockImplementationOnce(async () => { current = false; });
+    await expect(executor.resumeAgyChat('expired input', {}, { ...humanConfirmation(), current: () => current }))
+      .rejects.toThrow('route changed');
+    expect(native.clients).toHaveLength(1);
+    await expect(resume('fresh input')).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['fresh input']);
+  });
+
+  it('keeps an in-turn exit ineligible after the interrupted input settles', async () => {
+    await savedManualChat();
+    await resume('first chat');
+    const interrupted = executor.execute('hold');
+    await vi.waitFor(() => expect(last().release).toBeDefined());
+    last().onExit();
+    await Promise.resolve();
+    last().release({ stopReason: 'end_turn' });
+    await expect(interrupted).rejects.toThrow();
+    const source = humanConfirmation();
+    expect(executor.needsAgyHumanRecovery(source.originalMessageId)).toBe(false);
+    await expect(executor.resumeAgyChat('retry', {}, source)).rejects.toThrow();
+    expect(native.clients).toHaveLength(1);
+  });
+
+  it('refuses worker recovery even after an observed idle process exit', async () => {
+    executor = new AgyExecutor(new DirectoryGuard([cwd]), {
+      initialWorkingDirectory: cwd, threadId: 'synthetic-worker', delegationWorker: true,
+    });
+    await executor.execute('worker input');
+    last().onExit();
+    await Promise.resolve();
+    const source = humanConfirmation();
+    expect(executor.needsAgyHumanRecovery(source.originalMessageId)).toBe(false);
+    await expect(executor.resumeAgyChat('human input', {}, source)).rejects.toThrow();
+    expect(native.clients).toHaveLength(1);
+    expect(last().prompts).toEqual(['worker input']);
+  });
+
+  it('refuses a replaced pointer even when its conversation and generation match the exited host', async () => {
+    const { pointer } = await savedManualChat();
+    await resume('first chat');
+    last().onExit();
+    await Promise.resolve();
+    await fs.copyFile(pointer, pointer + '.replacement');
+    await fs.rename(pointer + '.replacement', pointer);
+    await expect(resume('new input')).rejects.toThrow('no longer owns');
+    expect(native.clients).toHaveLength(1);
   });
 
   it('accepts one human message after owner loss and resumes future bound host turns after its verified terminal', async () => {
@@ -1502,6 +1757,101 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(() => executor.checkHostScheduleSession(id)).toThrow();
     await expect(executor.execute('follow-up')).resolves.toMatchObject({ success: true });
     expect(last().prompts).toEqual(['hold', 'follow-up']);
+  });
+
+  it.each(['recovery', 'follow-up'])('retains live foreground tool error evidence during the %s turn on a timer-fenced recovered chat', async phase => {
+    const { id, threadHome } = await savedManualChat();
+    native.loadedRows!.push({ step_index: 2, type: 'GENERIC', source: 'MODEL', status: 'ERROR', content: 'Historical failure' });
+    await fs.writeFile(transcriptPath(threadHome, id), native.loadedRows!.map(row => JSON.stringify(row)).join('\n'));
+    if (phase === 'follow-up') await expect(resume('recover')).resolves.toMatchObject({ success: true });
+    const turn = phase === 'recovery' ? resume('hold') : executor.execute('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last(), payload = ordinaryTool(client, 'read_file');
+    expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+    client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
+    client.row('GENERIC', 'Encountered error in step execution: synthetic failure', 'MODEL', 'ERROR', payload.stepIdx);
+    client.hook('PostInvocation');
+    client.hook('PreInvocation', { initialNumSteps: client.cursor });
+    client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(turn).resolves.toMatchObject({ success: true });
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.execute('first follow-up')).resolves.toMatchObject({ success: true });
+    await expect(executor.execute('second follow-up')).resolves.toMatchObject({ success: true });
+    expect(client.prompts).toEqual([...(phase === 'follow-up' ? ['recover'] : []), 'hold', 'first follow-up', 'second follow-up']);
+    expect(native.clients).toHaveLength(1);
+    expect(executor.getSessionId()).toBe(id);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+  });
+
+  it.each(['both pre-hooks before receipts', 'both posts before receipts', 'sibling visible at pre-hook', 'wrong slot', 'changed hook id',
+    'changed planner', 'changed sibling receipt', 'changed error receipt', 'missing sibling receipt', 'missing sibling post', 'missing error post'])(
+    'joins recovered parallel tool hooks to their planner slots: %s', async scenario => {
+      const { id } = await savedManualChat();
+      const work = resume('hold');
+      work.catch(() => undefined);
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      const shell = { name: 'run_command', args: { CommandLine: 'echo synthetic' } };
+      const list = { name: 'mcp_remote-cli-delegation_remote_cli_schedule_list', args: {} };
+      const error = JSON.stringify({ error: 'No active delegation turn' });
+      client.row('PLANNER_RESPONSE', '');
+      const planner = client.rows.at(-1);
+      planner.tool_calls = scenario === 'wrong slot' ? [list, shell] : [shell, list];
+      const first = { stepIdx: client.cursor++, toolCall: { id: 'command', ...shell } };
+      const second = { stepIdx: client.cursor++, toolCall: { id: 'list', ...list } };
+      expect(client.hook('PreToolUse', first).decision).toBe('allow');
+      if (scenario !== 'sibling visible at pre-hook') client.hook('PreToolUse', second);
+      if (scenario === 'both posts before receipts') client.hook('PostToolUse', { ...second, error });
+      if (scenario !== 'missing sibling post') client.hook('PostToolUse', first);
+      if (scenario !== 'missing sibling receipt') client.row('GENERIC', 'Synthetic command output', 'MODEL', 'DONE', first.stepIdx);
+      if (scenario === 'sibling visible at pre-hook') client.hook('PreToolUse', second);
+      if (scenario !== 'missing error post' && scenario !== 'both posts before receipts') client.hook('PostToolUse', { ...second, error,
+        toolCall: { ...second.toolCall, id: scenario === 'changed hook id' ? 'other' : second.toolCall.id } });
+      client.row('GENERIC', 'Encountered error in step execution: ' + error, 'MODEL', 'ERROR', second.stepIdx);
+      client.hook('PostInvocation');
+      if (scenario === 'changed planner') planner.content += 'changed';
+      if (scenario === 'changed sibling receipt') client.rows.at(-2).content += 'changed';
+      if (scenario === 'changed error receipt') client.rows.at(-1).content += 'changed';
+      if (scenario === 'both posts before receipts') {
+        client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX +
+          '[Message] timestamp=2026-01-01T00:00:00Z sender=fixture priority=MESSAGE_PRIORITY_HIGH content=Queued input\n</SYSTEM_MESSAGE>', 'SYSTEM');
+        client.hook('PreInvocation', { initialNumSteps: client.cursor });
+        const next = ordinaryTool(client, 'read_file');
+        expect(client.hook('PreToolUse', next).decision).toBe('allow');
+        client.hook('PostToolUse', next);
+        client.row('GENERIC', 'Synthetic read', 'MODEL', 'DONE', next.stepIdx);
+        client.hook('PostInvocation');
+      }
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      if (['both pre-hooks before receipts', 'both posts before receipts', 'sibling visible at pre-hook'].includes(scenario)) {
+        await expect(work).resolves.toMatchObject({ success: true });
+        await expect(executor.execute('first follow-up')).resolves.toMatchObject({ success: true });
+        await expect(executor.execute('second follow-up')).resolves.toMatchObject({ success: true });
+        expect(client.prompts).toEqual(['hold', 'first follow-up', 'second follow-up']);
+        expect(executor.getSessionId()).toBe(id);
+        expect(native.clients).toHaveLength(1);
+      } else {
+        await work.catch(() => undefined);
+        await expect(executor.execute('follow-up')).rejects.toThrow();
+        expect(client.prompts).toEqual(['hold']);
+      }
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    });
+
+  it('refuses follow-up chat when the live recovery tool receipt differs from its hook', async () => {
+    const { id } = await savedManualChat();
+    const turn = resume('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last(), payload = ordinaryTool(client, 'read_file');
+    expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+    client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
+    client.row('GENERIC', 'Encountered error in step execution: different failure', 'MODEL', 'ERROR', payload.stepIdx);
+    client.hook('PostInvocation'); client.finish(); client.release({ stopReason: 'end_turn' });
+    await expect(turn).rejects.toThrow();
+    await expect(executor.execute('follow-up')).rejects.toThrow();
+    expect(client.prompts).toEqual(['hold']);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
   });
 
   it('fences changed historical evidence during the recovery prompt', async () => {

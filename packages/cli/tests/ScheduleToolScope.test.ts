@@ -28,6 +28,26 @@ describe('ScheduleToolScope', () => {
     } finally { finish([]); await scope.close(); }
   });
 
+  it('limits recovery polling to read receipts scoped to the current request and binding', async () => {
+    const f = fixture();
+    await f.scope.invoke('remote_cli_schedule_create', args);
+    let finish!: () => void;
+    const run = vi.fn(() => new Promise<[]>(resolve => { finish = () => resolve([]); }));
+    const read = f.operations.scope({ ...f.options, readOnly: true, run });
+    try {
+      await expect(read.invoke('remote_cli_schedule_operation', { requestId: args.requestId })).rejects.toThrow('Unknown operation');
+      await expect(read.invoke('remote_cli_launch', {})).rejects.toThrow('Only schedule list');
+      const query = { requestId: 'inventory' };
+      expect(await read.invoke('remote_cli_schedule_list', query)).toMatchObject({ status: 'pending' });
+      expect(await read.invoke('remote_cli_schedule_operation', query)).toMatchObject({ status: 'pending' });
+      expect(run).toHaveBeenCalledOnce();
+      const polling = read.invoke('remote_cli_schedule_operation', query);
+      f.options.current.mockReturnValue(false);
+      finish();
+      await expect(polling).rejects.toThrow('context changed');
+    } finally { finish?.(); await read.close(); }
+  });
+
   it('passes explicit forgetting through scoped receipts and preserves unverified-native warnings', async () => {
     const f = fixture();
     const purge = vi.fn(async () => ({ status: 'complete' as const, selectedIds: ['legacy'], removedIds: [], historyRemovedIds: [],

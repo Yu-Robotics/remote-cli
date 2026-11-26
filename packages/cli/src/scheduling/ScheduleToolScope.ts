@@ -11,6 +11,7 @@ interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string
 interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; mayUseNative: boolean; result: Result; done: Promise<void> }
 interface Options {
   owner: ScheduleOwner;
+  readOnly?: boolean;
   bindingEpoch?: string;
   messageId: string;
   backend: keyof typeof HOST_SCHEDULE_CAPABILITIES;
@@ -91,6 +92,9 @@ export class ScheduleToolScope {
   constructor(private readonly options: Options, private readonly receipts: Map<string, Receipt>) {}
   async invoke(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (!this.active || !this.options.current()) throw new Error('Scheduling turn is no longer active. Use /schedule list.');
+    if (this.options.readOnly && !['remote_cli_schedule_list', 'remote_cli_schedule_capabilities', 'remote_cli_schedule_operation'].includes(name)) {
+      throw new Error('Only schedule list, capabilities and their receipts are available during AGY recovery.');
+    }
     if (!object(args)) throw new Error('Invalid scheduling arguments.');
     if (name === 'remote_cli_schedule_capabilities') {
       keys(args, []);
@@ -104,7 +108,7 @@ export class ScheduleToolScope {
     let receipt = this.receipts.get(key);
     if (name === 'remote_cli_schedule_operation') {
       keys(args, ['requestId']);
-      if (!receipt) throw new Error('Unknown operation in this user request. Use /schedule list for previous requests.');
+      if (!receipt || this.options.readOnly && receipt.sideEffect) throw new Error('Unknown operation in this user request. Use /schedule list for previous requests.');
     } else {
       // Compare the original input before relative timing is normalized again on retries.
       const digest = createHash('sha256').update(JSON.stringify([name, canonical(args)])).digest('hex');

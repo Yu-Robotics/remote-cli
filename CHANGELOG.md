@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.287] - 2026-11-26
+
+### Fixed
+- Admit the next ordinary AGY main-chat message after a confirmed idle foreground terminal, including after recovery, parallel tool failures, and unfamiliar tool results. Preserve separate checks for automation and worker reuse.
+- Allow the admitted human foreground to query its own schedule catalog during AGY recovery.
+- Preserve the original Feishu route for queued AGY recovery messages, and rejoin the original session after a settled native host exits between messages.
+
 ## [1.6.286] - 2026-11-26
 
 ### Added

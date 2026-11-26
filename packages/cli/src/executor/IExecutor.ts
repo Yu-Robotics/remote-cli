@@ -10,6 +10,10 @@ export interface AgyHumanConfirmation {
 }
 
 export interface ExecuteOptions {
+  /** Initial authenticated Feishu text, excluding retries and delegated result continuations. */
+  agyHumanMessage?: boolean;
+  /** Install read-only schedule queries after a recovered human prompt's native foreground admission. */
+  onAgyHumanPromptAdmitted?(current: () => boolean): void;
   /** Pin a host-timed foreground turn to the session captured at creation. */
   hostScheduleSessionId?: string;
   /** Resolve task text after native session restoration, immediately before dispatch.

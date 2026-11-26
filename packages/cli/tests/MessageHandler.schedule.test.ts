@@ -272,13 +272,21 @@ describe('MessageHandler schedule management and delivery', () => {
       generation: (f.handler as any).scheduleGeneration(threadId), bindingEpoch: binding.epoch });
     const before = await originalTimers();
     expect(before).toEqual(expect.arrayContaining([expect.objectContaining({ engine: 'host', state: 'active' })]));
-    const resume = vi.fn(async () => ({ success: true }));
+    await f.send('/schedule after 5m -- Other thread only', threadId === 'thread-a' ? 'thread-b' : 'thread-a');
+    let listed: { records: { id: string }[] } | undefined;
+    const resume = vi.fn(async (_prompt: string, options: import('../src/executor/IExecutor').ExecuteOptions) => {
+      options.onAgyHumanPromptAdmitted!(() => true);
+      const bridge = (f.handler as any).delegationBridges.get(threadId);
+      listed = await bridge.handler('remote_cli_schedule_list', { requestId: 'owned-list' }, 'native-call');
+      return { success: true };
+    });
     Object.assign(f.executor, { needsAgyHumanRecovery: vi.fn().mockReturnValueOnce(true), resumeAgyChat: resume });
     const humanSource = source(target);
     await f.send('Continue here', 'thread-a', { threadId: target ?? undefined, isSlashCommand: false, humanSource });
     expect(resume).toHaveBeenCalledWith('Continue here', expect.objectContaining({ onStream: expect.any(Function) }),
       expect.objectContaining({ originalMessageId: humanSource.originalMessageId, current: expect.any(Function) }));
     expect(f.responses().at(-1)).toMatchObject({ success: true, threadId: target ?? 'thread-a' });
+    expect(listed?.records.map(record => record.id).sort()).toEqual(before.map(record => record.id).sort());
     expect(await originalTimers()).toEqual(before);
     expect(JSON.stringify(f.ws.trackTask.mock.calls)).not.toContain('Continue here');
     await f.send('Ordinary follow-up', target ?? 'thread-a', { isSlashCommand: false,
@@ -303,18 +311,87 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
-  it('allows a new ordinary message to recover after a busy thread becomes idle', async () => {
+  it('rejects expired queued recovery metadata without dispatching either execution path', async () => {
     await f.bind();
     f.setBackend('agy');
     const resume = vi.fn(async () => ({ success: true }));
     Object.assign(f.executor, { needsAgyHumanRecovery: () => true, resumeAgyChat: resume });
     f.setExecutorBusy(true);
-    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: source() });
-    expect(f.responses().at(-1)).toMatchObject({ success: false, error: 'Wait for the thread to become idle, then send your message again.' });
+    await f.send('Continue after expiry', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    const confirmation = f.responses().at(-1)?.queueConfirmation;
+    expect(confirmation).toBeDefined();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 300_001);
+    f.setExecutorBusy(false);
+    await f.send('/queue confirm ' + confirmation!.id);
+    await vi.waitFor(() => expect(f.responses().at(-1)?.success).toBe(false));
+    expect(resume).not.toHaveBeenCalled();
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'thread-b'])('recovers a sourced human message through the confirmed queue exactly once on route %s', async target => {
+    await f.bind();
+    f.setBackend('agy');
+    await history(1, false);
+    await (f.handler as any).loadScheduleCatalog();
+    const threadId = target ?? 'thread-a';
+    await f.send('/schedule after 5m -- Preserve queued timer', threadId);
+    const originalTimers = () => f.handler['schedules']!.list({ ...owner(), threadId,
+      generation: (f.handler as any).scheduleGeneration(threadId), bindingEpoch: binding.epoch });
+    const before = await originalTimers();
+    let recovered = false;
+    const resume = vi.fn(async () => { recovered = true; return { success: true }; });
+    const needs = vi.fn(() => !recovered);
+    Object.assign(f.executor, { needsAgyHumanRecovery: needs, resumeAgyChat: resume });
+    f.setExecutorBusy(true);
+    const humanSource = source(target);
+    await f.send('Continue queued', 'thread-a', { threadId: target ?? undefined, isSlashCommand: false, humanSource });
+    const confirmation = f.responses().at(-1)?.queueConfirmation;
+    expect(confirmation).toBeDefined();
     expect(resume).not.toHaveBeenCalled();
     f.setExecutorBusy(false);
-    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: { ...source(), originalMessageId: 'next-event' } });
+    await f.send('/queue confirm ' + confirmation!.id, threadId);
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledOnce());
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    expect(await originalTimers()).toEqual(before);
+    expect(needs).toHaveBeenCalledWith(humanSource.originalMessageId);
+    await f.send('Plain follow-up', target ?? 'thread-a', { isSlashCommand: false,
+      humanSource: { ...source(target ?? 'thread-a'), originalMessageId: 'next-event' } });
+    expect(f.executor.execute).toHaveBeenCalledWith(expect.stringContaining('Plain follow-up'), expect.objectContaining({ agyHumanMessage: true }));
     expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it('identifies an authenticated queued message on the ordinary AGY execution path', async () => {
+    await f.bind();
+    f.setBackend('agy');
+    f.setExecutorBusy(true);
+    await f.send('Message while busy', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    const confirmation = f.responses().at(-1)?.queueConfirmation;
+    expect(confirmation).toBeDefined();
+    f.setExecutorBusy(false);
+    await f.send('/queue confirm ' + confirmation!.id);
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledWith(expect.stringContaining('Message while busy'),
+      expect.objectContaining({ agyHumanMessage: true })));
+  });
+
+  it('rejects queued recovery after the authenticated registration changes', async () => {
+    await f.bind();
+    f.setBackend('agy');
+    const resume = vi.fn(async () => ({ success: true }));
+    Object.assign(f.executor, { needsAgyHumanRecovery: () => true, resumeAgyChat: resume });
+    f.setExecutorBusy(true);
+    await f.send('Continue after reconnect', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    const confirmation = f.responses().at(-1)?.queueConfirmation;
+    expect(confirmation).toBeDefined();
+    f.setExecutorBusy(false);
+    f.disconnect();
+    await f.reconnect();
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true,
+      registrationId: 'replacement-registration', scheduleBinding: binding,
+      capabilities: { scheduleResultsV1: true, hostSchedulesV1: true } } } as any);
+    await f.send('/queue confirm ' + confirmation!.id);
+    await vi.waitFor(() => expect(f.responses().at(-1)?.success).toBe(false));
+    expect(resume).not.toHaveBeenCalled();
+    expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
   it('executes sourced ordinary text normally on other backends', async () => {

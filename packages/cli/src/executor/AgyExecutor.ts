@@ -205,10 +205,11 @@ export class AgyExecutor implements IExecutor {
       }
       throw new Error('AGY recovery selection changed.');
     }
+    if ((!this.acp || this.acp.exitedBetweenTurns) && mainGeneration && this.acpLeaseUnconfirmed
+      && !this.resumeCurrent && !Object.hasOwn(pointer, 'hostScheduleCheckpoint')) {
+      throw new AgyManualResumeScheduleSkip('required');
+    }
     if (!this.acp) {
-      if (mainGeneration && this.acpLeaseUnconfirmed && !this.resumeCurrent && !Object.hasOwn(pointer, 'hostScheduleCheckpoint')) {
-        throw new AgyManualResumeScheduleSkip('required');
-      }
       if (this.cleanHostSelection(id).hostScheduleCheckpoint.commands?.idleDenialHistory) {
         throw new Error('AGY idle denial checkpoint permits ordinary chat only.');
       }
@@ -267,6 +268,14 @@ export class AgyExecutor implements IExecutor {
     return { pointer, ino: stat.ino, dev: stat.dev, ctime: stat.ctimeNs };
   }
 
+  private verifyLiveMainSelection(id: string): void {
+    const selected = this.manualSelection(id);
+    if (selected.pointer.hostGeneration !== this.hostGeneration || selected.dev !== this.ownedPointer?.dev
+      || selected.ino !== this.ownedPointer?.ino || selected.ctime !== this.ownedPointer?.ctimeNs) {
+      throw new Error('The selected AGY conversation changed before dispatch.');
+    }
+  }
+
   private checkConfirmation(source: AgyHumanConfirmation): void {
     const now = Date.now();
     if (!source || typeof source.current !== 'function' || !source.current() || typeof source.originalMessageId !== 'string'
@@ -295,7 +304,8 @@ export class AgyExecutor implements IExecutor {
     const file = path.join(fs.realpathSync(os.homedir()), '.remote-cli', 'agy-confirmations.json');
     const key = createHash('sha256').update(originalMessageId).digest('hex');
     if (Object.hasOwn(this.readRecoveryReceipts(file, Date.now()), key)) throw new Error('This Feishu message already resumed AGY.');
-    if (this.acp || this.resumeCurrent || !this.conversationId || this.legacy || this.delegationWorker) return false;
+    if (this.acp?.needsHumanContinuation) return true;
+    if ((this.acp && !this.acp.exitedBetweenTurns) || this.resumeCurrent || !this.conversationId || this.legacy || this.delegationWorker) return false;
     const pointer = this.hostSelection(this.conversationId);
     return !Object.hasOwn(pointer, 'hostScheduleCheckpoint');
   }
@@ -372,6 +382,7 @@ export class AgyExecutor implements IExecutor {
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
       sessionId: original ?? undefined, worker: this.delegationWorker,
+      managedCoordinator: !!this.delegationConnection && this.delegationConnection.groups?.includes('delegation') !== false,
       hostScheduleChat, commandCheckpoint: savedCheckpoint?.commands, toolErrorDigest: savedCheckpoint?.toolErrorDigest,
       validatedChatLoad: !!cleanGeneration,
       consumeManualConfirmation: manual ? () => this.consumeConfirmation(manual.source) : undefined,
@@ -385,6 +396,7 @@ export class AgyExecutor implements IExecutor {
         this.hostGeneration = randomUUID();
         this.writeNativeState(this.sessionFilePath, { ...selection.pointer, hostGeneration: this.hostGeneration,
           manualResumeConsumedGeneration: this.hostGeneration });
+        this.acpLeaseUnconfirmed = true;
       } : undefined,
       beforeSessionLoad: original && (cleanGeneration || firstSetup) ? () => {
         const pointer = firstSetup ? this.hostSelection(original) : this.cleanHostSelection(original);
@@ -449,11 +461,7 @@ export class AgyExecutor implements IExecutor {
             firstManualPrompt = false;
             manual.source.current = () => false;
           }
-          const selected = this.manualSelection(original);
-          if (selected.pointer.hostGeneration !== this.hostGeneration || selected.dev !== this.ownedPointer?.dev
-            || selected.ino !== this.ownedPointer?.ino || selected.ctime !== this.ownedPointer?.ctimeNs) {
-            throw new Error('The selected AGY conversation changed before dispatch.');
-          }
+          this.verifyLiveMainSelection(original);
         }
         if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); }
       },
@@ -574,16 +582,45 @@ export class AgyExecutor implements IExecutor {
     // Copy options before awaiting startup so the confirmation cannot be redirected.
     const turn = { ...options, inactivityTimeout: options.inactivityTimeout ?? this.inactivityTimeoutMs };
     if (!message.trim() || turn.hostScheduleSessionId !== undefined || turn.resolvePrompt || turn.attachments?.length
-      || this.pendingContextSeed || this.isBusy() || this.acp || !this.conversationId || this.resumeCurrent) {
-      throw new Error('AGY recovery requires one fresh human text message on an inactive saved chat.');
+      || this.pendingContextSeed || this.isBusy() || !this.conversationId || this.resumeCurrent) {
+      throw new Error('AGY recovery requires one fresh human text message on the original idle chat.');
     }
     this.assertHostScheduleOwner(this.conversationId);
     const source = { ...confirmation };
     this.checkConfirmation(source);
+    const currentRoute = source.current;
+    const onAdmitted = turn.onAgyHumanPromptAdmitted;
+    if (onAdmitted) {
+      turn.onAgyHumanPromptAdmitted = current => onAdmitted(() => current() && currentRoute());
+    }
+    if (this.acp && !this.acp.exitedBetweenTurns) {
+      const runtime = this.acp;
+      const id = this.conversationId;
+      if (!runtime.needsHumanContinuation || runtime.sessionId !== id) throw new Error('The AGY host has no settled human continuation.');
+      this.isProcessing = true;
+      try {
+        return await runtime.execute(message, turn, () => {
+          this.assertHostScheduleOwner(id);
+          if (runtime !== this.acp) throw new Error('The live AGY host changed before dispatch.');
+          this.verifyLiveMainSelection(id);
+          this.consumeConfirmation(source);
+        });
+      } finally { this.isProcessing = false; }
+    }
     const selection = this.manualSelection(this.conversationId);
     this.transitioning = true;
     try {
       const history = agyHostScheduleHistory(this.agyHome!, this.conversationId);
+      if (this.acp) {
+        if (this.acp.sessionId !== this.conversationId || selection.pointer.hostGeneration !== this.hostGeneration
+          || selection.dev !== this.ownedPointer?.dev || selection.ino !== this.ownedPointer?.ino
+          || selection.ctime !== this.ownedPointer?.ctimeNs) throw new Error('The exited AGY host no longer owns this selection.');
+        // Keep this runtime attached until both the exact group join and hook restoration succeed.
+        await this.acp.close();
+        if (!isDeepStrictEqual(this.manualSelection(this.conversationId), selection)) throw new Error('The selected AGY conversation changed during retirement.');
+        this.checkConfirmation(source);
+        this.acp = undefined;
+      }
       const runtime = await this.runtime(false, { selection, history, source });
       let completed = false;
       try {
@@ -602,6 +639,7 @@ export class AgyExecutor implements IExecutor {
     if (this.isBusy() || this.isDestroyed) throw new Error('AGY executor is busy or destroyed.');
     const pinned = options.hostScheduleSessionId;
     if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+    if (this.acp?.exitedBetweenTurns) throw new Error('AGY exited between turns. Send a fresh Feishu message to resume the original conversation.');
     this.isProcessing = true;
     try {
       const runtime = await this.runtime();
