@@ -52,7 +52,8 @@ const AGY_HOME_SHARED_FILES = [
 ];
 const AGY_HOME_SHARED_DIRS = ['skills', 'config'];
 /** Shared login, settings, and programs inside .gemini/antigravity-cli. */
-const AGY_CLI_SHARED_FILES = ['antigravity-oauth-token', 'settings.json', 'installation_id'];
+const AGY_FILE_TOKEN = 'antigravity-oauth-token';
+const AGY_CLI_SHARED_FILES = ['settings.json', 'installation_id'];
 const AGY_CLI_SHARED_DIRS = ['bin', 'builtin', 'cache', 'updater'];
 
 /**
@@ -539,6 +540,7 @@ export class AgyExecutor implements IExecutor {
     const realCli = path.join(realGemini, 'antigravity-cli');
     const threadCli = path.join(threadGemini, 'antigravity-cli');
     fs.mkdirSync(threadCli, { recursive: true });
+    this.linkFileToken(this.agyHome!);
     for (const name of AGY_CLI_SHARED_FILES) this.linkShared(realCli, threadCli, name, 'file');
     for (const name of AGY_CLI_SHARED_DIRS) {
       if (this.delegationWorker && name === 'cache') {
@@ -546,6 +548,18 @@ export class AgyExecutor implements IExecutor {
         if (!fs.existsSync(path.join(threadCli, name))) fs.mkdirSync(path.join(threadCli, name));
       } else this.linkShared(realCli, threadCli, name, 'dir');
     }
+  }
+
+  /** Catalog previews repair only the selected thread's native file-login link. */
+  private linkFileToken(home: string): void {
+    const masterCli = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    if (!fs.statSync(path.join(masterCli, AGY_FILE_TOKEN), { throwIfNoEntry: false })?.isFile()) return;
+    const threadCli = path.join(home, '.gemini', 'antigravity-cli');
+    const homes = path.join(fs.realpathSync.native(os.homedir()), '.remote-cli', 'agy-homes');
+    if (path.relative(homes, fs.realpathSync.native(threadCli)) !== path.join(path.basename(home), '.gemini', 'antigravity-cli')) {
+      throw new Error('Cannot share AGY authentication through a redirected thread HOME.');
+    }
+    this.linkShared(masterCli, threadCli, AGY_FILE_TOKEN, 'file');
   }
 
   /**
@@ -565,12 +579,16 @@ export class AgyExecutor implements IExecutor {
         return; // lstat failed — leave the entry untouched
       }
       if (isLink) return;
-      if (name === 'oauth_creds.json' || name === 'google_accounts.json' || name === 'antigravity-oauth-token') {
+      if (name === 'oauth_creds.json' || name === 'google_accounts.json' || name === AGY_FILE_TOKEN) {
         console.warn(`[AgyExecutor] Thread-local ${name} replaced its shared link; leaving both copies untouched.`);
       }
       return;
     }
-    fs.symlinkSync(master, link, type);
+    try { fs.symlinkSync(master, link, type); }
+    catch (error) {
+      // Another catalog query or ACP startup can establish the same link first.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !fs.existsSync(link)) throw error;
+    }
   }
 
   getCurrentWorkingDirectory(): string { return this.currentWorkingDirectory; }
@@ -831,6 +849,7 @@ export class AgyExecutor implements IExecutor {
     const home = context ? path.join(os.homedir(), '.remote-cli', 'agy-homes', context.threadId) : this.agyHome;
     const env: NodeJS.ProcessEnv = { ...process.env, ...this.tokenStorageEnv };
     if (home && fs.existsSync(path.join(home, '.gemini', 'antigravity-cli'))) {
+      this.linkFileToken(home);
       env.HOME = home;
       env.USERPROFILE = home;
     }

@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.289] - 2026-11-26
+
+### Fixed
+- Restore a missing shared AGY file-login link when refreshing models for an existing thread.
+
 ## [1.6.288] - 2026-11-26
 
 ### Fixed

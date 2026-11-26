@@ -2023,7 +2023,7 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 | `/effort` | Open model-specific native effort choices for the original thread |
 | `/effort <auto|level>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
 
-The model card uses compact buttons when they allow the complete catalog to fit on one page alongside speed controls. When a model catalog spans multiple pages, the card shows the current page, the number shown and the total number of choices on the card. Use Next or Prev beside the model choices. Refresh queries the selected backend again. For an AGY main conversation, the query uses the thread’s working directory and existing AGY profile. Before that profile exists, it uses the account catalog.
+The model card uses compact buttons when they allow the complete catalog to fit on one page alongside speed controls. When a model catalog spans multiple pages, the card shows the current page, the number shown and the total number of choices on the card. Use Next or Prev beside the model choices. Refresh queries the selected backend again. For an AGY main conversation, the query uses the thread’s working directory and existing AGY profile. Before that profile exists, it uses the account catalog. With file-backed login enabled, existing threads can pick up the shared login file on model refresh.
 
 On devices where AGY should use an existing file-backed login, set `remote-cli config set executor.agy.forceFileTokenStorage true`. The CLI passes AGY's native `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=true` setting to model discovery and ACP conversations, including workers. The default preserves AGY's normal credential selection. The available models depend on the selected login.
 

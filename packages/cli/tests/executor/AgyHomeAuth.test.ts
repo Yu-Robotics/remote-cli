@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { execFile } from 'child_process';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import type { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 const fixture = vi.hoisted(() => ({ home: '' }));
+vi.mock('child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('child_process')>(), execFile: vi.fn(),
+}));
 vi.mock('os', async importOriginal => {
   const actual = await importOriginal<typeof import('os')>();
   return { ...actual, homedir: () => fixture.home, default: { ...actual, homedir: () => fixture.home } };
@@ -54,6 +58,48 @@ describe('AGY per-thread native authentication', () => {
     expect(env.HOME).toBe(path.join(fixture.home, '.remote-cli', 'agy-homes', 'synthetic-thread'));
     return path.join(env.HOME!, '.gemini', 'antigravity-cli');
   }
+
+  for (const state of ['missing', 'local']) {
+    it(`queries the original thread with its ${state} token entry`, async context => {
+      if (!requireFileSymlinks(() => context.skip())) return;
+      const home = path.join(fixture.home, '.remote-cli', 'agy-homes', 'original-thread');
+      const cli = path.join(home, '.gemini', 'antigravity-cli');
+      fs.mkdirSync(cli, { recursive: true });
+      const token = path.join(cli, 'antigravity-oauth-token');
+      fs.writeFileSync(masterToken, 'synthetic shared credential');
+      if (state === 'local') fs.writeFileSync(token, 'synthetic local credential');
+      const journal = path.join(home, '.remote-cli-agy-hooks.owner.json');
+      fs.writeFileSync(journal, 'synthetic journal');
+      fs.mkdirSync(path.join(fixture.home, '.gemini', 'config'));
+      fs.writeFileSync(path.join(masterCli, 'settings.json'), '{}');
+
+      executor = new AgyExecutor({} as DirectoryGuard, { threadId: 'preview', delegationWorker: true, forceFileTokenStorage: true });
+      vi.mocked(execFile).mockImplementation(((_command: string, args: string[], options: any, callback: any) => {
+        expect(args).toEqual(['models']);
+        expect(options.env.HOME).toBe(home);
+        expect(options.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('true');
+        expect(fs.realpathSync(token)).toBe(state === 'local' ? token : masterToken);
+        callback(null, 'synthetic-model\tSynthetic Model\n');
+      }) as any);
+      expect((await executor.listModels({ threadId: 'original-thread' }))[0].id).toBe('synthetic-model');
+      expect(fs.readFileSync(journal, 'utf8')).toBe('synthetic journal');
+      expect(fs.existsSync(path.join(home, '.gemini', 'config'))).toBe(false);
+      expect(fs.existsSync(path.join(cli, 'settings.json'))).toBe(false);
+      expect(fs.existsSync(path.join(path.dirname(home), 'preview'))).toBe(false);
+    });
+  }
+
+  it('refuses to create a token link in a redirected catalog directory', async context => {
+    if (!requireFileSymlinks(() => context.skip())) return;
+    fs.writeFileSync(masterToken, 'synthetic shared credential');
+    const gemini = path.join(fixture.home, '.remote-cli', 'agy-homes', 'synthetic-thread', '.gemini');
+    fs.mkdirSync(gemini, { recursive: true });
+    const redirect = path.join(root, 'other-directory');
+    fs.mkdirSync(redirect);
+    fs.symlinkSync(redirect, path.join(gemini, 'antigravity-cli'), 'junction');
+    await expect(executor.listModels()).rejects.toThrow('redirected thread HOME');
+    expect(fs.readdirSync(redirect)).toEqual([]);
+  });
 
   it('exposes the native login file without sharing conversation data', context => {
     if (!requireFileSymlinks(() => context.skip())) return;
