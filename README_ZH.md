@@ -894,10 +894,10 @@ DSH records created by this version retain their exact session identity before n
 CREATE, including ambiguous failures: they fence that session, not unrelated fresh
 sessions. Missing legacy attribution stays unknown. Historical AGY/DSH cleanup
 obligations without a management route do not consume the live task quota; list and
-purge remain catalog-only and retain unresolved cleanup evidence. Saved AGY ACP chat
-cannot safely resume even without a known schedule; see the explicit `/clear` limits
-above. No automatic reset, history deletion, local scheduler or surviving host service
-is used to bypass these guards.
+purge remain catalog-only and retain unresolved cleanup evidence. On CLI and Router
+1.6.286 or later, an ordinary Feishu message can resume an eligible saved AGY main
+conversation, including one missing its clean checkpoint. A timer cannot start that
+recovery. Native schedule ownership and deletion checks still apply.
 
 The schedule recovery experiment has been removed, including its admission server,
 journals, DSH controller and startup reconstruction. Native create/list/cancel,
@@ -1844,7 +1844,7 @@ Backend 选择同时支持全局模式和按线程模式：
 
 Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、OpenCode CLI、Kimi Code CLI、ZCode、Pi、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
 
-AGY is an exception to automatic continuation after backend switching: a saved main ACP or legacy selection is retained but refused until the explicit reset requirements above are satisfied.
+When switching back to AGY, send an ordinary Feishu message in the original thread to continue an eligible saved main ACP conversation. A legacy stream-json selection still requires the explicit reset described above.
 
 **AGY data separation (not a security boundary)**: each thread redirects AGY's HOME to `~/.remote-cli/agy-homes/<threadId>`. Authentication, configuration and program entries are linked from the original HOME; conversation storage is private to the thread's default lookup. Tools retain OS-user access, including access through those links, and inherit the changed HOME. This affects shell home expansion, Git/SSH configuration and caches; it is not a filesystem sandbox. Thread-local credential replacements are preserved rather than copied back to shared credentials. Existing histories are not copied or automatically migrated. Legacy selections require explicit `/clear`; saved main ACP selections remain subject to ownership refusal even without a schedule journal. Exact thread deletion remains stricter than selection reset and may refuse unconfirmed ownership. Other backends retain their existing behavior.
 

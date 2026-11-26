@@ -895,10 +895,10 @@ DSH records created by this version retain their exact session identity before n
 CREATE, including ambiguous failures: they fence that session, not unrelated fresh
 sessions. Missing legacy attribution stays unknown. Historical AGY/DSH cleanup
 obligations without a management route do not consume the live task quota; list and
-purge remain catalog-only and retain unresolved cleanup evidence. Saved AGY ACP chat
-cannot safely resume even without a known schedule; see the explicit `/clear` limits
-above. No automatic reset, history deletion, local scheduler or surviving host service
-is used to bypass these guards.
+purge remain catalog-only and retain unresolved cleanup evidence. On CLI and Router
+1.6.286 or later, an ordinary Feishu message can resume an eligible saved AGY main
+conversation, including one missing its clean checkpoint. A timer cannot start that
+recovery. Native schedule ownership and deletion checks still apply.
 
 The schedule recovery experiment has been removed, including its admission server,
 journals, DSH controller and startup reconstruction. Native create/list/cancel,
@@ -1885,7 +1885,7 @@ Backend selection supports both global and per-thread modes:
 
 The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, Pi, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
 
-AGY is an exception to automatic continuation after backend switching: a saved main ACP or legacy selection is retained but refused until the explicit reset requirements above are satisfied.
+When switching back to AGY, send an ordinary Feishu message in the original thread to continue an eligible saved main ACP conversation. A legacy stream-json selection still requires the explicit reset described above.
 
 **AGY data separation (not a security boundary)**: each thread redirects AGY's HOME to `~/.remote-cli/agy-homes/<threadId>`. Authentication, configuration and program entries are linked from the original HOME; conversation storage is private to the thread's default lookup. Tools retain OS-user access, including access through those links, and inherit the changed HOME. This affects shell home expansion, Git/SSH configuration and caches; it is not a filesystem sandbox. Thread-local credential replacements are preserved rather than copied back to shared credentials. Existing histories are not copied or automatically migrated. Legacy selections require explicit `/clear`; saved main ACP selections remain subject to ownership refusal even without a schedule journal. Exact thread deletion remains stricter than selection reset and may refuse unconfirmed ownership. Other backends retain their existing behavior.
 
