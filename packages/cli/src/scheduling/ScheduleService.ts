@@ -59,9 +59,12 @@ export interface ScheduleServiceOptions {
   directory: string;
   /** Look up deletion support for a persisted native definition. */
   cleanupFor?(input: NativeScheduleInput): NativeScheduleCleanup | undefined;
-  /** Reserve the original thread, then await admit() immediately before starting its turn. */
-  hostDispatch?(record: Readonly<ScheduleRecord>, occurrenceId: string, admit: () => Promise<boolean>):
-    Promise<HostResult | undefined>;
+  /** Queue the occurrence on its original thread when it becomes due, then await admit()
+   * immediately before starting its turn. The signal aborts only a waiting, unadmitted
+   * occurrence (cancellation, owner change or shutdown); the caller should return
+   * undefined without running it. One schedule has at most one waiting occurrence. */
+  hostDispatch?(record: Readonly<ScheduleRecord>, occurrenceId: string, admit: () => Promise<boolean>,
+    signal?: AbortSignal): Promise<HostResult | undefined>;
   /** Reject when disconnected or not delivered. Success is not an exactly-once receipt. */
   deliver: (delivery: ScheduleDelivery) => Promise<void>;
   /** For a host owner, false means a verified mismatch. Undefined defers until binding is known. */
@@ -79,6 +82,15 @@ export interface ScheduleServiceOptions {
   maxRecords?: number;
   maxPendingDeliveries?: number;
   maxOccurrencesPerSchedule?: number;
+}
+
+/** One hostDispatch call. A schedule has at most one admitted and one waiting attempt. */
+interface HostAttempt {
+  due: number;
+  admitted: boolean;
+  controller: AbortController;
+  settled: Promise<void>;
+  settle(): void;
 }
 
 interface PendingDelivery {
@@ -191,7 +203,9 @@ export class ScheduleService {
   private hostTimer?: NodeJS.Timeout;
   private hostTimerAt?: number;
   private hostStartup = 0;
-  private readonly hostAttempts = new Set<string>();
+  private readonly hostAttempts = new Map<string, HostAttempt[]>();
+  // Next cron slot of a running schedule. It is queued at its own due time.
+  private readonly hostNext = new Map<string, number>();
   private readonly hostRetryAt = new Map<string, number>();
 
   constructor(options: ScheduleServiceOptions) {
@@ -374,8 +388,37 @@ export class ScheduleService {
       record.state = 'failed';
       record.error = error;
     } else if (record.rule.kind === 'once') record.state = 'completed';
-    else this.advanceHost(record, Math.max(due, this.now()));
+    else {
+      // A later slot already queued while this one ran keeps its place in the thread queue.
+      const waiter = this.hostWaiter(record.id);
+      if (waiter && waiter.due > due) {
+        record.nextDueAt = waiter.due;
+        record.state = 'active';
+      } else this.advanceHost(record, Math.max(due, this.now()));
+    }
+    this.hostNext.delete(record.id);
+    if (record.state !== 'active') this.abortHostWaiters(record.id);
     return id;
+  }
+
+  private hostWaiter(id: string): HostAttempt | undefined {
+    return this.hostAttempts.get(id)?.find(attempt => !attempt.admitted);
+  }
+
+  private abortHostWaiters(id: string): void {
+    for (const attempt of this.hostAttempts.get(id) ?? []) if (!attempt.admitted) attempt.controller.abort();
+  }
+
+  private removeHostAttempt(id: string, attempt: HostAttempt): void {
+    const rest = (this.hostAttempts.get(id) ?? []).filter(other => other !== attempt);
+    if (rest.length) this.hostAttempts.set(id, rest);
+    else this.hostAttempts.delete(id);
+  }
+
+  /** The follow-up slot of an admitted cron run, when no occurrence is already waiting. */
+  private hostFollowUp(record: ScheduleRecord): number | undefined {
+    if (record.state !== 'running' || record.cancelRequested || this.hostWaiter(record.id)) return undefined;
+    return this.hostNext.get(record.id);
   }
 
   private cancelHost(record: ScheduleRecord): void {
@@ -383,6 +426,8 @@ export class ScheduleService {
     if (LIVE.has(record.state)) record.state = 'cancelled';
     delete record.nextDueAt;
     this.hostRetryAt.delete(record.id);
+    this.hostNext.delete(record.id);
+    this.abortHostWaiters(record.id);
     for (const delivery of this.pending.values()) if (delivery.scheduleId === record.id) delivery.afterCancellation = true;
   }
 
@@ -398,6 +443,8 @@ export class ScheduleService {
     delete record.nextDueAt;
     delete record.inFlightDueAt;
     this.hostRetryAt.delete(record.id);
+    this.hostNext.delete(record.id);
+    this.abortHostWaiters(record.id);
     const count = this.pending.size;
     this.dropPending(record.id);
     return changed || count !== this.pending.size;
@@ -423,9 +470,9 @@ export class ScheduleService {
       return true;
     }
     const missed = due < this.hostStartup;
-    if (record.inFlightDueAt === undefined && record.rule.kind === 'cron' && (missed || now - due >= 60_000)) {
-      record.lastOccurrence = { dueAt: due, status: 'skipped', error: missed
-        ? 'The slot elapsed while the scheduler was offline.' : 'The slot expired before dispatch.' };
+    // Online slots never expire: they wait in the thread queue. Offline slots are not replayed.
+    if (record.inFlightDueAt === undefined && record.rule.kind === 'cron' && missed) {
+      record.lastOccurrence = { dueAt: due, status: 'skipped', error: 'The slot elapsed while the scheduler was offline.' };
       this.advanceHost(record, Math.max(now, this.hostStartup));
       return true;
     }
@@ -443,9 +490,9 @@ export class ScheduleService {
     let earliest = Infinity;
     if (this.initialized && !this.closing && !this.fault) {
       for (const record of this.records.values()) {
-        if (record.engine !== 'host' || this.hostAttempts.has(record.id) || this.outboxFull(record.id)
-          || this.hostOwnerStatus(record) === undefined) continue;
-        const due = record.inFlightDueAt !== undefined ? 0 : record.nextDueAt;
+        if (record.engine !== 'host' || this.outboxFull(record.id) || this.hostOwnerStatus(record) === undefined) continue;
+        const due = this.hostAttempts.has(record.id) ? this.hostFollowUp(record)
+          : record.inFlightDueAt !== undefined ? 0 : record.nextDueAt;
         if (due !== undefined) earliest = Math.min(earliest, Math.max(due, this.hostRetryAt.get(record.id) ?? 0));
       }
     }
@@ -466,62 +513,98 @@ export class ScheduleService {
   private outboxFull(id: string): boolean {
     const host = this.hostCatalogIds.has(id);
     const pending = [...this.pending.values()].filter(item => this.hostCatalogIds.has(item.scheduleId) === host);
-    const reservations = [...this.hostAttempts].filter(key => this.hostCatalogIds.has(key) === host && this.records.get(key)?.state !== 'interrupted');
-    return pending.length + reservations.length >= this.maxPending;
+    let reservations = 0;
+    for (const [key, attempts] of this.hostAttempts) {
+      if (this.hostCatalogIds.has(key) === host && this.records.get(key)?.state !== 'interrupted') reservations += attempts.length;
+    }
+    return pending.length + reservations >= this.maxPending;
   }
 
   private async wakeHosts(): Promise<void> {
     const deliveries: string[] = [];
-    const ready: { record: ScheduleRecord; due: number }[] = [];
+    const ready: { record: ScheduleRecord; attempt: HostAttempt }[] = [];
     await this.serial(async () => {
       if (this.closing || this.fault) return;
       let changed = this.retireStaleHosts();
       const now = this.now();
       for (const record of this.records.values()) {
-        if (record.engine !== 'host' || this.hostAttempts.has(record.id)) continue;
-        if (this.reconcileHost(record, now, deliveries)) changed = true;
-        const due = record.nextDueAt;
+        if (record.engine !== 'host') continue;
+        const busy = this.hostAttempts.has(record.id);
+        if (!busy && this.reconcileHost(record, now, deliveries)) changed = true;
+        const due = busy ? this.hostFollowUp(record) : record.nextDueAt;
         if (due === undefined || due > now || this.hostOwnerStatus(record) !== true || (this.hostRetryAt.get(record.id) ?? 0) > now
           || this.outboxFull(record.id)) continue;
-        this.hostAttempts.add(record.id);
-        ready.push({ record, due });
+        let settle!: () => void;
+        const settled = new Promise<void>(resolve => { settle = resolve; });
+        const attempt: HostAttempt = { due, admitted: false, controller: new AbortController(), settled, settle };
+        this.hostAttempts.set(record.id, [...this.hostAttempts.get(record.id) ?? [], attempt]);
+        ready.push({ record, attempt });
       }
       if (changed) await this.persist();
       else this.armHostTimer();
     });
-    for (const { record, due } of ready) this.track(this.dispatchHost(record, due));
+    // Simultaneous wakes enter thread queues in due order.
+    ready.sort((left, right) => left.attempt.due - right.attempt.due || left.record.createdAt - right.record.createdAt
+      || (left.record.id < right.record.id ? -1 : 1));
+    for (const { record, attempt } of ready) this.track(this.dispatchHost(record, attempt));
     if (deliveries.length) await this.attemptDeliveries(deliveries);
   }
 
-  private async dispatchHost(record: ScheduleRecord, due: number): Promise<void> {
-    const eligible = () => !this.closing && !this.fault && this.records.get(record.id) === record
-      && !record.cancelRequested && record.state === 'active' && record.nextDueAt === due && this.current(record);
+  private async dispatchHost(record: ScheduleRecord, attempt: HostAttempt): Promise<void> {
+    const { due, controller } = attempt;
+    // A follow-up slot waits while an earlier occurrence of the same schedule is running.
+    const eligible = () => !this.closing && !this.fault && !controller.signal.aborted && this.records.get(record.id) === record
+      && !record.cancelRequested && this.current(record)
+      && (record.state === 'active' && record.nextDueAt === due
+        || record.state === 'running' && (record.inFlightDueAt ?? Infinity) < due && this.hostNext.get(record.id) === due);
+    const earlier = () => this.hostAttempts.get(record.id)?.find(other => other !== attempt && other.admitted);
+    const aborted = new Promise<void>(resolve => controller.signal.addEventListener('abort', () => resolve(), { once: true }));
     let open = true;
-    const admit = () => this.serial(async () => {
-      if (!open || !eligible()) return false;
-      record.state = 'running';
-      record.inFlightDueAt = due;
-      delete record.nextDueAt;
-      await this.persist();
-      if (!open || this.closing) return false;
-      const status = this.hostOwnerStatus(record);
-      if (status === true) return true;
-      // No execution authority left this callback. Keep the original slot when
-      // registration changed while the admission receipt was being written.
-      if (status === false) this.retireHost(record);
-      else {
-        delete record.inFlightDueAt;
-        record.nextDueAt = due;
-        record.state = 'active';
+    const admit = async (): Promise<boolean> => {
+      for (;;) {
+        // The thread queue admits this only after the earlier turn returned. Wait for its result to be recorded.
+        const prior = earlier();
+        if (prior) {
+          if (!open || !eligible()) return false;
+          await Promise.race([prior.settled, aborted]);
+        }
+        const outcome = await this.serial(async (): Promise<boolean | 'wait'> => {
+          if (!open || !eligible()) return false;
+          if (record.state === 'running') return earlier() ? 'wait' : false;
+          record.state = 'running';
+          record.inFlightDueAt = due;
+          delete record.nextDueAt;
+          attempt.admitted = true;
+          this.hostNext.delete(record.id);
+          if (record.rule.kind === 'cron') {
+            try { this.hostNext.set(record.id, this.hostDue(record.rule, Math.max(due, this.now()))); }
+            catch { /* finishHost records the exhausted rule. */ }
+          }
+          await this.persist();
+          if (!open || this.closing) return false;
+          const status = this.hostOwnerStatus(record);
+          if (status === true) return true;
+          // No execution authority left this callback. Keep the original slot when
+          // registration changed while the admission receipt was being written.
+          if (status === false) this.retireHost(record);
+          else {
+            delete record.inFlightDueAt;
+            record.nextDueAt = due;
+            record.state = 'active';
+            attempt.admitted = false;
+            this.hostNext.delete(record.id);
+          }
+          await this.persist();
+          return false;
+        });
+        if (outcome !== 'wait') return outcome;
       }
-      await this.persist();
-      return false;
-    });
+    };
     let result: HostResult | undefined;
     try {
       if (eligible()) {
         if (!this.options.hostDispatch) throw new Error('Host schedule dispatch is unavailable.');
-        result = await this.options.hostDispatch(structuredClone(record), `host-${due}`, admit);
+        result = await this.options.hostDispatch(structuredClone(record), `host-${due}`, admit, controller.signal);
         if (result?.success && record.inFlightDueAt !== due) throw new Error('Host dispatch completed without admission.');
         if (!result && record.inFlightDueAt === due) throw new Error('Admitted host occurrence returned no result. Its outcome is unknown.');
       }
@@ -529,23 +612,33 @@ export class ScheduleService {
       result = { success: false, error: errorText(error), ...(record.inFlightDueAt === due && { outcomeUnknown: true }) };
     }
     finally { open = false; }
-    const delivery = await this.serial(async () => {
-      this.hostAttempts.delete(record.id);
-      this.hostRetryAt.delete(record.id);
-      if (this.closing || this.fault || this.records.get(record.id) !== record) return;
-      let id: string | undefined;
-      if (this.hostOwnerStatus(record) === false) {
-        this.retireHost(record);
-        await this.persist();
-      } else if (result && (record.inFlightDueAt === due || eligible())) {
-        id = this.finishHost(record, due, result);
-        await this.persist();
-      } else {
-        if (eligible()) this.hostRetryAt.set(record.id, this.now() + HOST_BUSY_RETRY_MS);
-        this.armHostTimer();
+    let delivery: string | undefined;
+    try {
+      // An unadmitted follow-up result is applied only after the earlier occurrence finished.
+      for (let prior = earlier(); prior && !attempt.admitted && !controller.signal.aborted; prior = earlier()) {
+        await Promise.race([prior.settled, aborted]);
       }
-      return id;
-    });
+      delivery = await this.serial(async () => {
+        this.removeHostAttempt(record.id, attempt);
+        this.hostRetryAt.delete(record.id);
+        if (this.closing || this.fault || this.records.get(record.id) !== record) return;
+        let id: string | undefined;
+        if (this.hostOwnerStatus(record) === false) {
+          this.retireHost(record);
+          await this.persist();
+        } else if (result && (record.inFlightDueAt === due || eligible())) {
+          id = this.finishHost(record, due, result);
+          await this.persist();
+        } else {
+          if (eligible()) this.hostRetryAt.set(record.id, this.now() + HOST_BUSY_RETRY_MS);
+          this.armHostTimer();
+        }
+        return id;
+      });
+    } finally {
+      this.removeHostAttempt(record.id, attempt);
+      attempt.settle();
+    }
     if (delivery) await this.attemptDeliveries([delivery]);
   }
 
@@ -606,6 +699,8 @@ export class ScheduleService {
         this.records.delete(row.id);
         this.dropPending(row.id);
         this.hostRetryAt.delete(row.id);
+        this.hostNext.delete(row.id);
+        this.abortHostWaiters(row.id);
       }
       await this.persist();
       return selected.length;
@@ -1047,6 +1142,7 @@ export class ScheduleService {
     if (this.destruction) return this.destruction;
     this.closing = true;
     clearTimeout(this.hostTimer);
+    for (const id of this.hostAttempts.keys()) this.abortHostWaiters(id);
     return this.destruction = (async () => {
       await this.initialization?.catch(() => {});
       // Complete only writes already in this process's serial filesystem queue.

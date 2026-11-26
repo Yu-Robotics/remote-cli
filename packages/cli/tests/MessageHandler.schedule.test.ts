@@ -93,7 +93,7 @@ async function fixture() {
     setBackend: (value: string) => { backend = value; }, setSandbox: (value: { mode: string }) => { sandbox = value; },
     setExecutorBusy: (value: boolean) => { executorBusy = value; },
     disconnect: () => { connected = false; closeHandlers.forEach(handler => handler(1006, '')); },
-    reconnect: async (cards = false) => { connected = true; await bind(cards); },
+    reconnect: async (cards = false, newBinding = binding) => { connected = true; await bind(cards, false, newBinding); },
     scheduledResults: () => responses().filter(message => scheduledMessages.has(message.messageId)),
   };
 }
@@ -186,7 +186,8 @@ describe('MessageHandler schedule management and delivery', () => {
     const service = await (f.handler as any).initializeSchedules();
     const record = { ...owner(), bindingEpoch: binding.epoch, cwd: f.cwd, id: 'host-task', engine: 'host', backend: f.pool.getBackendKey(),
       sessionId: 'bound', prompt: 'Synthetic occurrence', rule: { kind: 'once', at: new Date().toISOString() } };
-    const dispatch = (admit = async () => true) => service.options.hostDispatch(record, 'run', admit);
+    const dispatch = (admit = async () => true, signal?: AbortSignal, occurrenceId = 'run') =>
+      service.options.hostDispatch(record, occurrenceId, admit, signal);
     return { record, dispatch, deliver: () => service.options.deliver({ schedule: record, id: 'host-task:run', occurrenceId: 'run', success: true, output: 'Synthetic result' }) };
   }
 
@@ -280,13 +281,16 @@ describe('MessageHandler schedule management and delivery', () => {
     Object.assign(f.executor, { isHostScheduleWaitingForCommand: waiting });
     const admit = vi.fn(async () => true);
     if (backend === 'agy') {
-      expect(await dispatch(admit)).toBeUndefined();
+      const run = dispatch(admit);
       expect(waiting).toHaveBeenCalledWith('bound', f.cwd);
       expect(admit).not.toHaveBeenCalled();
       expect(f.executor.execute).not.toHaveBeenCalled();
       waiting.mockReturnValue(false);
+      await f.send('/queue');
+      expect(await run).toMatchObject({ success: true });
+    } else {
+      expect(await dispatch(admit)).toMatchObject({ success: true });
     }
-    expect(await dispatch(admit)).toMatchObject({ success: true });
     expect(f.executor.execute).toHaveBeenCalledOnce();
     expect(admit).toHaveBeenCalledOnce();
     if (backend !== 'agy') expect(waiting).not.toHaveBeenCalled();
@@ -303,7 +307,10 @@ describe('MessageHandler schedule management and delivery', () => {
       return { success: true, output: 'Foreground result' };
     });
     expect(await dispatch()).toMatchObject({ success: true, output: 'Foreground result' });
-    expect(await dispatch()).toBeUndefined();
+    const controller = new AbortController();
+    const queued = dispatch(undefined, controller.signal);
+    controller.abort();
+    expect(await queued).toBeUndefined();
     expect(f.executor.execute).toHaveBeenCalledOnce();
   });
 
@@ -381,12 +388,12 @@ describe('MessageHandler schedule management and delivery', () => {
       const dispatch = vi.spyOn(service as any, 'dispatchHost');
       await service['wakeHosts']();
       expect(dispatch).toHaveBeenCalledOnce();
-      await dispatch.mock.results[0].value;
       expect(await service.list(job)).toMatchObject([{ state: 'active', nextDueAt: job.nextDueAt }]);
       expect(f.scheduledResults()).toEqual([]);
       expect(prompts).toEqual(['Initialize', 'Ordinary foreground']);
-      completeCommand();
       f.holdResultAck();
+      completeCommand();
+      await f.send('/queue');
       now.mockReturnValue(job.nextDueAt! + 2000);
       await service['wakeHosts']();
       const id = job.id + ':host-' + job.nextDueAt;
@@ -504,17 +511,36 @@ describe('MessageHandler schedule management and delivery', () => {
       scheduleId: 'host-task', bindingEpoch: binding.epoch }, output: 'Synthetic result' }]);
   });
 
-  it('defers a recurring slot for an unready original session, but stops on a known replacement', async () => {
+  it('stops a recurring slot when an idle executor rejects the session or selects a replacement', async () => {
     const { record, dispatch } = await dispatchFixture();
     Object.assign(record, { rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
     const admit = vi.fn(async () => true);
-    f.executor.checkHostScheduleSession.mockImplementationOnce(() => { throw new Error('Session still settling'); });
-    expect(await dispatch(admit)).toBeUndefined();
+    f.executor.checkHostScheduleSession.mockImplementationOnce(() => { throw new Error('Saved history is missing'); });
+    expect(await dispatch(admit)).toMatchObject({ success: false, stopSchedule: true });
     expect(admit).not.toHaveBeenCalled();
     expect(await dispatch(admit)).toMatchObject({ success: true });
     f.executor.getSessionId.mockReturnValue('replacement');
     expect(await dispatch(admit)).toMatchObject({ success: false, stopSchedule: true });
     expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('retires a stale AGY session at the head and releases the following confirmed message', async () => {
+    f.setBackend('agy');
+    const { dispatch } = await dispatchFixture();
+    const controller = new AbortController();
+    Object.assign(f.executor, { isHostScheduleWaitingForCommand: () => true });
+    const admit = vi.fn(async () => true);
+    const waiting = dispatch(admit, controller.signal);
+    await f.send('Use the current chat', 'thread-a', { isSlashCommand: false });
+    const confirmation = f.responses().at(-1).queueConfirmation;
+    await f.send('/queue confirm ' + confirmation.id);
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    f.executor.getSessionId.mockReturnValue('replacement');
+    await f.send('/queue');
+    expect(await waiting).toMatchObject({ success: false, stopSchedule: true });
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
+    expect(f.executor.execute.mock.calls[0][0]).toContain('Use the current chat');
+    expect(admit).not.toHaveBeenCalled();
   });
 
   it('preserves a returned upstream failure and marks transport loss during execution unknown', async () => {
@@ -534,17 +560,22 @@ describe('MessageHandler schedule management and delivery', () => {
       expect(f.scheduledResults()).toHaveLength(0);
     });
 
-  it.each(['busy', 'goal', 'abort', 'delegation', 'settings', 'queue'])('defers host admission during %s work', async reason => {
+  it.each(['busy', 'goal', 'abort', 'delegation', 'shared workspace', 'settings'])('holds cancellable host admission during %s work', async reason => {
     const { dispatch } = await dispatchFixture();
     const raw = f.handler as any;
     if (reason === 'busy') f.setExecutorBusy(true);
     if (reason === 'goal') raw.pendingGoalActivations.set('thread-a', { cancelled: false });
     if (reason === 'abort') raw.abortOperations.set('thread-a', Promise.resolve());
     if (reason === 'delegation') vi.spyOn(raw.delegation, 'hasActiveTasks').mockReturnValue(true);
+    if (reason === 'shared workspace') vi.spyOn(raw.delegation, 'blocksWorkspace').mockReturnValue(true);
     if (reason === 'settings') vi.spyOn(raw.settingsAdmission, 'isBlocked').mockReturnValue(true);
-    if (reason === 'queue') vi.spyOn(raw, 'hasThreadQueueState').mockReturnValue(true);
     const admit = vi.fn(async () => true);
-    expect(await dispatch(admit)).toBeUndefined();
+    const controller = new AbortController();
+    const queued = dispatch(admit, controller.signal);
+    expect(raw.hostWaiters.get('thread-a')).toHaveLength(1);
+    controller.abort();
+    expect(raw.hostWaiters.size).toBe(0);
+    expect(await queued).toBeUndefined();
     expect(admit).not.toHaveBeenCalled(); expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
@@ -560,6 +591,122 @@ describe('MessageHandler schedule management and delivery', () => {
     if (reason === 'cancelled') expect(result).toBeUndefined();
     else expect(result).toMatchObject({ success: false, error: expect.any(String) });
     expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(['scheduled', 'ordinary'])('orders due occurrences and confirmations during an active %s turn', async first => {
+    const { dispatch, record } = await dispatchFixture();
+    let release!: () => void;
+    f.executor.execute.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { success: true };
+    });
+    const ordinary = (text: string) => f.send(text, 'thread-a', { isSlashCommand: false });
+    const active = first === 'scheduled' ? dispatch() : ordinary('Active chat');
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
+    const confirm = async (text: string) => {
+      await ordinary(text);
+      const id = f.responses().at(-1)?.queueConfirmation?.id;
+      expect(id).toEqual(expect.any(String));
+      return () => f.send('/queue confirm ' + id);
+    };
+    const late = await confirm('Confirmed second');
+    await (await confirm('Confirmed first'))();
+    const admit = vi.fn(async () => true);
+    const due = dispatch(admit, undefined, 'next');
+    expect(await dispatch(admit, undefined, 'next')).toBeUndefined();
+    await late();
+    const later = dispatch(admit, undefined, 'later');
+    await f.send('/queue');
+    expect(f.responses().at(-1)?.output).toContain('Confirmed: 2; awaiting confirmation: 0');
+    expect(admit).not.toHaveBeenCalled();
+    release();
+    await Promise.all([active, due, later]);
+    expect(f.executor.execute.mock.calls.map(([prompt]) => prompt.split('\n').at(-1))).toEqual([
+      first === 'scheduled' ? record.prompt : 'Active chat', 'Confirmed first', record.prompt, 'Confirmed second', record.prompt,
+    ]);
+    expect(admit).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['same binding', 'new binding'])('rechecks a waiting occurrence on reconnect with %s', async scenario => {
+    const { dispatch } = await dispatchFixture();
+    f.setExecutorBusy(true);
+    const admit = vi.fn(async () => true);
+    const queued = dispatch(admit);
+    f.disconnect();
+    f.setExecutorBusy(false);
+    expect(admit).not.toHaveBeenCalled();
+    if (scenario === 'same binding') {
+      await f.reconnect();
+      expect(await queued).toMatchObject({ success: true });
+      expect(admit).toHaveBeenCalledOnce();
+    } else {
+      await f.reconnect(false, { ...binding, epoch: 'other' });
+      expect(await queued).toBeUndefined();
+      expect(admit).not.toHaveBeenCalled();
+    }
+  });
+
+  it('automatically drains a released shared workspace in the original order', async () => {
+    const { dispatch, record } = await dispatchFixture();
+    const blocked = vi.spyOn((f.handler as any).delegation, 'blocksWorkspace').mockReturnValue(true);
+    const run = dispatch();
+    await f.send('Chat after schedule', 'thread-a', { isSlashCommand: false });
+    await f.send('/queue confirm ' + f.responses().at(-1).queueConfirmation.id);
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    blocked.mockReturnValue(false);
+    expect(await run).toMatchObject({ success: true });
+    await vi.waitFor(() => expect(f.executor.execute.mock.calls.map(([text]) => text.split('\n').at(-1)))
+      .toEqual([record.prompt, 'Chat after schedule']));
+  });
+
+  it.each(['chat', 'schedule'])('preserves a failure pause with only a schedule behind a failed queued %s', async first => {
+    const { dispatch } = await dispatchFixture();
+    f.setExecutorBusy(true);
+    f.executor.execute.mockResolvedValueOnce({ success: false, error: 'Synthetic failure' });
+    let firstRun;
+    if (first === 'schedule') {
+      firstRun = dispatch();
+    } else {
+      await f.send('Queued chat', 'thread-a', { isSlashCommand: false });
+      await f.send('/queue confirm ' + f.responses().at(-1).queueConfirmation.id);
+    }
+    const admit = vi.fn(async () => true);
+    const next = dispatch(admit, undefined, 'next');
+    f.setExecutorBusy(false);
+    await f.send('/queue continue');
+    await vi.waitFor(() => expect((f.handler as any).pausedQueues.has('thread-a')).toBe(true));
+    await firstRun;
+    await f.send('/queue');
+    expect(f.responses().at(-1).output).toContain('Paused after a failed task');
+    expect(admit).not.toHaveBeenCalled();
+    await f.send('/queue continue');
+    expect(await next).toMatchObject({ success: true });
+    expect(admit).toHaveBeenCalledOnce();
+  });
+
+  it.each(['continue', 'clear'])('removes a cancelled head while a message queue is paused, then handles /queue %s', async action => {
+    const { dispatch, record } = await dispatchFixture();
+    f.setExecutorBusy(true);
+    const admit = vi.fn(async () => true);
+    const controller = new AbortController();
+    const cancelled = dispatch(admit, controller.signal);
+    await f.send('Queued message', 'thread-a', { isSlashCommand: false });
+    const confirmation = f.responses().at(-1).queueConfirmation;
+    await f.send('/queue confirm ' + confirmation.id);
+    const remaining = dispatch(admit, undefined, 'remaining');
+    (f.handler as any).pauseQueueAfterFailure('thread-a', 'Synthetic failure');
+    f.setExecutorBusy(false);
+    controller.abort();
+    expect(await cancelled).toBeUndefined();
+    await f.send('/queue');
+    expect(f.responses().at(-1).output).toContain('Confirmed: 1');
+    expect(admit).not.toHaveBeenCalled();
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    await f.send('/queue ' + action);
+    expect(await remaining).toMatchObject({ success: true });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(f.executor.execute.mock.calls.map(([prompt]) => prompt.split('\n').at(-1)))
+      .toEqual(action === 'clear' ? [record.prompt] : ['Queued message', record.prompt]);
   });
 
   it('rejects a different session resolved by the native transport', async () => {

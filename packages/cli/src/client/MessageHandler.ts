@@ -145,7 +145,6 @@ interface QueuedCommand {
   attachments?: Attachment[];
   openId?: string;
   binding?: DeviceBinding;
-  enqueuedAt: number;
 }
 
 interface PendingQueueConfirmation {
@@ -155,11 +154,20 @@ interface PendingQueueConfirmation {
 
 interface HostOccurrence {
   record: Readonly<ScheduleRecord>;
+  occurrenceId: string;
   cancelled: boolean;
   executor?: IExecutor;
   abort?: Promise<false | 'interrupted' | 'local-cancellation'>;
   abortBeforeDispatch?: boolean;
   abortReceipt?: string;
+}
+
+interface WaitingHostOccurrence {
+  record: Readonly<ScheduleRecord>;
+  occurrenceId: string;
+  order: number;
+  start(): void;
+  cancel(result?: HostResult): void;
 }
 
 interface ActiveThreadOperation {
@@ -216,7 +224,10 @@ export class MessageHandler {
   private notificationAdapter: FeishuNotificationAdapter;
   private machineCommands: MachineCommands;
   private pendingReplaces: Map<string, PendingReplace> = new Map();
-  private readonly threadQueues = new Map<string, QueuedCommand[]>();
+  private readonly threadQueues = new Map<string, (QueuedCommand & { order: number })[]>();
+  // Both queues draw from this sequence. Only confirmed ordinary messages appear in /queue.
+  private readonly hostWaiters = new Map<string, WaitingHostOccurrence[]>();
+  private nextQueueOrder = 0;
   private readonly nativeQueueWakeups = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly nativeOccurrenceAborts = new Map<string, Promise<boolean>>();
   private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
@@ -565,7 +576,12 @@ export class MessageHandler {
         this.delegationCardsSupported = this.settingsCardsSupported && data.capabilities?.delegationCards === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
           && data.capabilities?.delegationProgressText === true;
-        for (const threadId of this.threadQueues.keys()) void this.startNextQueuedCommand(threadId);
+        for (const threadId of new Set([...this.threadQueues.keys(), ...this.hostWaiters.keys()])) {
+          for (const waiter of [...(this.hostWaiters.get(threadId) ?? [])]) {
+            if (!this.hostBindingCurrent(waiter.record)) waiter.cancel();
+          }
+          void this.startNextQueuedCommand(threadId);
+        }
         for (const pending of this.pendingApprovalCards.values()) {
           const occurrence = this.hostOccurrences.get(pending.request.threadId);
           if (occurrence && !this.hostBindingCurrent(occurrence.record)) {
@@ -610,6 +626,7 @@ export class MessageHandler {
       || this.wsClient.hasPendingTaskResults()
       || hasRunningThread
       || hasQueuedCommands
+      || this.hostWaiters.size > 0
       || this.pendingQueueConfirmations.size > 0
       || this.pendingReplaces.size > 0
       || this.deletingThreads.size > 0
@@ -760,6 +777,7 @@ export class MessageHandler {
       // request that never acquired an operation still needs a terminal response.
       if (!sourceCurrent()) this.messageOpenIds.delete(message.messageId);
       else if (!admissionCurrent()) cancelAdmission();
+      if (this.hostWaiters.has(threadId)) void this.startNextQueuedCommand(threadId);
     }
   }
 
@@ -991,10 +1009,10 @@ export class MessageHandler {
     const threadBusy = this.nativeOccurrenceAborts.has(resolvedThreadId) || (/^\/model\s+\S/.test(settingsCommand)
       ? this.threadPool.isThreadBusy(resolvedThreadId, 'model') : this.threadPool.isThreadBusy(resolvedThreadId));
     const queuedCount = this.threadQueues.get(resolvedThreadId)?.length ?? 0;
-    if (!threadBusy && !this.hasThreadQueueState(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
+    if (!threadBusy && !this.hasWaitingWork(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
     const queuePaused = this.pausedQueues.has(resolvedThreadId);
     // An idle executor can still have a paused queue. New work must not overtake it.
-    if (threadBusy || (ordinaryMessage && (queuedCount > 0 || queuePaused))) {
+    if (threadBusy || (ordinaryMessage && (queuedCount > 0 || this.hostWaiters.has(resolvedThreadId) || queuePaused))) {
       // Allow pending replace even when busy
       const pendingKey = openId || messageId;
       if (threadBusy && this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
@@ -1859,13 +1877,14 @@ You can also use natural language commands to control Claude Code CLI.`,
     };
     this.pendingQueueConfirmations.set(id, {
       info,
-      command: { messageId, threadId, content, attachments, openId, binding: this.scheduleBinding, enqueuedAt: Date.now() },
+      command: { messageId, threadId, content, attachments, openId, binding: this.scheduleBinding },
     });
     setTimeout(() => {
       const pending = this.pendingQueueConfirmations.get(id);
       if (pending && pending.info.expiresAt <= Date.now()) {
         this.fileInbox?.release(pending.command.messageId, !this.queueAwaitingRegistration && this.queueBindingMatches(pending.command));
         this.pendingQueueConfirmations.delete(id);
+        if (this.hostWaiters.has(threadId)) void this.startNextQueuedCommand(threadId);
       }
     }, QUEUE_CONFIRMATION_TTL_MS).unref?.();
     return info;
@@ -1905,7 +1924,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       else if (remaining.length !== queue.length) this.threadQueues.set(threadId, remaining);
     }
     for (const threadId of this.pausedQueues) {
-      if (!this.hasThreadQueueState(threadId)) this.pausedQueues.delete(threadId);
+      if (!this.hasWaitingWork(threadId)) this.pausedQueues.delete(threadId);
     }
   }
 
@@ -1963,7 +1982,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
       this.fileInbox?.moveClaim(pending.command.messageId, parts[3] || pending.command.messageId);
-      queue.push({ ...pending.command, messageId: parts[3] || pending.command.messageId });
+      queue.push({ ...pending.command, messageId: parts[3] || pending.command.messageId, order: ++this.nextQueueOrder });
       this.threadQueues.set(threadId, queue);
       console.log(`[MessageHandler] Queued message ${parts[3] || pending.command.messageId} in thread ${threadId}: position=${queue.length}, paused=${this.pausedQueues.has(threadId)}`);
       this.sendResponse(messageId, threadId, {
@@ -2018,26 +2037,61 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async startNextQueuedCommand(threadId: string): Promise<void> {
-    if (this.isDestroyed || this.queueAwaitingRegistration || this.settingsAdmission.isBlocked(threadId) || this.pausedQueues.has(threadId)
-      || this.abortOperations.has(threadId) || this.nativeOccurrenceAborts.has(threadId)) return;
-    const queue = this.threadQueues.get(threadId);
-    if (!queue?.length) return;
+    if (this.isDestroyed || this.queueAwaitingRegistration) return;
+    if (this.pausedQueues.has(threadId)) {
+      if (this.hasWaitingWork(threadId)) return;
+      this.pausedQueues.delete(threadId);
+    }
+    const command = this.threadQueues.get(threadId)?.[0];
+    const host = this.hostWaiters.get(threadId)?.[0];
+    if (!command && !host) return;
     const executor = this.threadPool.getExistingExecutor(threadId);
+    if (host && (!command || host.order < command.order)) {
+      if (!this.hostBindingCurrent(host.record)) { host.cancel(); return; }
+      if (this.activeThreadOperations.has(threadId)) return;
+      if (executor?.hasUncertainShutdown?.()) {
+        host.cancel({ success: false, stopSchedule: true, error: 'Scheduled executor shutdown is unconfirmed.' });
+        return;
+      }
+      try {
+        if (this.delegation.blocksWorkspace(host.record.cwd, threadId)) {
+          this.wakeThreadQueueLater(threadId);
+          return;
+        }
+      } catch (error) {
+        host.cancel({ success: false, error: error instanceof Error ? error.message : 'Scheduled workspace is unavailable.' });
+        return;
+      }
+      if (this.settingsBusy(threadId, undefined, false) || this.settingsAdmission.isBlocked(threadId)
+        || this.scheduleManagement.has(threadId) || this.pendingGoalActivations.has(threadId)
+        || executor?.hasPendingSettingsChange?.() || executor?.hasPendingCancellation?.()
+        || executor?.hasPendingScheduleMutation?.() || executor?.isGoalRunning?.()
+        || host.record.backend === 'agy' && host.record.sessionId && executor?.getSessionId?.() === host.record.sessionId
+          && executor.getCurrentWorkingDirectory() === host.record.cwd && executor.isHostScheduleWaitingForCommand?.(host.record.sessionId, host.record.cwd)) {
+        this.wakeThreadQueueLater(threadId);
+        return;
+      }
+      host.start();
+      return;
+    }
+    if (!command) return;
+    if (this.settingsAdmission.isBlocked(threadId) || this.abortOperations.has(threadId) || this.nativeOccurrenceAborts.has(threadId)) {
+      if (host) this.wakeThreadQueueLater(threadId);
+      return;
+    }
     if (this.threadPool.isThreadBusy(threadId) || executor?.hasPendingSettingsChange?.() || executor?.hasPendingCancellation?.()) {
       // Autonomous work and late model receipts can settle without completing a handler operation.
       if (!this.activeThreadOperations.has(threadId) && !this.nativeQueueWakeups.has(threadId)
-        && (executor?.hasPendingSettingsChange?.() || executor?.hasActiveNativeScheduledOccurrence?.())) {
-        const timer = setTimeout(() => {
-          this.nativeQueueWakeups.delete(threadId);
-          void this.startNextQueuedCommand(threadId);
-        }, 1000);
-        timer.unref?.();
-        this.nativeQueueWakeups.set(threadId, timer);
+        && (host || executor?.hasPendingSettingsChange?.() || executor?.hasActiveNativeScheduledOccurrence?.())) {
+        this.wakeThreadQueueLater(threadId);
       }
       return;
     }
-    const command = queue[0];
-    if (!this.queueBindingMatches(command)) return;
+    if (!this.queueBindingMatches(command)) {
+      this.discardQueueCommands(item => !this.queueBindingMatches(item));
+      queueMicrotask(() => { void this.startNextQueuedCommand(threadId); });
+      return;
+    }
     let entered = false;
     const current = () => entered || (!this.queueAwaitingRegistration && this.queueBindingMatches(command)
       && this.threadQueues.get(threadId)?.[0] === command);
@@ -2048,7 +2102,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!waiting.length) this.threadQueues.delete(threadId);
     };
     const thread = this.threadManager.getThread(threadId);
-    if (!thread) { this.clearThreadQueue(threadId); return; }
+    if (!thread) {
+      this.clearThreadQueue(threadId);
+      for (const waiter of [...(this.hostWaiters.get(threadId) ?? [])]) waiter.cancel();
+      return;
+    }
     this.currentOpenId = command.openId;
     this.messageOpenIds.set(command.messageId, command.openId);
     this.notificationAdapter.setCurrentOpenId(command.openId);
@@ -2096,14 +2154,25 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
+  private wakeThreadQueueLater(threadId: string): void {
+    if (this.nativeQueueWakeups.has(threadId)) return;
+    const timer = setTimeout(() => {
+      this.nativeQueueWakeups.delete(threadId);
+      void this.startNextQueuedCommand(threadId);
+    }, 1000);
+    timer.unref?.();
+    this.nativeQueueWakeups.set(threadId, timer);
+  }
+
   private pauseQueueAfterFailure(threadId: string, error: string): string {
     this.removeExpiredQueueConfirmations();
-    if (this.abortOperations.has(threadId) || !this.hasThreadQueueState(threadId)) return error;
+    if (this.abortOperations.has(threadId) || !this.hasWaitingWork(threadId)) return error;
     this.pausedQueues.add(threadId);
     const count = this.threadQueues.get(threadId)?.length ?? 0;
     const pending = Array.from(this.pendingQueueConfirmations.values()).filter((item) => item.info.threadId === threadId).length;
     console.warn(`[MessageHandler] Queue paused in thread ${threadId}: confirmed=${count}, awaiting_confirmation=${pending}`);
-    return `${error}\n\n⏸️ Queue paused after a failed task. Waiting: ${count} confirmed, ${pending} awaiting confirmation. Use /queue continue to resume, or /queue clear to discard pending messages.`;
+    const scheduled = this.hostWaiters.get(threadId)?.length ?? 0;
+    return `${error}\n\n⏸️ Queue paused after a failed task. Waiting: ${count} confirmed, ${pending} awaiting confirmation${scheduled ? `, ${scheduled} scheduled` : ''}. Use /queue continue to resume, or /queue clear to discard pending messages.`;
   }
 
   private cancelThreadOperation(threadId: string,
@@ -2136,6 +2205,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.threadPool.setThreadBusy(threadId, false);
     active.resolveDone();
     return true;
+  }
+
+  private hasWaitingWork(threadId: string): boolean {
+    return this.hostWaiters.has(threadId) || this.hasThreadQueueState(threadId);
   }
 
   private hasThreadQueueState(threadId: string): boolean {
@@ -3820,7 +3893,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!directory) throw new Error('Local schedule storage is unavailable.');
       const service = new ScheduleService({
         directory,
-        hostDispatch: (record, occurrenceId, admit) => this.dispatchHostOccurrence(record, occurrenceId, admit),
+        hostDispatch: (record, occurrenceId, admit, signal?: AbortSignal) => this.dispatchHostOccurrence(record, occurrenceId, admit, signal),
         isNativeMutationPending: owner => this.threadPool.getExistingExecutor(owner.threadId)?.hasPendingScheduleMutation?.() ?? false,
         withPurgeVerification: (record, context, accept) => verifySchedulePurge(record,
           this.schedulePurgeHosts.get(record.threadId), context.isCurrent, accept),
@@ -3854,16 +3927,47 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async dispatchHostOccurrence(record: Readonly<ScheduleRecord>, occurrenceId: string,
-    admit: () => Promise<boolean>): Promise<HostResult | undefined> {
+    admit: () => Promise<boolean>, signal?: AbortSignal): Promise<HostResult | undefined> {
+    const { threadId } = record;
+    if (this.isDestroyed || signal?.aborted || !this.hostBindingCurrent(record)) return undefined;
+    const active = this.hostOccurrences.get(threadId);
+    const queue = this.hostWaiters.get(threadId) ?? [];
+    if (active?.record.id === record.id && active.occurrenceId === occurrenceId
+      || queue.some(item => item.record.id === record.id && item.occurrenceId === occurrenceId)) return undefined;
+    return new Promise((resolve, reject) => {
+      const remove = () => {
+        signal?.removeEventListener('abort', abort);
+        queue.splice(queue.indexOf(waiter), 1);
+        if (!queue.length) this.hostWaiters.delete(threadId);
+      };
+      const abort = () => waiter.cancel();
+      const waiter: WaitingHostOccurrence = {
+        record, occurrenceId, order: ++this.nextQueueOrder,
+        start: () => {
+          remove();
+          this.runHostOccurrence(record, occurrenceId, admit, signal).then(resolve, reject)
+            .finally(() => { void this.startNextQueuedCommand(threadId); });
+        },
+        cancel: result => {
+          remove();
+          resolve(result);
+          queueMicrotask(() => { void this.startNextQueuedCommand(threadId); });
+        },
+      };
+      queue.push(waiter);
+      this.hostWaiters.set(threadId, queue);
+      signal?.addEventListener('abort', abort, { once: true });
+      void this.startNextQueuedCommand(threadId);
+    });
+  }
+
+  private async runHostOccurrence(record: Readonly<ScheduleRecord>, occurrenceId: string,
+    admit: () => Promise<boolean>, signal?: AbortSignal): Promise<HostResult | undefined> {
     const { threadId, openId, sessionId, cwd } = record;
-    if (!this.scheduleBinding || !this.wsClient.isConnected()) return undefined;
-    if (this.settingsBusy(threadId) || this.settingsAdmission.isBlocked(threadId)
-      || this.scheduleManagement.has(threadId) || this.activeThreadOperations.has(threadId)
-      || this.pendingGoalActivations.has(threadId)) return undefined;
     const messageId = `${record.id}:${occurrenceId}`;
     return this.settingsAdmission.command(threadId, messageId, async () => {
       const token = this.beginThreadOperation(threadId);
-      const occurrence: HostOccurrence = { record, cancelled: false };
+      const occurrence: HostOccurrence = { record, occurrenceId, cancelled: false };
       let stopSchedule = false;
       let executionStarted = false;
       this.hostOccurrences.set(threadId, occurrence);
@@ -3887,7 +3991,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           }
         };
         checkOwner();
-        if (!sessionId) throw new Error('Scheduled task has no native conversation identity.');
+        if (!sessionId) { stopSchedule = true; throw new Error('Scheduled task has no native conversation identity.'); }
         const executor = this.threadPool.getExecutor(threadId);
         if (executor.hasPendingCancellation?.() || executor.hasPendingScheduleMutation?.()
           || executor.hasPendingSettingsChange?.() || executor.isGoalRunning?.() || executor.isBusy?.()) return undefined;
@@ -3896,24 +4000,21 @@ You can also use natural language commands to control Claude Code CLI.`,
           if (this.threadPool.getExistingExecutor(threadId) !== executor) throw new Error('Scheduled executor changed.');
           if (allowPendingCommand && record.backend === 'agy' && executor.getSessionId?.() === sessionId
             && executor.getCurrentWorkingDirectory() === cwd && executor.isHostScheduleWaitingForCommand?.(sessionId, cwd)) return false;
-          const actualSession = executor.getSessionId?.();
-          if (actualSession && actualSession !== sessionId) stopSchedule = true;
           try { this.checkHostSession(executor, sessionId, cwd); }
           catch (error) {
-            if (allowPendingCommand && !allowDisconnectedResult && !stopSchedule && record.rule.kind === 'cron') return false;
+            stopSchedule = true;
             throw error;
           }
           return true;
         };
         if (!check(false, true)) return undefined;
         assertWorkingDirectoryExists(cwd);
-        if (this.delegation.blocksWorkspace(cwd, threadId)) return undefined;
         await this.delegation.assertExecutionSafe(cwd, threadId);
         if (!check(false, true)) return undefined;
-        if (occurrence.cancelled || !await admit()) return undefined;
+        if (occurrence.cancelled || signal?.aborted || !await admit()) return undefined;
         const beforePrompt = () => {
           check();
-          if (occurrence.cancelled) throw new Error('Scheduled occurrence was cancelled before prompt dispatch.');
+          if (occurrence.cancelled || signal?.aborted) throw new Error('Scheduled occurrence was cancelled before prompt dispatch.');
         };
         beforePrompt();
         if (occurrence.abortBeforeDispatch) {
@@ -3967,7 +4068,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
         // Prefer the public display stream, but preserve the executor's final
         // output when a backend only returns its answer at turn completion.
-        return { success: result.success, output: display || result.output, error: result.error,
+        const error = !result.success && this.hostBindingCurrent(record)
+          ? this.pauseQueueAfterFailure(threadId, result.error || 'Scheduled execution failed.') : result.error;
+        return { success: result.success, output: display || result.output, error,
           ...('outcomeUnknown' in result && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : 'Scheduled execution failed.',
@@ -3979,7 +4082,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         this.messageOpenIds.delete(messageId);
         if (this.hostOccurrences.get(threadId) === occurrence) this.hostOccurrences.delete(threadId);
         this.cancelledOperations.delete(token);
-        if (this.finishThreadOperation(threadId, token) && !this.isDestroyed) void this.startNextQueuedCommand(threadId);
+        this.finishThreadOperation(threadId, token);
       }
     }, true);
   }
@@ -4638,6 +4741,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   async destroy(): Promise<void> {
     this.isDestroyed = true;
+    for (const waiters of this.hostWaiters.values()) for (const waiter of [...waiters]) waiter.cancel();
     for (const timer of this.nativeQueueWakeups.values()) clearTimeout(timer);
     this.nativeQueueWakeups.clear();
     if (this.deletingThreads.size) await Promise.allSettled(this.deletingThreads.values());

@@ -371,6 +371,24 @@ async function cleanup(root: string, f?: Awaited<ReturnType<typeof fixture>>) {
   }
 }
 
+async function confirmFollowUp(h: Awaited<ReturnType<typeof fixture>>) {
+  const { receiver, messageId } = await h.sendText(followUp);
+  const cardId = `card-${messageId}`;
+  const confirmation = await vi.waitFor(() => {
+    const info = h.feishu.finalizeStreamingMessage.mock.calls.find(([card]) => card === cardId)?.[8];
+    expect(info?.threadId).toBe(h.thread.id);
+    return info!;
+  }, wait);
+  await vi.waitFor(() => expect(h.cardRoute(cardId)).toMatchObject({ queueId: confirmation.id }), wait);
+  vi.spyOn(receiver['client'].im.message, 'patch').mockResolvedValue({ code: 0 });
+  expect(await receiver.sendQueueActionFromCardAction(openId, 'confirm', confirmation.id, h.thread.id, cardId)).toBe('sent');
+  await vi.waitFor(async () => {
+    const queue = (await h.command('/queue')).output;
+    expect(queue).toContain('awaiting confirmation: 0');
+    expect(queue).toContain(followUp);
+  }, wait);
+}
+
 async function advanceTo(timestamp: number) {
   const remaining = timestamp - Date.now();
   expect(remaining).toBeGreaterThan(0);
@@ -501,6 +519,50 @@ describe('Host-timed scheduled turns over the local Router', () => {
     ]);
     expect(JSON.parse(await readFile(pointer, 'utf8')).id).toBe(h.sessionId);
   }, 15_000);
+
+  it('runs each due schedule once in FIFO order around a confirmed chat after a long wait', async () => {
+    const h = f = await fixture(root, 'codex');
+    expect(await h.selectThread()).toBe(true);
+    const first = 'First scheduled report';
+    const second = 'Second scheduled report';
+    await h.command('/schedule cron "1-5 8 * * *" --tz UTC -- ' + first);
+    await h.command('/schedule cron "2-5 8 * * *" --tz UTC -- ' + second);
+    const reply = h.holdReply();
+    await h.sendText('Hold the thread');
+    await vi.waitFor(() => expect(h.turns).toHaveLength(1), wait);
+    await advanceTo(hour + minute);
+
+    await confirmFollowUp(h);
+
+    await advanceTo(hour + 6 * minute);
+    expect(h.turns).toHaveLength(1);
+    reply.release();
+    await vi.waitFor(() => expect(h.turns.map(turn => turn.prompt)).toEqual([
+      expect.stringContaining('Hold the thread'), first, expect.stringContaining(followUp), second,
+    ]), wait);
+    await vi.waitFor(() => expect(h.resultAttempts).toHaveLength(2), wait);
+    expect(h.turns.every(turn => turn.sessionId === h.sessionId)).toBe(true);
+  });
+
+  it('keeps one follow-up at its due position while a recurring run is executing', async () => {
+    const h = f = await fixture(root, 'codex');
+    expect(await h.selectThread()).toBe(true);
+    const recurring = await h.create('cron "1-5 8 * * *" --tz UTC');
+    const reply = h.holdReply();
+    await advanceTo(hour + minute);
+    await vi.waitFor(() => expect(h.turns).toHaveLength(1), wait);
+    await advanceTo(hour + 2 * minute);
+    await confirmFollowUp(h);
+    await advanceTo(hour + 6 * minute);
+    expect(h.turns).toHaveLength(1);
+    reply.release();
+    await vi.waitFor(() => expect(h.turns.map(turn => turn.prompt)).toEqual([
+      task, task, expect.stringContaining(followUp),
+    ]), wait);
+    await vi.waitFor(() => expect(h.resultAttempts).toEqual([
+      `${recurring}:host-${hour + minute}`, `${recurring}:host-${hour + 2 * minute}`,
+    ]), wait);
+  });
 
   it('preserves a naturally completed occurrence when executor abort also returns true', async () => {
     const h = f = await fixture(root, 'claude');

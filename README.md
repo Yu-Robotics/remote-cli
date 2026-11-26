@@ -575,9 +575,13 @@ requires the original thread and a backend that can safely use its conversation.
 If the CLI cannot tell whether a prompt reached the backend, it does not send
 that occurrence again.
 
-Each thread runs one scheduled or foreground request at a time. While the CLI
-stays online, a due one-shot waits for the thread to become available. A cron
-occurrence that is still waiting one minute after its scheduled time is skipped.
+Each thread runs one request at a time. While the CLI stays online, due tasks
+join the queue on their original thread alongside confirmed chat messages.
+Queue time does not count toward the execution timeout. Different schedules
+each keep their place. If the same cron fires again while a run is waiting,
+the waiting run covers those firings. At most one further run can wait behind
+an executing run of the same schedule. If a queued turn fails and pauses the
+thread queue, use `/queue continue` to resume the waiting work.
 When an occurrence finishes, its owner receives a scheduled result card in the
 original Feishu thread with a task preview and the final output or error.
 

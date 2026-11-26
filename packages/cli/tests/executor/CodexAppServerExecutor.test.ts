@@ -1591,6 +1591,7 @@ describe('CodexAppServerExecutor', () => {
         nativeQueueWakeups: new Map(),
         activeThreadOperations: new Map(),
         threadQueues: new Map([[threadId, queue]]),
+        hostWaiters: new Map(),
         threadManager: manager,
         messageOpenIds: new Map(),
         notificationAdapter: { setCurrentOpenId: vi.fn() },

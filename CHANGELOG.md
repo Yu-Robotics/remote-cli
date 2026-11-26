@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.285] - 2026-11-26
+
+### Changed
+- Queue online scheduled runs on their original thread in order with confirmed chat. Busy threads can drain overdue runs without the former one-minute cron expiry, with at most one waiting run per schedule.
+
 ## [1.6.284] - 2026-11-25
 
 ### Fixed

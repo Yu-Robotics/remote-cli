@@ -5,7 +5,7 @@ import path from 'node:path';
 import { isMainThread } from 'node:worker_threads';
 import { HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
 import type { HostScheduleInput, NativeScheduleInput, ScheduleDelivery, ScheduleOwner, ScheduleRecord } from '../src/scheduling/types';
-import type { ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
+import type { HostResult, ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
 
 // Keep real filesystem operations, with configurable exports for the write barrier test.
 vi.mock('node:fs/promises', async importOriginal => ({
@@ -487,6 +487,182 @@ describe('ScheduleService', () => {
       await tick(1000);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
       expect(dispatch.mock.calls[0][1]).toEqual(dispatch.mock.calls[1][1]);
+    });
+
+    describe('thread-queued occurrences', () => {
+      type Call = { id: string; record: ScheduleRecord; admit: () => Promise<boolean>; signal?: AbortSignal;
+        finish: (result: HostResult | undefined) => void };
+      /** Models a thread FIFO: hostDispatch enqueues at due time and settles only when the caller finishes it. */
+      const queue = () => {
+        const calls: Call[] = [];
+        const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>((record, id, admit, signal) =>
+          new Promise(finish => { calls.push({ id, record, admit, signal, finish }); }));
+        return { calls, dispatch };
+      };
+      const slot = (n: number) => `host-${now + n * interval}`;
+      const start = async (options: Partial<ScheduleServiceOptions> = {}) => {
+        const { calls, dispatch } = queue();
+        const service = await run(dispatch, options);
+        await service.create(owner, hostInput('cron', true));
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(1));
+        return { calls, dispatch, service };
+      };
+
+      it('keeps a due cron occurrence queued past later slots without expiry and resumes at the next real slot', async () => {
+        const { calls, service } = await start();
+        expect(calls[0]).toMatchObject({ id: slot(1), signal: expect.objectContaining({ aborted: false }) });
+        await tick(3 * interval);
+        expect(calls).toHaveLength(1);
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: now + interval });
+        expect(await calls[0].admit()).toBe(true);
+        calls[0].finish({ success: true, output: 'Waited behind ordinary messages' });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+        expect(deliver.mock.calls[0][0]).toMatchObject({ occurrenceId: slot(1), success: true });
+        const [row] = await service.list(owner);
+        expect(row).toMatchObject({ state: 'active', nextDueAt: now + 5 * interval, lastOccurrence: { dueAt: now + interval, status: 'succeeded' } });
+        expect(calls).toHaveLength(1);
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        expect(calls[1].id).toBe(slot(5));
+      });
+
+      it('queues one follow-up at its own due time while a run continues and admits it after that result', async () => {
+        const { calls, service } = await start();
+        expect(await calls[0].admit()).toBe(true);
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        expect(calls[1]).toMatchObject({ id: slot(2), signal: expect.objectContaining({ aborted: false }) });
+        // The thread may start the follow-up as soon as the earlier turn returns, before its result is recorded.
+        let admitted: boolean | undefined;
+        const second = calls[1].admit().then(value => admitted = value);
+        await tick(2 * interval);
+        expect(calls).toHaveLength(2);
+        expect(admitted).toBeUndefined();
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'running', inFlightDueAt: now + interval });
+        calls[0].finish({ success: true, output: 'First' });
+        expect(await second).toBe(true);
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'running', inFlightDueAt: now + 2 * interval,
+          lastOccurrence: { dueAt: now + interval, status: 'succeeded' } });
+        calls[1].finish({ success: true, output: 'Second' });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+        expect(deliver.mock.calls.map(([delivery]) => delivery.occurrenceId)).toEqual([slot(1), slot(2)]);
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: now + 5 * interval });
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        expect(calls[2].id).toBe(slot(5));
+      });
+
+      it('applies an unadmitted follow-up result only after the earlier run is recorded', async () => {
+        const { calls, service } = await start();
+        expect(await calls[0].admit()).toBe(true);
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        calls[1].finish(undefined);
+        await tick(10);
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'running', inFlightDueAt: now + interval });
+        calls[0].finish({ success: true });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: now + 2 * interval });
+        await tick(1000);
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        expect(calls[2].id).toBe(slot(2));
+        expect(await calls[2].admit()).toBe(true);
+        calls[2].finish({ success: true });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+        expect(deliver.mock.calls[1][0].occurrenceId).toBe(slot(2));
+      });
+
+      it.each(['cancel', 'owner change', 'shutdown'])('aborts only a waiting follow-up after %s', async barrier => {
+        const { calls, service } = await start();
+        expect(await calls[0].admit()).toBe(true);
+        await tick(interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        if (barrier === 'cancel') await service.cancel(owner, 'cron');
+        if (barrier === 'owner change') { current.mockReturnValue(false); await service.retryDeliveries(); }
+        if (barrier === 'shutdown') await service.destroy();
+        expect(calls[1].signal?.aborted).toBe(true);
+        expect(calls[0].signal?.aborted).toBe(false);
+        expect(await calls[1].admit()).toBe(false);
+        calls[1].finish(undefined);
+        calls[0].finish({ success: true, output: 'Admitted before ' + barrier });
+        await tick(3 * interval);
+        expect(calls).toHaveLength(2);
+        if (barrier === 'cancel') {
+          await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+          expect(deliver.mock.calls[0][0]).toMatchObject({ occurrenceId: slot(1), schedule: { state: 'cancelled' } });
+          await vi.waitFor(() => expect(service.canRestartWithoutActiveWork()).toBe(true));
+        } else expect(deliver).not.toHaveBeenCalled();
+      });
+
+      it('aborts a first waiting occurrence on cancellation and frees its schedule', async () => {
+        const { calls, service } = await start();
+        await service.cancel(owner, 'cron');
+        expect(calls[0].signal?.aborted).toBe(true);
+        expect(await calls[0].admit()).toBe(false);
+        calls[0].finish(undefined);
+        await vi.waitFor(() => expect(service.canRestartWithoutActiveWork()).toBe(true));
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'cancelled' });
+        expect(deliver).not.toHaveBeenCalled();
+      });
+
+      it.each(['running', 'linked'])('never replays a waiting follow-up after restart (%s)', async stage => {
+        const { calls, dispatch } = queue();
+        let service = await run(dispatch);
+        await service.create(owner, hostInput('cron', true));
+        await tick(interval); await vi.waitFor(() => expect(calls).toHaveLength(1));
+        expect(await calls[0].admit()).toBe(true);
+        await tick(interval); await vi.waitFor(() => expect(calls).toHaveLength(2));
+        if (stage === 'linked') {
+          calls[0].finish({ success: true });
+          await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+          expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: now + 2 * interval });
+        }
+        await service.destroy();
+        expect(calls[1].signal?.aborted).toBe(true);
+        clock += 1000;
+        service = await run(dispatch);
+        await service.retryDeliveries();
+        const [row] = await service.list(owner);
+        expect(row).toMatchObject({ state: 'active', nextDueAt: now + 3 * interval, lastOccurrence: stage === 'running'
+          ? { dueAt: now + interval, status: 'unknown' } : { dueAt: now + 2 * interval, status: 'skipped', error: expect.stringContaining('offline') } });
+        expect(calls).toHaveLength(2);
+        await tick(interval - 1000);
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        expect(calls[2].id).toBe(slot(3));
+      });
+
+      it('does not reserve a follow-up beyond the outbox limit', async () => {
+        const { calls, service } = await start({ maxPendingDeliveries: 1 });
+        expect(await calls[0].admit()).toBe(true);
+        await tick(2 * interval);
+        expect(calls).toHaveLength(1);
+        calls[0].finish({ success: true });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+        expect((await service.list(owner))[0]).toMatchObject({ state: 'active', nextDueAt: now + 4 * interval });
+      });
+
+      it('keeps distinct schedules independent and enters simultaneous wakes in due order', async () => {
+        const { calls, dispatch } = queue();
+        const service = await run(dispatch);
+        await service.create(owner, { ...hostInput('late'), rule: { kind: 'once', at: new Date(now + 2 * interval).toISOString() } });
+        await service.create(owner, hostInput('early'));
+        await service.create(owner, hostInput('cron', true));
+        await tick(2 * interval);
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        // Due order first; equal slots fall back to creation time, then ID.
+        expect(calls.map(call => [call.record.id, call.id])).toEqual([['cron', slot(1)], ['early', slot(1)], ['late', slot(2)]]);
+        // The cron occurrence keeps waiting; other schedules still run and finish.
+        expect(await calls[1].admit()).toBe(true);
+        calls[1].finish({ success: true });
+        expect(await calls[2].admit()).toBe(true);
+        calls[2].finish({ success: true });
+        await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+        expect(deliver.mock.calls.map(([delivery]) => delivery.schedule.id)).toEqual(['early', 'late']);
+        await tick(interval);
+        expect(calls).toHaveLength(3);
+        expect((await service.list(owner)).find(row => row.id === 'cron')).toMatchObject({ state: 'active', nextDueAt: now + interval });
+      });
     });
 
     it('keeps a historical v7 failed cron stopped without inventing a last outcome', async () => {
