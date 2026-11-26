@@ -3,11 +3,12 @@ import { BindingCode, DeviceBinding, UserBinding, LegacyUserBinding } from '../t
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { reconcileCardThreads, validCardThread, type CardThreadAssociation, type CardThreadState } from './CardThreadState';
 
 interface StoreData {
   version: number;
+  agyConfirmations?: { updatedAt: number; receipts: Record<string, number> };
   cardThreads?: CardThreadState;
   bindingCodes: Record<string, BindingCode>;
   userBindings: Record<string, UserBinding>;
@@ -185,6 +186,33 @@ export class JsonStore {
     };
     await this.commitImmediate(() => migrated);
     console.log(`[JsonStore] Migration complete. Migrated ${Object.keys(newUserBindings).length} user(s).`);
+  }
+
+  /** A peer or selected device may change between Feishu deliveries. A downgrade
+   * must never turn a previously claimed event into an ordinary prompt. */
+  mayForwardUnclaimedHumanMessage(id: string, createdAt: number): boolean {
+    this.assertReconciled();
+    const ledger = this.data.agyConfirmations;
+    if (!ledger) return true;
+    return createdAt > ledger.updatedAt - 300_000 && !Object.hasOwn(ledger.receipts, createHash('sha256').update(id).digest('hex'));
+  }
+
+  async consumeAgyConfirmation(id: string, createdAt: number): Promise<void> {
+    await this.commitQueued(current => {
+      const now = Date.now();
+      const previous = current.agyConfirmations;
+      if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(id) || !Number.isSafeInteger(createdAt) || createdAt > now || createdAt <= now - 300_000
+        || previous !== undefined && (!previous || !Number.isSafeInteger(previous.updatedAt) || previous.updatedAt > now
+          || !isRecord(previous.receipts) || Object.entries(previous.receipts).some(([key, time]) =>
+            !/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(time) || time > previous.updatedAt))) {
+        throw new Error('The AGY confirmation is invalid or expired.');
+      }
+      const receipts = Object.fromEntries(Object.entries(previous?.receipts ?? {}).filter(([, time]) => time > now - 300_000));
+      const key = createHash('sha256').update(id).digest('hex');
+      if (Object.hasOwn(receipts, key) || Object.keys(receipts).length >= 4096) throw new Error('This Feishu message was already claimed or message receipt storage is full.');
+      receipts[key] = createdAt;
+      return { ...current, agyConfirmations: { updatedAt: now, receipts } };
+    });
   }
 
   async setBindingCode(code: string, bindingCode: BindingCode): Promise<void> {
@@ -593,7 +621,8 @@ export class JsonStore {
   }
 
   async clear(): Promise<void> {
-    await this.scheduleSave(() => this.emptyData());
+    await this.scheduleSave(current => ({ ...this.emptyData(),
+      ...(current.agyConfirmations && { agyConfirmations: current.agyConfirmations }) }));
   }
 
   getStats(): { bindingCodes: number; userBindings: number; devices: number } {

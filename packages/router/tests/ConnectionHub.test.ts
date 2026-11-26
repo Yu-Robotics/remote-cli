@@ -26,6 +26,26 @@ describe('ConnectionHub', () => {
   });
   afterEach(() => { vi.useRealTimers(); });
 
+  it('drops the authenticated route on socket reuse, replacement, and disconnect', () => {
+    hub.registerConnection('device', mockWs);
+    hub.setAuthenticatedRoute('device', mockWs, 'owner', 'first');
+    expect(hub.getAuthenticatedRoute('device')?.registrationId).toBe('first');
+    hub.registerConnection('device', mockWs);
+    expect(hub.getAuthenticatedRoute('device')).toBeUndefined();
+    const replacement = { ...mockWs };
+    hub.registerConnection('device', replacement);
+    hub.setAuthenticatedRoute('device', mockWs, 'owner', 'stale');
+    expect(hub.getAuthenticatedRoute('device')).toBeUndefined();
+    hub.setAuthenticatedRoute('device', replacement, 'owner', 'second');
+    hub.registerConnection('another', replacement);
+    hub.setAuthenticatedRoute('another', replacement, 'another-owner', 'third');
+    expect(hub.getAuthenticatedRoute('device')).toBeUndefined();
+    hub.unregisterConnection('device', replacement);
+    expect(hub.getAuthenticatedRoute('another')?.registrationId).toBe('third');
+    hub.unregisterConnection('another', replacement);
+    expect(hub.getAuthenticatedRoute('another')).toBeUndefined();
+  });
+
   describe('registerConnection', () => {
     it('ignores a delayed close from a replaced socket', () => {
       const oldWs = { ...mockWs, close: vi.fn() };
@@ -69,6 +89,16 @@ describe('ConnectionHub', () => {
       expect(lastActive).toBeGreaterThanOrEqual(before);
       expect(lastActive).toBeLessThanOrEqual(Date.now());
     });
+  });
+
+  it('restricts manual AGY recovery to the current capable connection', () => {
+    hub.registerConnection('device', mockWs, { agyHumanRecoveryV1: true });
+    expect(hub.supportsAgyHumanRecovery('device')).toBe(true);
+    hub.registerConnection('device', mockWs);
+    expect(hub.supportsAgyHumanRecovery('device')).toBe(false);
+    hub.registerConnection('device', mockWs, { agyHumanRecoveryV1: true });
+    hub.unregisterConnection('device');
+    expect(hub.supportsAgyHumanRecovery('device')).toBe(false);
   });
 
   it('tracks queue-start support per connection and resets it for older clients', () => {

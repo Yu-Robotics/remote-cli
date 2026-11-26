@@ -440,6 +440,35 @@ describe('ScheduleService', () => {
       expect((await service.list(owner))[0].nextDueAt).toBeUndefined();
     });
 
+    it('persists unadmitted AGY skips for cron and one-shot timers without replay after restart', async () => {
+      const reason = 'Scheduled occurrence skipped without execution. Manual AGY recovery is required.';
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, id, admit) => {
+        if (id === `host-${now + interval}`) return { success: false, skippedBeforeAdmission: true, error: reason };
+        if (await admit()) return { success: true };
+      });
+      let service = await run(dispatch);
+      for (const cron of [false, true]) {
+        await service.create(owner, { ...hostInput(cron ? 'cron' : 'once', cron), backend: 'agy' });
+      }
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+      for (const [delivery] of deliver.mock.calls) expect(delivery).toMatchObject({ success: false, error: reason });
+      await service.destroy();
+      service = await run(dispatch);
+      const rows = await service.list(owner);
+      for (const row of rows) {
+        expect(row.lastOccurrence).toEqual({ dueAt: clock, status: 'skipped', error: reason });
+        expect(row.completedOccurrences).toEqual([`host-${clock}`]);
+        expect(row.inFlightDueAt).toBeUndefined();
+        expect(row.state).toBe(row.id === 'once' ? 'failed' : 'active');
+        expect(row.nextDueAt).toBe(row.id === 'once' ? undefined : clock + interval);
+      }
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(3));
+      expect(dispatch.mock.calls.map(([row, id]) => [row.id, id]).at(-1)).toEqual(['cron', `host-${clock}`]);
+      expect(dispatch).toHaveBeenCalledTimes(3);
+    });
+
     it('records two failed cron slots and a later success across restart with independent outbox receipts', async () => {
       const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, id, admit) => {
         if (!await admit()) return;

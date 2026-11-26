@@ -699,8 +699,20 @@ remain refused until same-host reboot evidence is available. No saved conversati
 is loaded by overlay restoration. Worker-card Clear refuses unidentified allocation
 or schedule ownership instead of reporting success while leaving execution blocked.
 
-Saved main ACP selections remain refused after host loss, even without a schedule
-journal. Explicit `/clear` may archive a selection when ownership guards permit,
+With CLI and Router 1.6.286, send a regular message in your original Feishu
+thread after a restart. If the AGY main conversation lost its host before
+the CLI saved a clean checkpoint, the CLI can load that same conversation
+and deliver your message. AGY can process pending native messages and their
+tool requests alongside yours. The CLI verifies the message source and the
+original conversation before loading it.
+
+A timer cannot initiate this recovery. If a timer comes due while the chat
+is waiting for your next message, the CLI skips that occurrence and keeps
+future recurring slots. After recovery, a verified, idle text-only conversation
+can accept future host-timed turns. A conversation with earlier tool activity
+can continue in foreground chat while its timers stay blocked.
+
+Explicit `/clear` may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
 ownership remain blockers; use a new thread when guided to do so. Thread data erasure
 has stricter proof requirements than selection reset. From CLI 1.6.270, an idle

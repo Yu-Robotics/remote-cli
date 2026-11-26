@@ -53,7 +53,7 @@ type PurgeOutcome = { status: 'removed' | 'alreadyRemoved'; forgottenCleanup?: t
   | { status: 'pending'; reason: SchedulePurgeReason; detail: string };
 
 export type HostResult = { success: boolean; output?: string; error?: string; abortedByUser?: true;
-  outcomeUnknown?: true; stopSchedule?: true };
+  outcomeUnknown?: true; stopSchedule?: true; skippedBeforeAdmission?: true };
 
 export interface ScheduleServiceOptions {
   directory: string;
@@ -371,7 +371,8 @@ export class ScheduleService {
     const id = deliveryId(record.id, occurrenceId);
     const admitted = record.inFlightDueAt === due;
     const error = result.success ? undefined : bounded(result.error ?? 'Host schedule execution failed.', ERROR_BYTES);
-    const status = result.success ? 'succeeded' : result.outcomeUnknown ? 'unknown' : result.abortedByUser ? 'aborted' : 'failed';
+    const skipped = result.skippedBeforeAdmission && !admitted && !result.success && record.backend === 'agy';
+    const status = skipped ? 'skipped' : result.success ? 'succeeded' : result.outcomeUnknown ? 'unknown' : result.abortedByUser ? 'aborted' : 'failed';
     record.lastOccurrence = { dueAt: due, status,
       ...(error !== undefined && { error }) };
     delete record.inFlightDueAt;
@@ -384,7 +385,7 @@ export class ScheduleService {
       ...(result.output !== undefined && { output: bounded(result.output, OUTPUT_BYTES) }),
       ...(result.error !== undefined && { error: bounded(result.error, ERROR_BYTES) }) });
     if (record.cancelRequested) record.state = 'cancelled';
-    else if (!result.success && (record.rule.kind === 'once' || !admitted || result.stopSchedule)) {
+    else if (!result.success && (record.rule.kind === 'once' || (!admitted && !skipped) || result.stopSchedule)) {
       record.state = 'failed';
       record.error = error;
     } else if (record.rule.kind === 'once') record.state = 'completed';
@@ -1335,8 +1336,10 @@ export class ScheduleService {
         if (record.lastOccurrence !== undefined) {
           const last = object(record.lastOccurrence, ['dueAt', 'status', 'error']);
           if (typeof last.dueAt !== 'number' || !Number.isSafeInteger(last.dueAt) || last.dueAt <= record.createdAt
-            || (last.status === 'skipped' ? rule.kind !== 'cron' || nextHostDue(rule as unknown as ScheduleRule, last.dueAt - 1) !== last.dueAt
+            || (last.status === 'skipped' && rule.kind === 'cron' ? nextHostDue(rule as unknown as ScheduleRule, last.dueAt - 1) !== last.dueAt
               : !Array.isArray(record.completedOccurrences) || record.completedOccurrences.at(-1) !== `host-${last.dueAt}`)
+            || last.status === 'skipped' && rule.kind === 'once' && (record.backend !== 'agy'
+              || !['failed', 'interrupted'].includes(record.state as string) || Date.parse(rule.at as string) !== last.dueAt)
             || typeof due === 'number' && due <= last.dueAt || !['succeeded', 'failed', 'unknown', 'aborted', 'skipped'].includes(last.status as string)
             || last.error !== undefined && (last.status === 'succeeded' || typeof last.error !== 'string'
               || Buffer.byteLength(last.error) > ERROR_BYTES)) throw new Error('Invalid host occurrence outcome.');

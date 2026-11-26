@@ -366,6 +366,7 @@ export class WebSocketClient {
             taskRecovery: true,
             scheduleResultsV1: true,
             hostSchedulesV1: true,
+            agyHumanRecoveryV1: true,
             scheduleCardsV1: true,
             scheduleToolCardsV1: true,
             approvalCards: true,

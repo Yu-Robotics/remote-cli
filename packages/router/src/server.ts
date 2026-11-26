@@ -1049,11 +1049,16 @@ export class RouterServer {
                 this.scheduleCards.disconnect(deviceId);
                 this.scheduleCardConnections.delete(deviceId);
                 if (!this.connectionHub.isCurrentConnection(deviceId, ws)) this.cancelThreadInventories(deviceId);
-                if (message.data.capabilities?.queueStarted === true) {
-                  this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
+                if (requested?.queueStarted === true || requested?.agyHumanRecoveryV1 === true) {
+                  this.connectionHub.registerConnection(deviceId, ws, {
+                    ...(requested.queueStarted === true && { queueStarted: true }),
+                    ...(requested.agyHumanRecoveryV1 === true && { agyHumanRecoveryV1: true }),
+                  });
                 } else {
                   this.connectionHub.registerConnection(deviceId, ws);
                 }
+                const registrationId = authenticatedOwner ? randomUUID() : undefined;
+                if (registrationId && authenticatedOwner) this.connectionHub.setAuthenticatedRoute(deviceId, ws, authenticatedOwner, registrationId);
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
                 this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
                 const outputsEnabled = Boolean(this.outputsAvailable && authenticatedOwner && message.data.capabilities?.outputFilesV1 === true);
@@ -1134,6 +1139,7 @@ export class RouterServer {
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
                     ...(scheduleBinding && { scheduleBinding }),
+                    ...(registrationId && { registrationId }),
                     ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled || automaticEnrollmentEnabled || message.data.capabilities?.outputAttachmentHintsV1 === true) ? { capabilities: {
                       ...(automaticEnrollmentEnabled ? { automaticFileEnrollmentV1: true } : {}),
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),

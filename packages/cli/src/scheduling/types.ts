@@ -1,6 +1,15 @@
 import type { NativeScheduleBackend } from './ScheduleCapabilities';
 import type { BackendKey } from '../types/config';
 
+/** A pinned AGY timer cannot authorize recovery of a saved main conversation. */
+export class AgyManualResumeScheduleSkip extends Error {
+  constructor(state: 'required' | 'consumed') {
+    super(state === 'required'
+      ? 'The original AGY conversation has no clean checkpoint. Send a normal Feishu message in its thread to resume.'
+      : 'The recovery message was already consumed for this AGY conversation. Host scheduling is unavailable on this selection.');
+  }
+}
+
 export type ScheduleRule =
   | { kind: 'once'; at: string }
   | { kind: 'cron'; expression: string; timezone: string };

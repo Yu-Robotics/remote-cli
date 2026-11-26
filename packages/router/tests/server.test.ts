@@ -133,6 +133,7 @@ describe('RouterServer', () => {
     (FeishuLongConnHandler as unknown as any).mockImplementation(() => mockFeishuHandler);
 
     mockConnectionHub = {
+      setAuthenticatedRoute: vi.fn(),
       sendToDevice: vi.fn().mockResolvedValue(true),
       registerConnection: vi.fn(),
       unregisterConnection: vi.fn().mockReturnValue(true),

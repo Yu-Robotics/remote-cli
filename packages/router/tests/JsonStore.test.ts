@@ -101,6 +101,41 @@ describe('JsonStore', () => {
     });
   });
 
+  it('claims each Feishu confirmation once across concurrent delivery, restart, and binding reset', async () => {
+    await store.initialize();
+    const createdAt = Date.now();
+    const claim = () => store.consumeAgyConfirmation('original-message', createdAt);
+    const attempts = await Promise.allSettled([claim(), claim()]);
+    expect(attempts.map(item => item.status).sort()).toEqual(['fulfilled', 'rejected']);
+    await store.clear();
+    store = new JsonStore(storePath, 0);
+    await store.initialize();
+    expect(store.mayForwardUnclaimedHumanMessage('original-message', createdAt)).toBe(false);
+    expect(store.mayForwardUnclaimedHumanMessage('another-message', createdAt)).toBe(true);
+    await expect(claim()).rejects.toThrow();
+    await expect(store.consumeAgyConfirmation('stale-message', Date.now() - 300001)).rejects.toThrow();
+    expect(await fs.readFile(storePath, 'utf8')).not.toContain('original-message');
+  });
+
+  it('refuses capacity pressure without evicting fresh confirmations and expires them by original creation time', async () => {
+    await store.initialize();
+    const clock = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(clock);
+    const data = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    data.agyConfirmations = { updatedAt: clock,
+      receipts: Object.fromEntries(Array.from({ length: 4096 }, (_, i) => [i.toString(16).padStart(64, '0'), clock])) };
+    await fs.writeFile(storePath, JSON.stringify(data));
+    store = new JsonStore(storePath, 0);
+    await store.initialize();
+    await expect(store.consumeAgyConfirmation('next', clock)).rejects.toThrow();
+    now.mockReturnValue(clock + 300000);
+    await expect(store.consumeAgyConfirmation('delayed', clock)).rejects.toThrow();
+    await store.consumeAgyConfirmation('fresh', Date.now());
+    expect(Object.keys(JSON.parse(await fs.readFile(storePath, 'utf8')).agyConfirmations.receipts)).toHaveLength(1);
+    now.mockReturnValue(clock);
+    await expect(store.consumeAgyConfirmation('delayed', clock)).rejects.toThrow();
+  });
+
   describe('binding code operations', () => {
     beforeEach(async () => {
       await store.initialize();

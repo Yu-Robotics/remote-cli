@@ -59,6 +59,7 @@ describe('FeishuLongConnHandler', () => {
     mockBindingManager = {
       verifyBindingCode: vi.fn(),
       redeemBindingCode: vi.fn(),
+      consumeAgyConfirmation: vi.fn(),
       bindUser: vi.fn(),
       getUserBinding: vi.fn(),
       unbindUser: vi.fn(),
@@ -71,8 +72,10 @@ describe('FeishuLongConnHandler', () => {
     };
 
     mockConnectionHub = {
+      getAuthenticatedRoute: vi.fn().mockReturnValue({ openId: 'owner', registrationId: 'authenticated-fixture' }),
       isDeviceOnline: vi.fn(),
       supportsQueueStarted: vi.fn().mockReturnValue(false),
+      supportsAgyHumanRecovery: vi.fn().mockReturnValue(false),
       sendToDevice: vi.fn(),
       getConnectionStats: vi.fn()
     };
@@ -110,7 +113,7 @@ describe('FeishuLongConnHandler', () => {
     handler = new FeishuLongConnHandler({
       appId: 'test_app_id',
       appSecret: 'test_app_secret',
-      store: { getCardThread: (id: string) => id === 'card-1' ? queueRoute : undefined } as any
+      store: { mayForwardUnclaimedHumanMessage: () => true, getCardThread: (id: string) => id === 'card-1' ? queueRoute : undefined } as any
     });
 
     handler.setConnectionHub(mockConnectionHub);
@@ -2524,7 +2527,7 @@ describe('FeishuLongConnHandler', () => {
         [{ type: 'image', data: 'encoded-image', mimeType: 'image/png' }],
         undefined,
         undefined,
-        true
+        true, undefined, undefined
       );
     });
 
@@ -2561,7 +2564,7 @@ describe('FeishuLongConnHandler', () => {
         [{ type: 'image', data: 'second-image', mimeType: 'image/png' }],
         undefined,
         undefined,
-        true
+        true, undefined, undefined
       );
     });
 
@@ -2615,7 +2618,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined, undefined, undefined, true);
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined, undefined, undefined, true, undefined, undefined);
     });
 
     it.each([
@@ -3125,6 +3128,36 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleSlashCommandPassthrough', () => {
+    it.each(['default', 'selected', 'reply', 'app', 'old peer'])('forwards ordinary text with the correct recovery authority: %s', async target => {
+      const device = { deviceId: 'fixture-device' };
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [device] });
+      mockBindingManager.getActiveDevice.mockResolvedValue(device);
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsAgyHumanRecovery.mockReturnValue(target !== 'old peer');
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'fixture-card' } });
+      handler.setOnResolveThread(async () => ({ threadId: 'original', deviceId: device.deviceId }));
+      handler.setOnResolveActiveThread(async () => target === 'selected' ? { threadId: 'selected-id', threadName: 'named' } : undefined);
+      const createdAt = Date.now();
+      const event = { sender: { sender_type: target === 'app' ? 'app' : 'user', sender_id: { open_id: 'owner' } },
+        message: { message_type: 'text', create_time: String(createdAt), message_id: 'fixture-message',
+          parent_id: target === 'reply' ? 'original-card' : undefined, content: JSON.stringify({ text: 'Continue here' }) } };
+      await (handler as any).handleMessageEvent(event);
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledOnce();
+      const frame = mockConnectionHub.sendToDevice.mock.calls[0][1];
+      const threadId = target === 'reply' ? 'original' : target === 'selected' ? 'selected-id' : undefined;
+      expect(frame).toMatchObject({ type: 'command', openId: 'owner', threadId, content: 'Continue here' });
+      if (target === 'app' || target === 'old peer') {
+        expect(frame.humanSource).toBeUndefined();
+        return;
+      }
+      expect(frame.humanSource).toEqual({ originalMessageId: 'fixture-message', createdAt, deviceId: device.deviceId,
+        threadId: threadId ?? null, bindingEpoch: 'binding', registrationId: 'authenticated-fixture' });
+      mockBindingManager.consumeAgyConfirmation.mockRejectedValue(new Error('Consumed'));
+      await (handler as any).handleMessageEvent(event);
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledOnce();
+    });
+
     it('should passthrough unknown command to device', async () => {
       mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'D1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'D1' });

@@ -198,6 +198,7 @@ export interface StructuredContent {
  */
 export interface IncomingMessage {
   type: 'command' | 'status' | 'ping';
+  humanSource?: { threadId: string | null; originalMessageId: string; createdAt: number; deviceId: string; bindingEpoch: string; registrationId: string };
   messageId: string;
   content?: string;
   /** Optional attachments (e.g. images) */

@@ -3,6 +3,12 @@ import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDel
 import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata, ActivityProgressInfo } from '../types';
 import type { DelegationConnection } from '../delegation/contract';
 
+export interface AgyHumanConfirmation {
+  originalMessageId: string;
+  createdAt: number;
+  current(): boolean;
+}
+
 export interface ExecuteOptions {
   /** Pin a host-timed foreground turn to the session captured at creation. */
   hostScheduleSessionId?: string;
@@ -111,6 +117,9 @@ export interface ExecutorContextUsage {
 export interface IExecutor {
   // Required — all executors must implement
   execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult>;
+  /** Reject duplicate recovery input and identify a saved main chat requiring gated load. */
+  needsAgyHumanRecovery?(originalMessageId: string): boolean;
+  resumeAgyChat?(message: string, options: ExecuteOptions, confirmation: AgyHumanConfirmation): Promise<ExecuteResult>;
   getCurrentWorkingDirectory(): string;
   setWorkingDirectory(targetPath: string): Promise<void>;
   /** Native activity, checked before destructive session changes. */

@@ -52,6 +52,16 @@ describe('BindingManager', () => {
     expect(await bindingManager.getUserDevices('owner')).toHaveLength(2);
   });
 
+  it('consumes confirmations only for the original device owner and current binding epoch', async () => {
+    await bindingManager.bindUser('owner', 'device', 'Device');
+    const epoch = bindingManager.getCardThreadEpoch('owner', 'device', 'schedule');
+    const at = Date.now();
+    await expect(bindingManager.consumeAgyConfirmation('another', 'device', epoch, 'message', at)).rejects.toThrow();
+    await expect(bindingManager.consumeAgyConfirmation('owner', 'device', 'stale', 'message', at)).rejects.toThrow();
+    await expect(bindingManager.consumeAgyConfirmation('owner', 'device', epoch, 'message', at)).resolves.toBeUndefined();
+    await expect(bindingManager.consumeAgyConfirmation('owner', 'device', epoch, 'message', at)).rejects.toThrow();
+  });
+
   describe('generateBindingCode', () => {
     it('should generate binding code in correct format', async () => {
       const deviceId = 'dev_test_123';

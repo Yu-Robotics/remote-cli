@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
+import { randomUUID } from 'crypto';
+import type { ExecuteOptions } from '../../src/executor/IExecutor';
 import fsSync from 'fs';
 import { AgyAcpRuntime } from '../../src/executor/agy/AgyAcpRuntime';
 import type { AcpSessionSetup } from '../../src/executor/acp/AcpClient';
@@ -17,6 +19,9 @@ import { crashAgyOverlay } from '../scheduling/agyHookCrashFixture';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { FeishuLongConnHandler } from '../../../router/src/feishu/FeishuLongConnHandler';
+import { BindingManager } from '../../../router/src/binding/BindingManager';
+import { JsonStore } from '../../../router/src/storage/JsonStore';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 
 const native = vi.hoisted(() => ({
@@ -1266,6 +1271,16 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     await executor.destroy();
     expect(() => make().checkHostScheduleSession(id)).toThrow();
   });
+  it('keeps a live main host fenced for timers when its exact manual recovery receipt is consumed', async () => {
+    const { id } = await captureTimedSession();
+    const file = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+    const pointer = JSON.parse(await fs.readFile(file, 'utf8'));
+    const saved = JSON.stringify({ ...pointer, manualResumeConsumedGeneration: pointer.hostGeneration });
+    await fs.writeFile(file, saved);
+    await expect(executor.execute('timer', { hostScheduleSessionId: id })).rejects.toThrow('already consumed');
+    expect(last().prompts).toEqual(['hold']);
+    expect(await fs.readFile(file, 'utf8')).toBe(saved);
+  });
   it('can schedule after a clean restart even when the first chat had no tools or timer', async () => {
     const { id } = await captureTimedSession(false);
     await executor.destroy();
@@ -1377,6 +1392,252 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
       else expect(() => executor.checkHostScheduleSession(id)).toThrow();
       expect(last().prompts).toEqual(['first chat']);
     });
+  const humanConfirmation = () => ({ originalMessageId: randomUUID(), createdAt: Date.now(), current: () => true });
+  const resume = (text: string, options: ExecuteOptions = {}) => executor.resumeAgyChat(text, options, humanConfirmation());
+  async function savedManualChat(threadId = 'synthetic-thread') {
+    const pointer = path.join(home, '.remote-cli', 'agy-sessions', threadId + '.json');
+    const threadHome = path.join(home, '.remote-cli', 'agy-homes', threadId);
+    const id = native.sessionId;
+    const db = path.join(threadHome, '.gemini', 'antigravity-cli', 'conversations', id + '.db');
+    const transcript = transcriptPath(threadHome, id);
+    native.loadedRows = [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Previous human message' },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Previous response' },
+    ];
+    for (const file of [db, transcript]) await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(db, 'Synthetic conversation store');
+    await fs.writeFile(transcript, native.loadedRows.map(row => JSON.stringify(row)).join('\n'));
+    await fs.writeFile(pointer, JSON.stringify({ id, transport: 'acp', retired: false,
+      hostGeneration: '01234567-89ab-4cde-8123-0123456789ab' }));
+    executor = make();
+    return { id, pointer, threadHome, db };
+  }
+
+  it.each(['default', 'named'])('loads the original AGY conversation from an ordinary Feishu event on the %s thread', async target => {
+    const store = new JsonStore(path.join(home, 'bindings.json'), 0);
+    await store.initialize();
+    const owner = 'synthetic-owner', device = 'synthetic-device';
+    const bindings = new BindingManager(store);
+    await bindings.bindUser(owner, device, 'Fixture');
+    const epoch = bindings.getCardThreadEpoch(owner, device, 'schedule');
+    const config = { type: 'agy' as const };
+    const threads = await ThreadManager.initialize(home);
+    const thread = target === 'named' ? await threads.createThread('named', cwd) : threads.getDefaultThread();
+    await threads.updateThread(thread.id, { workingDirectory: cwd, delegation: false });
+    const { id } = await savedManualChat(thread.id);
+    const guard = new DirectoryGuard([cwd]);
+    const pool = new ThreadExecutorPool(threads, guard, config);
+    const send = vi.fn();
+    const cli = new MessageHandler({ send, trackTask: vi.fn(), isConnected: () => true } as any, pool, threads, guard,
+      { get: (key: string) => key === 'executor' ? config : key === 'deviceId' ? device : undefined, getConfigDir: () => home } as any);
+    const router = new FeishuLongConnHandler({ appId: 'fixture', appSecret: 'fixture', store });
+    const registration = { openId: owner, registrationId: 'registered' };
+    let delivered: Parameters<MessageHandler['handleMessage']>[0] | undefined;
+    router.setConnectionHub({ isDeviceOnline: () => true, supportsAgyHumanRecovery: () => true, getAuthenticatedRoute: () => registration,
+      sendToDevice: async (_device: string, frame: Parameters<MessageHandler['handleMessage']>[0]) => {
+        delivered = frame;
+        await cli.handleMessage(frame);
+        return true;
+      } } as any);
+    router.setOnResolveActiveThread(async () => target === 'named' ? { threadId: thread.id, threadName: thread.name } : undefined);
+    vi.spyOn(router as any, 'sendStreamingStart').mockResolvedValue('fixture-card');
+    vi.spyOn(router as any, 'replyToMessage').mockResolvedValue(undefined);
+    const event = { sender: { sender_type: 'user', sender_id: { open_id: owner } }, message: {
+      message_type: 'text', create_time: String(Date.now()), message_id: 'original-human', content: JSON.stringify({ text: 'Continue here' }),
+    } };
+    try {
+      await cli.handleMessage({ type: 'binding_confirm', data: { success: true, registrationId: registration.registrationId,
+        scheduleBinding: { openId: owner, deviceId: device, epoch }, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true } } } as any);
+      await router['handleMessageEvent'](event);
+      expect(send.mock.calls.filter(([frame]) => frame.type === 'response').at(-1)?.[0]).toMatchObject({ threadId: thread.id, success: true });
+      expect(last().session).toBe(id);
+      expect(last().prompts).toEqual(['Continue here']);
+      await router['handleMessageEvent'](event);
+      await cli.handleMessage(delivered!);
+      expect(native.clients).toHaveLength(1);
+      expect(last().prompts).toEqual(['Continue here']);
+    } finally { await cli.destroy(); await store.flush(); }
+  });
+
+  it('accepts one human message after owner loss and resumes future bound host turns after its verified terminal', async () => {
+    const { id, threadHome } = await savedManualChat();
+    await crashAgyOverlay(threadHome);
+    native.realHooks = true;
+    await expect(executor.execute('ordinary')).rejects.toThrow('cannot safely resume');
+    await expect(executor.execute('old occurrence', { hostScheduleSessionId: id })).rejects.toThrow();
+    expect(native.clients).toHaveLength(0);
+    const onStream = vi.fn();
+    const recovery = resume('hold', { onStream });
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    expect(last().session).toBe(id);
+    expect(last().prompts).toEqual(['hold']);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.execute('concurrent')).rejects.toThrow();
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(recovery).resolves.toMatchObject({ success: true });
+    expect(onStream).toHaveBeenCalledWith('Synthetic result');
+    expect(last().token).toBeUndefined();
+    await expect(executor.execute('next due occurrence', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['hold', 'next due occurrence']);
+    expect(last().tasks.size).toBe(0);
+    const operation = vi.fn();
+    await expect(executor.withNativeScheduleOperation('native-create', () => true, operation, false)).rejects.toThrow('Native scheduling is unavailable');
+    expect(operation).not.toHaveBeenCalled();
+    await executor.destroy(); executor = make();
+    executor.checkHostScheduleSession(id);
+  });
+
+  it('continues foreground chat with historical RUNNING receipts and a bundled old command wake, without admitting its timer', async () => {
+    const { id, threadHome } = await savedManualChat();
+    const task = id + '/task-2';
+    native.loadedRows!.push({ step_index: 2, type: 'GENERIC', source: 'MODEL', status: 'RUNNING',
+      content: 'Tool is running as a background task with task id: ' + task + '\nTask Description: Fixture\nTask logs are available at: file:///fixture' },
+    { step_index: 3, type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: 'Saved answer' });
+    await fs.writeFile(transcriptPath(threadHome, id), native.loadedRows!.map(row => JSON.stringify(row)).join('\n'));
+    const work = resume('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    completion(last(), { id: task, log: 'file:///fixture' });
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(work).resolves.toMatchObject({ success: true });
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.execute('follow-up')).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['hold', 'follow-up']);
+  });
+
+  it('fences changed historical evidence during the recovery prompt', async () => {
+    await savedManualChat();
+    const work = resume('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    last().rows[0].content = 'Replaced historical message';
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(work).rejects.toThrow();
+    expect(last().prompts).toEqual(['hold']);
+  });
+
+  it('delivers a manually accepted foreground batch with foreign input without enabling host timers', async () => {
+    const { id } = await savedManualChat();
+    const recovery = resume('hold');
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    last().row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX +
+      '[Message] timestamp=2026-01-01T00:00:00Z sender=another-agent priority=MESSAGE_PRIORITY_HIGH content=Previously queued message\n</SYSTEM_MESSAGE>', 'SYSTEM');
+    last().finish(); last().release({ stopReason: 'end_turn' });
+    await expect(recovery).resolves.toMatchObject({ success: true });
+    expect(last().prompts).toEqual(['hold']);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    await expect(executor.execute('continue chatting')).resolves.toMatchObject({ success: true });
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    last().row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX +
+      '[Message] timestamp=2026-01-01T00:01:00Z sender=another-agent priority=MESSAGE_PRIORITY_HIGH content=New message\n</SYSTEM_MESSAGE>', 'SYSTEM');
+    await expect(executor.execute('check new arrival')).rejects.toThrow();
+  });
+
+  it.each(['pointer', 'history', 'native-schedules', 'allocation-unconfirmed', 'checkpoint.lock'] as const)(
+    'rechecks %s after gated startup and before the manual load', async changed => {
+      const { pointer, db } = await savedManualChat();
+      let release!: () => void;
+      native.initializeWait = new Promise(resolve => { release = resolve; });
+      const recovery = resume('fresh human message');
+      await vi.waitFor(() => expect(native.clients).toHaveLength(1));
+      if (changed === 'history') await fs.appendFile(db, 'changed');
+      else if (changed === 'pointer') {
+        const copy = pointer + '.replacement';
+        await fs.copyFile(pointer, copy); await fs.rename(copy, pointer);
+      } else await fs.writeFile(pointer + '.' + changed, '{}');
+      release();
+      await expect(recovery).rejects.toThrow();
+      expect(last().prompts).toEqual([]);
+      expect(native.bind).not.toHaveBeenCalled();
+      expect(last().closed).toBe(true);
+      await expect(executor.execute('automatic retry')).rejects.toThrow();
+    });
+
+  it.each(['worker', 'worker-policy', 'checkpoint', 'missing generation', 'stale generation', 'legacy'] as const)(
+    'keeps manual recovery outside the %s path', async kind => {
+      const { pointer } = await savedManualChat();
+      const selected = JSON.parse(await fs.readFile(pointer, 'utf8'));
+      if (kind === 'worker-policy') await fs.writeFile(pointer + '.worker-policy', '{}');
+      if (kind === 'checkpoint') selected.hostScheduleCheckpoint = {};
+      if (kind === 'missing generation') delete selected.hostGeneration;
+      if (kind === 'stale generation') selected.manualResumeConsumedGeneration = 'previous';
+      if (kind === 'legacy') selected.transport = 'stream-json';
+      await fs.writeFile(pointer, JSON.stringify(selected));
+      executor = kind === 'worker' ? new AgyExecutor(new DirectoryGuard([cwd]), {
+        initialWorkingDirectory: cwd, threadId: 'synthetic-thread', delegationWorker: true,
+      }) : make();
+      await expect(resume('fresh text')).rejects.toThrow();
+      expect(native.clients).toHaveLength(0);
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8'))).toEqual(selected);
+    });
+
+  it('rechecks the claimed pointer before dispatch and never sends an automatic follow-up prompt', async () => {
+    const { pointer } = await savedManualChat();
+    let release!: () => void;
+    native.settingWait = new Promise(resolve => { release = resolve; });
+    const recovery = resume('fresh text');
+    await vi.waitFor(() => expect(last()?.controls.length).toBeGreaterThan(0));
+    const replacement = pointer + '.copy';
+    await fs.copyFile(pointer, replacement); await fs.rename(replacement, pointer);
+    release();
+    await expect(recovery).rejects.toThrow('changed before dispatch');
+    expect(last().prompts).toEqual([]);
+    const onToolUse = vi.fn();
+    await expect(resume('ask', { onToolUse })).rejects.toThrow();
+    expect(onToolUse).toHaveBeenCalled();
+    expect(last().prompts).toEqual(['ask']);
+    await expect(executor.execute('retry')).rejects.toThrow('cannot safely resume');
+  });
+
+  it('keeps manual admission single-use on failure and rejects automated prompt substitution', async () => {
+    const { id } = await savedManualChat();
+    const resolvePrompt = vi.fn(() => 'scheduled text');
+    for (const options of [{ resolvePrompt }, { hostScheduleSessionId: id }]) {
+      await expect(resume('text', options)).rejects.toThrow('human text');
+    }
+    expect(resolvePrompt).not.toHaveBeenCalled();
+    expect(native.clients).toHaveLength(0);
+    await expect(resume('missing terminal')).rejects.toThrow();
+    expect(last().closed).toBe(true);
+    await expect(executor.execute('automatic retry')).rejects.toThrow('cannot safely resume');
+    await expect(resume('new explicit message')).resolves.toMatchObject({ success: true });
+    expect(native.clients.map(client => client.prompts)).toEqual([['missing terminal'], ['new explicit message']]);
+  });
+
+  it('retains a failed human confirmation across executor restart and replacement of the saved pointer', async () => {
+    const { pointer } = await savedManualChat();
+    const original = await fs.readFile(pointer);
+    const source = humanConfirmation();
+    await expect(executor.resumeAgyChat('missing terminal', {}, source)).rejects.toThrow();
+    await executor.destroy();
+    await fs.writeFile(pointer, original);
+    executor = make();
+    await expect(executor.resumeAgyChat('duplicate', {}, source)).rejects.toThrow();
+    expect(native.clients.map(client => client.prompts)).toEqual([['missing terminal']]);
+    const ledger = await fs.readFile(path.join(home, '.remote-cli', 'agy-confirmations.json'), 'utf8');
+    expect(ledger).not.toContain(source.originalMessageId);
+    expect(ledger).not.toContain('missing terminal');
+    await expect(resume('new human input')).resolves.toMatchObject({ success: true });
+  });
+
+  it.each(['before load', 'before prompt'])('revokes manual confirmation after connection replacement %s', async stage => {
+    await savedManualChat();
+    const source = humanConfirmation();
+    let current = true;
+    source.current = () => current;
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    if (stage === 'before load') native.initializeWait = wait;
+    else native.settingWait = wait;
+    const work = executor.resumeAgyChat('confirmed', {}, source);
+    await vi.waitFor(() => expect(stage === 'before load' ? native.clients.length : last()?.controls.length).toBeGreaterThan(0));
+    current = false;
+    release();
+    await expect(work).rejects.toThrow();
+    expect(last().prompts).toEqual([]);
+    current = true;
+    executor = make();
+    await expect(executor.resumeAgyChat('duplicate', {}, source)).rejects.toThrow();
+    expect(native.clients).toHaveLength(1);
+  });
   it('runs a host-timed turn after exact close and reconstruction in the original main conversation', async () => {
     const { id } = await captureTimedSession();
     expect(() => make().checkHostScheduleSession(id)).toThrow();

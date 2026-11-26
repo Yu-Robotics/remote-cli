@@ -1,3 +1,4 @@
+import { AgyManualResumeScheduleSkip } from '../src/scheduling/types';
 import { ScheduleCards } from '../../router/src/feishu/ScheduleCards';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/promises';
@@ -81,10 +82,11 @@ async function fixture() {
   let sequence = 0;
   const send = (content: string, threadId = 'thread-a', extra: Record<string, unknown> = {}) => handler.handleMessage({
     type: 'command', messageId: `command-${++sequence}`, openId: 'owner', threadId, content,
-    isSlashCommand: true, timestamp: Date.now(), ...extra,
+    isSlashCommand: true, timestamp: Date.now(),
+    ...extra,
   } as any);
   const bind = (cards = false, tools = false, scheduleBinding = binding) => handler.handleMessage({ type: 'binding_confirm', data: { success: true,
-    scheduleBinding, capabilities: { scheduleResultsV1: true, hostSchedulesV1: true, taskRecovery: true,
+    scheduleBinding, registrationId: 'authenticated-fixture', capabilities: { scheduleResultsV1: true, hostSchedulesV1: true, taskRecovery: true,
       ...(cards ? { scheduleCardsV1: true } : {}), ...(tools ? { scheduleToolCardsV1: true } : {}) } } } as any);
   const responses = () => ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'response');
   return { cwd, threads, get handler() { return handler; }, pool, manager, ws, send, bind, responses, executor, config,
@@ -256,6 +258,87 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(f.ws.send.mock.calls.filter(([frame]) => frame.type === 'approval_request')).toHaveLength(1);
   });
 
+  const source = (threadId: string | null = 'thread-a') => ({ originalMessageId: 'original-' + threadId, createdAt: Date.now(),
+    deviceId: binding.deviceId, bindingEpoch: binding.epoch, registrationId: 'authenticated-fixture', threadId });
+
+  it.each([null, 'thread-b'])('recovers with the ordinary human text on the original route %s and preserves schedules', async target => {
+    f.setBackend('agy');
+    await history(1, false);
+    await f.bind();
+    await (f.handler as any).loadScheduleCatalog();
+    const threadId = target ?? 'thread-a';
+    await f.send('/schedule after 5m -- Preserve this timer', threadId);
+    const originalTimers = () => f.handler['schedules']!.list({ ...owner(), threadId,
+      generation: (f.handler as any).scheduleGeneration(threadId), bindingEpoch: binding.epoch });
+    const before = await originalTimers();
+    expect(before).toEqual(expect.arrayContaining([expect.objectContaining({ engine: 'host', state: 'active' })]));
+    const resume = vi.fn(async () => ({ success: true }));
+    Object.assign(f.executor, { needsAgyHumanRecovery: vi.fn().mockReturnValueOnce(true), resumeAgyChat: resume });
+    const humanSource = source(target);
+    await f.send('Continue here', 'thread-a', { threadId: target ?? undefined, isSlashCommand: false, humanSource });
+    expect(resume).toHaveBeenCalledWith('Continue here', expect.objectContaining({ onStream: expect.any(Function) }),
+      expect.objectContaining({ originalMessageId: humanSource.originalMessageId, current: expect.any(Function) }));
+    expect(f.responses().at(-1)).toMatchObject({ success: true, threadId: target ?? 'thread-a' });
+    expect(await originalTimers()).toEqual(before);
+    expect(JSON.stringify(f.ws.trackTask.mock.calls)).not.toContain('Continue here');
+    await f.send('Ordinary follow-up', target ?? 'thread-a', { isSlashCommand: false,
+      humanSource: { ...source(target ?? 'thread-a'), originalMessageId: 'second-event' } });
+    expect(resume).toHaveBeenCalledOnce();
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('keeps failed recovery single-use and requires a current authenticated human route', async () => {
+    await f.bind(); f.setBackend('agy');
+    const resume = vi.fn(async () => ({ success: false, error: 'Prompt too long' }));
+    Object.assign(f.executor, { needsAgyHumanRecovery: () => true, resumeAgyChat: resume });
+    for (const extra of [{ threadId: undefined }, { openId: 'other' }, { humanSource: { ...source(), bindingEpoch: 'old' } },
+      { humanSource: { ...source(), registrationId: 'old-connection' } }, { humanSource: { ...source(), deviceId: 'other' } },
+      { humanSource: { ...source(), createdAt: Date.now() - 300001 } }]) {
+      await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: source(), ...extra });
+    }
+    expect(resume).not.toHaveBeenCalled();
+    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    expect(resume).toHaveBeenCalledOnce();
+    expect(f.responses().at(-1).error).toBe('Prompt too long');
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('allows a new ordinary message to recover after a busy thread becomes idle', async () => {
+    await f.bind();
+    f.setBackend('agy');
+    const resume = vi.fn(async () => ({ success: true }));
+    Object.assign(f.executor, { needsAgyHumanRecovery: () => true, resumeAgyChat: resume });
+    f.setExecutorBusy(true);
+    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    expect(f.responses().at(-1)).toMatchObject({ success: false, error: 'Wait for the thread to become idle, then send your message again.' });
+    expect(resume).not.toHaveBeenCalled();
+    f.setExecutorBusy(false);
+    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: { ...source(), originalMessageId: 'next-event' } });
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it('executes sourced ordinary text normally on other backends', async () => {
+    await f.bind();
+    const resume = vi.fn();
+    const check = vi.fn(() => true);
+    Object.assign(f.executor, { needsAgyHumanRecovery: check, resumeAgyChat: resume });
+    await f.send('Continue', 'thread-a', { isSlashCommand: false, humanSource: source() });
+    expect(check).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('keeps timers and synthetic commands on the normal execution path', async () => {
+    f.setBackend('agy');
+    const { dispatch } = await dispatchFixture();
+    const resume = vi.fn();
+    Object.assign(f.executor, { needsAgyHumanRecovery: () => true, resumeAgyChat: resume });
+    expect(await dispatch()).toMatchObject({ success: true });
+    await f.send('Synthetic command', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.execute).toHaveBeenCalledTimes(2);
+    expect(resume).not.toHaveBeenCalled();
+  });
+
   it.each(backends)('dispatches a %s host occurrence once in the original session', async backend => {
     f.setBackend(backend);
     const { dispatch, record } = await dispatchFixture();
@@ -272,6 +355,48 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(f.executor.execute).toHaveBeenCalledOnce();
     expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
     expect(f.pool.setThreadBusy.mock.calls).toEqual([['thread-a', true], ['thread-a', false]]);
+  });
+
+  it.each(['original', 'consumed', 'stale receipt', 'different session', 'legacy', 'missing generation', 'damaged checkpoint', 'native owner'])(
+    'classifies an unadmitted AGY timer on a saved selection: %s', async scenario => {
+      f.setBackend('agy');
+      const { dispatch } = await dispatchFixture();
+      const folder = path.join(f.cwd, '.remote-cli', 'agy-sessions');
+      await mkdir(folder);
+      const file = path.join(folder, 'thread-a.json');
+      const pointer = JSON.stringify({ id: 'bound', transport: scenario === 'legacy' ? 'legacy' : 'acp', retired: false,
+        hostGeneration: scenario === 'missing generation' ? undefined : '11111111-1111-4111-8111-111111111111',
+        ...(scenario === 'consumed' && { manualResumeConsumedGeneration: '11111111-1111-4111-8111-111111111111' }),
+        ...(scenario === 'stale receipt' && { manualResumeConsumedGeneration: 'previous-generation' }),
+        ...(scenario === 'damaged checkpoint' && { hostScheduleCheckpoint: null }) });
+      await writeFile(file, pointer);
+      const executor = new AgyExecutor(new DirectoryGuard([f.cwd]), { threadId: 'thread-a', initialWorkingDirectory: f.cwd });
+      if (scenario === 'different session') await writeFile(file, pointer.replace('bound', 'replacement'));
+      if (scenario === 'native owner') await writeFile(file + '.native-schedules', '{}');
+      vi.spyOn(f.pool, 'getExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+      vi.spyOn(f.pool, 'getExistingExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+      const execute = vi.spyOn(executor, 'execute');
+      const admit = vi.fn(async () => true);
+      const saved = await readFile(file, 'utf8');
+      expect(await dispatch(admit)).toMatchObject(scenario === 'original'
+        ? { success: false, skippedBeforeAdmission: true, error: expect.stringContaining('normal Feishu message') }
+        : scenario === 'consumed' ? { success: false, skippedBeforeAdmission: true, error: expect.stringContaining('already consumed') }
+        : { success: false, stopSchedule: true });
+      expect(admit).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(await readFile(file, 'utf8')).toBe(saved);
+    });
+
+  it('does not classify an admitted AGY slot as skipped if the checkpoint disappears before dispatch', async () => {
+    f.setBackend('agy');
+    const { dispatch } = await dispatchFixture();
+    const result = await dispatch(async () => {
+      f.executor.checkHostScheduleSession.mockImplementation(() => { throw new AgyManualResumeScheduleSkip('required'); });
+      return true;
+    });
+    expect(result).toMatchObject({ success: false, stopSchedule: true });
+    expect(result.skippedBeforeAdmission).toBeUndefined();
+    expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
   it.each(backends)('limits deferral for an observed AGY command to the AGY backend (%s)', async backend => {
@@ -1359,7 +1484,7 @@ describe('MessageHandler schedule management and delivery', () => {
     });
     (f.executor as any).executeGoal = executeGoal;
     expect(await (f.handler as any).executeCommand('goal-message', 'thread-a', '', f.executor, undefined, false,
-      { objective: 'Synthetic native goal' })).toBe(true);
+      { goalRequest: { objective: 'Synthetic native goal' } })).toBe(true);
     expect(executeGoal).toHaveBeenCalledOnce();
     await f.send('Synthetic ordinary chat again', 'thread-a', { isSlashCommand: false });
     expect(f.executor.configureManagedTools).toHaveBeenLastCalledWith(expect.objectContaining({ groups: ['scheduling'] }));

@@ -9,6 +9,19 @@ export class ConnectionHub {
   private connections: Map<string, WebSocket>;
   // Store deviceId -> last active time mapping
   private lastActiveMap: Map<string, number>;
+  private authenticatedRoutes = new WeakMap<WebSocket, { deviceId: string; openId: string; registrationId: string }>();
+
+  setAuthenticatedRoute(deviceId: string, ws: WebSocket, openId: string, registrationId: string): void {
+    if (this.isCurrentConnection(deviceId, ws)) this.authenticatedRoutes.set(ws, { deviceId, openId, registrationId });
+  }
+
+  getAuthenticatedRoute(deviceId: string) {
+    const ws = this.connections.get(deviceId);
+    const route = ws && this.authenticatedRoutes.get(ws);
+    return route?.deviceId === deviceId ? route : undefined;
+  }
+
+  private humanRecoveryConnections = new WeakSet<WebSocket>();
   private queueStartedDevices = new Set<string>();
   private fileSessions = new Map<string, { id: string; openId: string }>();
 
@@ -36,7 +49,10 @@ export class ConnectionHub {
    * @param deviceId Device unique identifier
    * @param ws WebSocket connection
    */
-  registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean }): void {
+  registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean; agyHumanRecoveryV1?: boolean }): void {
+    if (capabilities?.agyHumanRecoveryV1 === true) this.humanRecoveryConnections.add(ws);
+    else this.humanRecoveryConnections.delete(ws);
+    this.authenticatedRoutes.delete(ws);
     this.fileSessions.delete(deviceId);
     const oldWs = this.connections.get(deviceId);
     // Replace the mapping first so the old socket cannot unregister its replacement.
@@ -52,6 +68,11 @@ export class ConnectionHub {
     this.lastActiveMap.set(deviceId, Date.now());
     if (capabilities?.queueStarted === true) this.queueStartedDevices.add(deviceId);
     else this.queueStartedDevices.delete(deviceId);
+  }
+
+  supportsAgyHumanRecovery(deviceId: string): boolean {
+    const connection = this.connections.get(deviceId);
+    return !!connection && this.humanRecoveryConnections.has(connection);
   }
 
   /** Older clients need an execution card prepared at confirmation time. */

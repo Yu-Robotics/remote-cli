@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.286] - 2026-11-26
+
+### Added
+- Recover an eligible original AGY main conversation on the first ordinary Feishu message after host loss. AGY may process pending native input together with that message.
+- Skip unadmitted AGY timer occurrences that are waiting for an ordinary user message while retaining future recurring slots. A verified text-only recovery can requalify for host-timed turns.
+
 ## [1.6.285] - 2026-11-26
 
 ### Changed

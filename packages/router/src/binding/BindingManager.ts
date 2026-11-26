@@ -173,6 +173,16 @@ export class BindingManager {
     }
   }
 
+  async consumeAgyConfirmation(openId: string, deviceId: string, epoch: string, id: string, createdAt: number): Promise<void> {
+    return this.mutate(async () => {
+      this.assertOwnership(deviceId, openId);
+      const device = this.store.getUserBinding(openId)?.devices.find(item => item.deviceId === deviceId);
+      if (!device || device.boundAt > createdAt || this.store.getUserByDeviceId(deviceId) !== openId
+        || !epoch || this.getCardThreadEpoch(openId, deviceId, 'schedule') !== epoch) throw new Error('AGY confirmation binding changed.');
+      await this.store.consumeAgyConfirmation(id, createdAt);
+    });
+  }
+
   async getUserBinding(openId: string): Promise<UserBinding | null> {
     return this.store.getUserBinding(openId);
   }

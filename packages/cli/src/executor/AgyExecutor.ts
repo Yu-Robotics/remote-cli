@@ -1,21 +1,23 @@
+import { AgyManualResumeScheduleSkip } from '../scheduling/types';
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
 import { agyHostScheduleHistory, agyOwnershipReview, agySavedSelectionDeletion, assertAgySelectionResettable, detachAgySelection } from './agy/AgySessionSelection';
 import { createHash, randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import type { AgyCommandCheckpoint } from './agy/AgyCommandTasks';
-import { syncDirectory } from '../delegation/OwnershipRuntime';
+import { kernelGate, syncDirectory } from '../delegation/OwnershipRuntime';
 import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import type { IExecutor, ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
+import type { AgyHumanConfirmation, IExecutor, ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
 import type { ApprovalAction } from '../types';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
 import { delegationSessionServers, delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { parseAgyModels } from './agy/AgyModels';
+import { isWorkerLaneExecutorId } from '../delegation/DelegatedWorkerSessionStore';
 import type { AgyDeletionTarget } from '../delegation/AgySessionDeletion';
 import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletion';
 
@@ -190,14 +192,30 @@ export class AgyExecutor implements IExecutor {
   }
   checkHostScheduleSession(id: string): void {
     this.assertHostScheduleOwner(id);
+    const pointer = this.hostSelection(id);
+    const mainGeneration = this.threadId && this.agyHome && pointer.retired === false
+      && typeof pointer.hostGeneration === 'string' && (!this.hostGeneration || this.hostGeneration === pointer.hostGeneration)
+      && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(pointer.hostGeneration);
+    if (Object.hasOwn(pointer, 'manualResumeConsumedGeneration')) {
+      if (mainGeneration && pointer.manualResumeConsumedGeneration === pointer.hostGeneration
+        && !Object.hasOwn(pointer, 'hostScheduleCheckpoint')
+        && (!this.acp || this.acp.sessionId === id)) {
+        if (this.acp?.canScheduleAfterManualResume && pointer.hostGeneration === this.hostGeneration) return;
+        throw new AgyManualResumeScheduleSkip('consumed');
+      }
+      throw new Error('AGY recovery selection changed.');
+    }
     if (!this.acp) {
+      if (mainGeneration && this.acpLeaseUnconfirmed && !this.resumeCurrent && !Object.hasOwn(pointer, 'hostScheduleCheckpoint')) {
+        throw new AgyManualResumeScheduleSkip('required');
+      }
       if (this.cleanHostSelection(id).hostScheduleCheckpoint.commands?.idleDenialHistory) {
         throw new Error('AGY idle denial checkpoint permits ordinary chat only.');
       }
       return;
     }
     if (!this.acp.hostScheduleAvailable || this.acp.sessionId !== id || !this.hostGeneration
-      || this.hostSelection(id).hostGeneration !== this.hostGeneration) {
+      || pointer.hostGeneration !== this.hostGeneration) {
       throw new Error('AGY host timing requires a verified foreground conversation with no uncertain native work.');
     }
   }
@@ -231,7 +249,78 @@ export class AgyExecutor implements IExecutor {
     if (this.scheduleOwner && this.scheduleOwner.sessionId !== this.conversationId) throw new Error(`AGY schedule owner does not match the original conversation. ${agyOwnershipReview}`);
     if (this.scheduleOwner && !this.scheduleOwner.retired && !(allowOwnedRetirement && this.acp?.canRetireForContextReset)) throw new Error(`AGY native notifications have unresolved ownership. ${agyOwnershipReview}`);
   }
-  private async runtime(legacyNativeScheduling = false): Promise<AgyAcpRuntime> {
+  private manualSelection(id: string) {
+    const pointer = this.hostSelection(id);
+    if (!this.threadId || path.basename(this.threadId) !== this.threadId || isWorkerLaneExecutorId(this.threadId) || this.delegationWorker || this.legacy
+      || pointer.retired !== false || Object.hasOwn(pointer, 'hostScheduleCheckpoint')
+      || typeof pointer.hostGeneration !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(pointer.hostGeneration)
+      || Object.hasOwn(pointer, 'manualResumeConsumedGeneration') && pointer.manualResumeConsumedGeneration !== pointer.hostGeneration
+      || fs.lstatSync(this.sessionFilePath + '.worker-policy', { throwIfNoEntry: false })) {
+      throw new Error('AGY recovery requires the original checkpoint-less main chat.');
+    }
+    const configRoot = path.join(fs.realpathSync(os.homedir()), '.remote-cli');
+    if (fs.realpathSync(this.sessionFilePath) !== path.join(configRoot, 'agy-sessions', this.threadId + '.json')
+      || fs.realpathSync(this.agyHome!) !== path.join(configRoot, 'agy-homes', this.threadId)) {
+      throw new Error('The original AGY selection is redirected.');
+    }
+    const stat = fs.lstatSync(this.sessionFilePath, { bigint: true });
+    return { pointer, ino: stat.ino, dev: stat.dev, ctime: stat.ctimeNs };
+  }
+
+  private checkConfirmation(source: AgyHumanConfirmation): void {
+    const now = Date.now();
+    if (!source || typeof source.current !== 'function' || !source.current() || typeof source.originalMessageId !== 'string'
+      || !/^[a-zA-Z0-9_-]{1,200}$/.test(source.originalMessageId) || !Number.isSafeInteger(source.createdAt)
+      || source.createdAt <= now - 300_000 || source.createdAt > now) throw new Error('The original Feishu message expired or its route changed.');
+  }
+
+  private readRecoveryReceipts(file: string, now: number): Record<string, number> {
+    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    const receipts: Record<string, number> = {};
+    if (stat) {
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 512 * 1024) throw new Error('Unsafe AGY message receipt storage.');
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!data || !Number.isSafeInteger(data.updatedAt) || data.updatedAt > now || !data.receipts
+        || typeof data.receipts !== 'object' || Array.isArray(data.receipts)) throw new Error('Invalid AGY message receipt storage.');
+      for (const [key, time] of Object.entries(data.receipts)) {
+        if (!/^[a-f0-9]{64}$/.test(key) || typeof time !== 'number' || !Number.isSafeInteger(time)
+          || time > data.updatedAt) throw new Error('Invalid AGY confirmation receipt.');
+        if (time > now - 300_000) receipts[key] = time;
+      }
+    }
+    return receipts;
+  }
+
+  needsAgyHumanRecovery(originalMessageId: string): boolean {
+    const file = path.join(fs.realpathSync(os.homedir()), '.remote-cli', 'agy-confirmations.json');
+    const key = createHash('sha256').update(originalMessageId).digest('hex');
+    if (Object.hasOwn(this.readRecoveryReceipts(file, Date.now()), key)) throw new Error('This Feishu message already resumed AGY.');
+    if (this.acp || this.resumeCurrent || !this.conversationId || this.legacy || this.delegationWorker) return false;
+    const pointer = this.hostSelection(this.conversationId);
+    return !Object.hasOwn(pointer, 'hostScheduleCheckpoint');
+  }
+
+  /** Runs under the thread HOME lease. The device-wide gate also serializes different threads and resets. */
+  private consumeConfirmation(source: AgyHumanConfirmation): void {
+    const root = path.join(fs.realpathSync(os.homedir()), '.remote-cli');
+    if (fs.realpathSync(root) !== root) throw new Error('The AGY confirmation directory is redirected.');
+    const file = path.join(root, 'agy-confirmations.json');
+    const gate = kernelGate(file + '.gate');
+    if (!gate) throw new Error('AGY message receipt storage is busy. Send a new Feishu message.');
+    try {
+      this.checkConfirmation(source);
+      const now = Date.now();
+      const receipts = this.readRecoveryReceipts(file, now);
+      const key = createHash('sha256').update(source.originalMessageId).digest('hex');
+      if (Object.hasOwn(receipts, key)) throw new Error('This Feishu message was already consumed for AGY recovery.');
+      if (Object.keys(receipts).length >= 4096) throw new Error('AGY message receipt storage is full. Send a new Feishu message later.');
+      receipts[key] = source.createdAt;
+      gate.verify();
+      this.writeNativeState(file, { updatedAt: now, receipts });
+    } finally { gate.close(); }
+  }
+
+  private async runtime(legacyNativeScheduling = false, manual?: { selection: ReturnType<AgyExecutor['manualSelection']>; history: string; source: AgyHumanConfirmation }): Promise<AgyAcpRuntime> {
     if (this.acp) return this.acp;
     if (this.allocationUnconfirmed) throw new Error('AGY allocation reply was lost. Native ownership is unconfirmed; do not retry this worker or conversation automatically.');
     if (this.isDestroyed || this.shutdownUncertain) throw new Error('AGY executor is closed or its process exit is unconfirmed.');
@@ -244,14 +333,16 @@ export class AgyExecutor implements IExecutor {
     if (this.conversationId) {
       if (this.scheduleOwner) throw new Error('AGY saved chat cannot safely resume: native notifications remain unconfirmed. Use a new thread.');
       const proof = this.workerProof;
-      if (!this.delegationWorker && this.hostSelection(this.conversationId).hostScheduleCheckpoint) {
+      if (!manual && !this.delegationWorker && this.hostSelection(this.conversationId).hostScheduleCheckpoint) {
         const pointer = this.cleanHostSelection(this.conversationId);
         cleanGeneration = pointer.hostGeneration;
         savedCheckpoint = pointer.hostScheduleCheckpoint;
       }
-      if (!cleanGeneration && !this.resumeCurrent && !(this.delegationWorker && proof?.sessionId === this.conversationId
+      if (!manual && !cleanGeneration && !this.resumeCurrent && !(this.delegationWorker && proof?.sessionId === this.conversationId
         && proof.policy === 'hook-denial-v2' && proof.settled && proof.closed)) {
-        throw new Error('Saved AGY ACP chat cannot safely resume: pending work is unconfirmed. Use explicit /clear when no schedule owner remains, or a new thread; original history is retained.');
+        const guidance = this.delegationWorker ? 'Use the worker card Clear action or explicit /clear after task closeout.'
+          : 'Send a fresh Feishu message to the original thread from an authenticated device. Use explicit /clear only to start fresh.';
+        throw new Error(`Saved AGY ACP chat cannot safely resume: pending work is unconfirmed. ${guidance} Original history is retained.`);
       }
     }
     const env = this.buildEnv(); env.HOME = this.agyHome; env.USERPROFILE = this.agyHome;
@@ -270,18 +361,31 @@ export class AgyExecutor implements IExecutor {
     const original = this.conversationId;
     const firstSetup = this.resumeCurrent && original && this.unpromptedReconnect?.sessionId === original
       ? this.unpromptedReconnect : undefined;
-    const hostScheduleChat = !this.delegationWorker && (!!cleanGeneration || !!firstSetup || !original
+    const hostScheduleChat = !this.delegationWorker && (!!manual || !!cleanGeneration || !!firstSetup || !original
       && (!legacyNativeScheduling || this.delegationConnection?.groups?.includes('scheduling') === true));
     let priorHostHistories: Set<string> | undefined;
     // A controlled reconnect is single-use; a failed load cannot authorize retries.
     this.resumeCurrent = false;
     this.unpromptedReconnect = undefined;
     if (this.workerProof) { this.workerProof.closed = false; this.saveWorkerProof(); }
+    let firstManualPrompt = !!manual;
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
       sessionId: original ?? undefined, worker: this.delegationWorker,
       hostScheduleChat, commandCheckpoint: savedCheckpoint?.commands, toolErrorDigest: savedCheckpoint?.toolErrorDigest,
       validatedChatLoad: !!cleanGeneration,
+      consumeManualConfirmation: manual ? () => this.consumeConfirmation(manual.source) : undefined,
+      beforeManualLoad: manual && original ? () => {
+        this.checkConfirmation(manual.source);
+        const selection = this.manualSelection(original);
+        if (!isDeepStrictEqual(selection, manual.selection) || agyHostScheduleHistory(this.agyHome!, original) !== manual.history) {
+          throw new Error('The selected AGY conversation changed before manual load.');
+        }
+        // Claim this generation under the hook lease. Another waiting confirmation cannot reuse it.
+        this.hostGeneration = randomUUID();
+        this.writeNativeState(this.sessionFilePath, { ...selection.pointer, hostGeneration: this.hostGeneration,
+          manualResumeConsumedGeneration: this.hostGeneration });
+      } : undefined,
       beforeSessionLoad: original && (cleanGeneration || firstSetup) ? () => {
         const pointer = firstSetup ? this.hostSelection(original) : this.cleanHostSelection(original);
         if (pointer.hostGeneration !== (firstSetup?.generation ?? cleanGeneration)
@@ -338,7 +442,21 @@ export class AgyExecutor implements IExecutor {
           }
         }
       },
-      beforePrompt: () => { if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); } },
+      beforePrompt: () => {
+        if (manual && original) {
+          if (firstManualPrompt) {
+            this.checkConfirmation(manual.source);
+            firstManualPrompt = false;
+            manual.source.current = () => false;
+          }
+          const selected = this.manualSelection(original);
+          if (selected.pointer.hostGeneration !== this.hostGeneration || selected.dev !== this.ownedPointer?.dev
+            || selected.ino !== this.ownedPointer?.ino || selected.ctime !== this.ownedPointer?.ctimeNs) {
+            throw new Error('The selected AGY conversation changed before dispatch.');
+          }
+        }
+        if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); }
+      },
       settledPrompt: reusable => { if (this.workerProof) { this.workerProof.settled = reusable; this.saveWorkerProof(); } },
       ownedSessionClosed: (id, cleanHistory, unpromptedHistory, commands, toolErrorDigest) => {
         if (id === this.conversationId) this.acpLeaseUnconfirmed = false;
@@ -350,6 +468,7 @@ export class AgyExecutor implements IExecutor {
           const pointer = this.hostSelection(id);
           if (pointer.hostGeneration !== this.hostGeneration) throw new Error('AGY host-timed selection changed before retirement.');
           if (cleanHistory) {
+            delete pointer.manualResumeConsumedGeneration;
             this.writeNativeState(this.sessionFilePath, { ...pointer, hostScheduleCheckpoint: {
               policy: commands?.idleDenialHistory ? 'host-timed-chat-v3' : toolErrorDigest ? 'host-timed-chat-v2' : 'host-timed-chat-v1', generation: this.hostGeneration,
               configuration: this.checkpointConfiguration(toolErrorDigest || commands?.idleDenialHistory ? { id, generation: this.hostGeneration,
@@ -451,6 +570,34 @@ export class AgyExecutor implements IExecutor {
   // transitions are already enforced by isBusy/resetContext and must not bypass
   // the caller's schedule-idle guard.
   hasPendingSettingsChange(): boolean { return false; }
+  async resumeAgyChat(message: string, options: ExecuteOptions, confirmation: AgyHumanConfirmation): Promise<ExecuteResult> {
+    // Copy options before awaiting startup so the confirmation cannot be redirected.
+    const turn = { ...options, inactivityTimeout: options.inactivityTimeout ?? this.inactivityTimeoutMs };
+    if (!message.trim() || turn.hostScheduleSessionId !== undefined || turn.resolvePrompt || turn.attachments?.length
+      || this.pendingContextSeed || this.isBusy() || this.acp || !this.conversationId || this.resumeCurrent) {
+      throw new Error('AGY recovery requires one fresh human text message on an inactive saved chat.');
+    }
+    this.assertHostScheduleOwner(this.conversationId);
+    const source = { ...confirmation };
+    this.checkConfirmation(source);
+    const selection = this.manualSelection(this.conversationId);
+    this.transitioning = true;
+    try {
+      const history = agyHostScheduleHistory(this.agyHome!, this.conversationId);
+      const runtime = await this.runtime(false, { selection, history, source });
+      let completed = false;
+      try {
+        const result = await runtime.execute(message, { ...turn, attachments: undefined });
+        completed = result.success;
+        return result;
+      } finally {
+        if (!completed) {
+          await this.stopForContextReset();
+          this.acp = undefined;
+        }
+      }
+    } finally { this.transitioning = false; }
+  }
   async execute(prompt: string, options: ExecuteOptions = {}): Promise<ExecuteResult> {
     if (this.isBusy() || this.isDestroyed) throw new Error('AGY executor is busy or destroyed.');
     const pinned = options.hostScheduleSessionId;

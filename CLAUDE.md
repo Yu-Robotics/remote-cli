@@ -422,8 +422,11 @@ remain refused until same-host reboot evidence is available. No saved conversati
 is loaded by overlay restoration. Worker-card Clear refuses unidentified allocation
 or schedule ownership instead of reporting success while leaving execution blocked.
 
-Saved main ACP selections remain refused after host loss, even without a schedule
-journal. Explicit `/clear` may archive a selection when ownership guards permit,
+With CLI and Router 1.6.286, an ordinary message from the bound Feishu user
+can resume the same saved main ACP conversation after host loss, including
+when the clean checkpoint is missing. Verify the original session and message
+route. A timer or worker cannot initiate this recovery. Explicit `/clear`
+may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
 ownership remain blockers; use a new thread when guided to do so. Thread data erasure
 has stricter proof requirements than selection reset. From CLI 1.6.270, an idle

@@ -72,7 +72,7 @@ import { ScheduleService, HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, typ
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertHostScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
-import type { ScheduleOwner, ScheduleRecord } from '../scheduling/types';
+import { AgyManualResumeScheduleSkip, type ScheduleOwner, type ScheduleRecord } from '../scheduling/types';
 
 /**
  * Detected backend information
@@ -298,6 +298,8 @@ export class MessageHandler {
   private readonly pendingOutputFiles = new PendingOutputFiles();
   private imageConnectionEpoch = 0;
   private scheduleResultsSupported = false;
+  private readonly activeHumanMessages = new Set<string>();
+  private authenticatedRegistration?: string;
   private scheduleBinding?: DeviceBinding;
   private queueAwaitingRegistration = false;
   private scheduleCardsSupported = false;
@@ -346,6 +348,7 @@ export class MessageHandler {
       this.queueAwaitingRegistration = true;
       // Legacy peers cannot prove that a second connection has the same binding.
       this.discardQueueCommands(command => !command.binding);
+      this.authenticatedRegistration = undefined;
       this.scheduleBinding = undefined;
       this.scheduleResultsSupported = false;
       this.scheduleCardsSupported = false;
@@ -449,9 +452,15 @@ export class MessageHandler {
         await this.handleStatusQuery(message.messageId!);
         return;
 
-      case 'command':
-        await this.handleCommandMessage(message as IncomingMessage, this.fileInbox?.mark());
+      case 'command': {
+        const command = message as IncomingMessage;
+        const id = command.humanSource?.originalMessageId;
+        if (id && this.activeHumanMessages.has(id)) return;
+        if (id) this.activeHumanMessages.add(id);
+        try { await this.handleCommandMessage(command, this.fileInbox?.mark()); }
+        finally { if (id) this.activeHumanMessages.delete(id); }
         return;
+      }
       case 'schedule_tool_card_ack': {
         if (!this.scheduleToolCardsSupported || typeof message.messageId !== 'string') return;
         const pending = this.scheduleCardReceipts.get(message.messageId);
@@ -508,6 +517,8 @@ export class MessageHandler {
       case 'binding_confirm': {
         const data = (message as any).data;
         this.scheduleResultsSupported = data?.success === true && data.capabilities?.scheduleResultsV1 === true;
+        this.authenticatedRegistration = data?.success === true && typeof data.registrationId === 'string'
+          && data.registrationId.length > 0 && data.registrationId.length <= 128 ? data.registrationId : undefined;
         const binding = data?.scheduleBinding;
         const previousBinding = this.scheduleBinding;
         this.scheduleBinding = this.scheduleResultsSupported && data.capabilities?.hostSchedulesV1 === true
@@ -661,8 +672,18 @@ export class MessageHandler {
     const content = message.content?.trim() ?? '';
     const queueInput = !content.startsWith('/') || /^\/queue(?:\s|$)/.test(content);
     const receivedEpoch = this.imageConnectionEpoch;
-    const sourceCurrent = () => !queueInput || (!this.queueAwaitingRegistration && receivedEpoch === this.imageConnectionEpoch
-      && (!this.scheduleBinding || this.scheduleBinding.openId === message.openId));
+    const binding = this.scheduleBinding;
+    const humanSourceCurrent = () => {
+      const source = message.humanSource;
+      const now = Date.now();
+      return !!binding && this.scheduleBinding === binding && this.wsClient.isConnected()
+        && !this.isDestroyed && !!source && (message.threadId ?? this.threadManager.getDefaultThread().id) === threadId
+        && binding.deviceId === source.deviceId && binding.openId === message.openId
+        && !!this.authenticatedRegistration && source.registrationId === this.authenticatedRegistration
+        && binding.epoch === source.bindingEpoch && source.createdAt <= now && source.createdAt > now - 300_000;
+    };
+    const sourceCurrent = () => (!message.humanSource || humanSourceCurrent()) && (!queueInput || (!this.queueAwaitingRegistration && receivedEpoch === this.imageConnectionEpoch
+      && (!this.scheduleBinding || this.scheduleBinding.openId === message.openId)));
     if (!sourceCurrent()) return;
     this.messageOpenIds.set(message.messageId, message.openId);
     // Old peers may still send this retired command with credentials.
@@ -767,7 +788,7 @@ export class MessageHandler {
           admissionCurrent = isCurrent;
           if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
           await body();
-        }, !content.startsWith('/') && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId), cancelAdmission);
+        }, (!content.startsWith('/')) && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId), cancelAdmission);
       }
     } catch (error) {
       if (sourceCurrent() && !admissionCancelled) this.sendResponse(message.messageId, threadId,
@@ -864,6 +885,9 @@ export class MessageHandler {
     }
 
     let executor = this.threadPool.getExecutor(resolvedThreadId);
+    const recover = message.humanSource && this.threadPool.getBackendKey(resolvedThreadId) === 'agy'
+      && executor.needsAgyHumanRecovery?.(message.humanSource.originalMessageId);
+    const resumeMessage = recover ? content : undefined;
     this.sendStreamContext(messageId, resolvedThreadId, executor);
 
     const goalCommand = parseGoalCommand(settingsCommand);
@@ -1019,10 +1043,11 @@ export class MessageHandler {
         await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
         return;
       }
-      if (isSlashCommand || content?.trim().startsWith('/')) {
+      if (resumeMessage || isSlashCommand || content?.trim().startsWith('/')) {
         this.sendResponse(messageId, resolvedThreadId, {
           success: false,
-          error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use /queue to inspect queued messages.`,
+          error: resumeMessage ? 'Wait for the thread to become idle, then send your message again.'
+            : `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use /queue to inspect queued messages.`,
         });
       } else {
         if ((this.threadQueues.get(resolvedThreadId)?.length ?? 0) >= MAX_THREAD_QUEUE_LENGTH) {
@@ -1054,6 +1079,10 @@ export class MessageHandler {
       return;
     }
 
+    if (resumeMessage && this.hasWaitingWork(resolvedThreadId)) {
+      this.sendResponse(messageId, resolvedThreadId, { success: false, error: 'Wait for the thread queue to finish, then send your message again.' });
+      return;
+    }
     const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort|sandbox)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/delegation\s+(?:on|off|reset)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
@@ -1068,10 +1097,10 @@ export class MessageHandler {
     const goalActivation = goalRequest ? { cancelled: false } : undefined;
     if (goalActivation) this.pendingGoalActivations.set(resolvedThreadId, goalActivation);
     const operationToken = this.beginThreadOperation(resolvedThreadId, messageId,
-      !content?.trim().startsWith('/') && !workingDirectory && !this.pendingReplaces.has(openId || messageId));
+      (!!resumeMessage || !content?.trim().startsWith('/')) && !workingDirectory && !this.pendingReplaces.has(openId || messageId));
 
     try {
-      this.trackTask(messageId, resolvedThreadId, content || '');
+      this.trackTask(messageId, resolvedThreadId, resumeMessage ? 'Resuming AGY chat' : content || '');
       // Validate and set working directory if provided
       if (workingDirectory) {
         if (!this.directoryGuard.isSafePath(workingDirectory, executor.getCurrentWorkingDirectory())) {
@@ -1102,8 +1131,22 @@ export class MessageHandler {
         return;
       }
 
+      if (resumeMessage) {
+        if (!executor.resumeAgyChat) throw new Error('This AGY executor does not support recovery from a Feishu message.');
+        const resume = executor.resumeAgyChat.bind(executor);
+        await this.executeCommand(messageId, resolvedThreadId, resumeMessage, executor, undefined, false, {
+          recoverHumanTurn: (_prompt, options) => {
+            if (!admissionCurrent()) throw new Error('The original Feishu message expired.');
+            const { originalMessageId, createdAt } = message.humanSource!;
+            return resume(resumeMessage, options, { originalMessageId, createdAt, current: () => admissionCurrent()
+              && this.threadPool.getExistingExecutor(resolvedThreadId) === executor && this.threadPool.getBackendKey(resolvedThreadId) === 'agy' });
+          },
+        });
+        return;
+      }
+
       if (goalRequest) {
-        await this.executeCommand(messageId, resolvedThreadId, content!, executor, undefined, false, goalRequest, goalActivation);
+        await this.executeCommand(messageId, resolvedThreadId, content!, executor, undefined, false, { goalRequest, goalActivation });
         return;
       }
 
@@ -1339,6 +1382,15 @@ export class MessageHandler {
 
   private isValidMessage(message: Message | IncomingMessage): boolean {
     if (!message || typeof message !== 'object') return false;
+    if (message.type === 'command' && (message as IncomingMessage).humanSource !== undefined) {
+      const msg = message as IncomingMessage;
+      return (msg.threadId === undefined || typeof msg.threadId === 'string' && !!msg.threadId) && !!msg.humanSource
+        && msg.humanSource.threadId === (msg.threadId ?? null)
+        && typeof msg.humanSource.originalMessageId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(msg.humanSource.originalMessageId)
+        && Number.isSafeInteger(msg.humanSource.createdAt) && !!msg.messageId && !!msg.openId && typeof msg.content === 'string'
+        && !!msg.content.trim() && !msg.content.trim().startsWith('/') && !msg.isSlashCommand
+        && !msg.workingDirectory && !msg.fileIds?.length && !msg.attachments?.length;
+    }
     if (message.type !== 'command') return true;
     const msg = message as IncomingMessage;
     return Boolean(msg.messageId && (msg.content || (msg.attachments && msg.attachments.length > 0)));
@@ -2884,8 +2936,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor,
     attachments?: Attachment[],
     fromQueue: false | { current(): boolean; start(): void; take(): void } = false,
-    goalRequest?: ExecutorGoalRunRequest,
-    goalActivation?: { cancelled: boolean },
+    { goalRequest, goalActivation, recoverHumanTurn }: {
+      goalRequest?: ExecutorGoalRunRequest;
+      goalActivation?: { cancelled: boolean };
+      recoverHumanTurn?: IExecutor['execute'];
+    } = {},
   ): Promise<boolean> {
     if (this.coordinatorPreparations.has(threadId)) {
       throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
@@ -3222,7 +3277,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         showState('Working');
         scope?.beginExecution(continuationResults.map(task => task.taskId));
         const launchRevision = scope?.getLaunchRevision();
-        if (scope || scheduleScope) retireActivation = delegationBridge?.activate((name, args, callId) => {
+        if (!recoverHumanTurn && (scope || scheduleScope)) retireActivation = delegationBridge?.activate((name, args, callId) => {
           if (!active || !isCurrent()) return Promise.reject(new Error('The coordinator execution has ended'));
           if (name.startsWith('remote_cli_schedule_') && scheduleScope) return scheduleScope.invoke(name, args);
           return scope ? scope.invoke(name, args, callId) : Promise.reject(new Error('Delegation is disabled for this turn.'));
@@ -3280,7 +3335,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             ? { ...goalRequest, objective: `${goalRequest.objective}\n\n${ATTACHMENT_GUIDANCE}` } : goalRequest;
           const result = guidedGoal
             ? await executor.executeGoal!(guidedGoal, guardedOptions)
-            : await executor.execute(guidedPrompt, guardedOptions);
+            : recoverHumanTurn ? await recoverHumanTurn(prompt, guardedOptions) : await executor.execute(guidedPrompt, guardedOptions);
           if (goalRequest && !streamedAny && result.output) guardedOptions.onStream?.(result.output);
           executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
           capturedMetadata = true;
@@ -3324,9 +3379,9 @@ You can also use natural language commands to control Claude Code CLI.`,
           activity.clear();
           retireActivation?.();
           if (!finished) scope?.finishExecution(false);
-          // Goal activation mutates durable native state; never replay it as a model retry.
+          // Both goal activation and AGY recovery require a fresh user request to retry.
           await scheduleScope?.drain();
-          mayRetry = !goalRequest && !scheduleScope?.hasSideEffects && (!scope || scope.getLaunchRevision() === launchRevision);
+          mayRetry = !recoverHumanTurn && !goalRequest && !scheduleScope?.hasSideEffects && (!scope || scope.getLaunchRevision() === launchRevision);
         }
       };
 
@@ -3343,6 +3398,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       for (;;) {
         let result = await executeOnce(prompt, options);
         assertCoordinatorActive();
+        if (recoverHumanTurn) return complete(result.success, result.error);
         // Retry only an execution that accepted no new worker launch. Historical
         // completed tasks must not disable recovery of the result continuation.
         if (mayRetry && await this.withCoordinatorPreparation(threadId, () => {
@@ -3969,6 +4025,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       const token = this.beginThreadOperation(threadId);
       const occurrence: HostOccurrence = { record, occurrenceId, cancelled: false };
       let stopSchedule = false;
+      let admitted = false;
       let executionStarted = false;
       this.hostOccurrences.set(threadId, occurrence);
       this.messageOpenIds.set(messageId, openId);
@@ -4012,6 +4069,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         await this.delegation.assertExecutionSafe(cwd, threadId);
         if (!check(false, true)) return undefined;
         if (occurrence.cancelled || signal?.aborted || !await admit()) return undefined;
+        admitted = true;
         const beforePrompt = () => {
           check();
           if (occurrence.cancelled || signal?.aborted) throw new Error('Scheduled occurrence was cancelled before prompt dispatch.');
@@ -4073,6 +4131,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         return { success: result.success, output: display || result.output, error,
           ...('outcomeUnknown' in result && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } catch (error) {
+        if (!admitted && stopSchedule && record.backend === 'agy' && error instanceof AgyManualResumeScheduleSkip) {
+          return { success: false, skippedBeforeAdmission: true, error: 'Scheduled occurrence skipped without execution. ' + error.message };
+        }
         return { success: false, error: error instanceof Error ? error.message : 'Scheduled execution failed.',
           ...(executionStarted && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } finally {

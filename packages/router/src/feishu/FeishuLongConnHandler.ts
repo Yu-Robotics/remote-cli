@@ -337,7 +337,7 @@ export class FeishuLongConnHandler {
         content = this.parseMessageContent(message);
       }
 
-      console.log(`[FeishuHandler] Received ${message.message_type} from ${openId}: "${content.slice(0, 50)}${content.length > 50 ? '...' : ''}", msgId=${messageId}`);
+      console.log(`[FeishuHandler] Received ${message.message_type} from ${openId}, msgId=${messageId}`);
 
       // If content is empty after parsing and no attachments, ignore the message
       if (!content && (!attachments || attachments.length === 0)) {
@@ -358,8 +358,11 @@ export class FeishuLongConnHandler {
         await this.handleCommand(openId, messageId, content, targetThreadId, undefined, sourceDeviceId, !parentId);
       } else {
         console.log(`[FeishuHandler] Handling regular command, msgId=${messageId}`);
+        const human = sender.sender_type === 'user' && (message.message_type === 'text' || message.message_type === 'post')
+          && !attachments?.length && !fileReference && typeof message.create_time === 'string' && /^\d{13}$/.test(message.create_time)
+          ? { createdAt: Number(message.create_time), parentId } : undefined;
         await this.handleRegularCommand(openId, messageId, content, targetThreadId, false, undefined, attachments,
-          fileReference, sourceDeviceId, !parentId);
+          fileReference, sourceDeviceId, !parentId, undefined, human);
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
     } catch (error) {
@@ -1016,7 +1019,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[], fileReference?: { id: string; deviceId: string }, sourceDeviceId?: string, useActiveThread = false, selectionIntent?: SelectionFence): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[], fileReference?: { id: string; deviceId: string }, sourceDeviceId?: string, useActiveThread = false, selectionIntent?: SelectionFence, human?: { createdAt: number; parentId?: string }): Promise<void> {
     let unsent: { commandId: string; cardId: string | null } | undefined;
     try {
       // Find user binding
@@ -1075,6 +1078,20 @@ Examples:
 
       const selectionFence = selectionIntent ?? this.onCaptureSelection?.(openId, activeDevice.deviceId);
 
+      const route = human && this.connectionHub.supportsAgyHumanRecovery(activeDevice.deviceId)
+        ? this.connectionHub.getAuthenticatedRoute(activeDevice.deviceId) : undefined;
+      if (route && route.openId !== openId) throw new Error('The authenticated device owner changed.');
+      if (human?.parentId && (!threadId || !sourceDeviceId)) throw new Error('The replied-to thread route is incomplete.');
+      const epoch = route ? this.bindingManager.getCardThreadEpoch(openId, activeDevice.deviceId, 'schedule') : undefined;
+      const humanSource = human && route && epoch ? { originalMessageId: messageId, createdAt: human.createdAt,
+        threadId: threadId ?? null, deviceId: activeDevice.deviceId, bindingEpoch: epoch, registrationId: route.registrationId } : undefined;
+      if (human && !humanSource && !this.store.mayForwardUnclaimedHumanMessage(messageId, human.createdAt)) {
+        throw new Error('This Feishu message was already claimed or is too old to verify.');
+      }
+      if (humanSource) {
+        await this.bindingManager.consumeAgyConfirmation(openId, activeDevice.deviceId, epoch!, messageId, humanSource.createdAt);
+      }
+
       // Generate message ID first
       const commandMessageId = uuidv4();
       console.log(`[FeishuHandler] Creating streaming card for command ${commandMessageId}${threadId ? ` (threadId=${threadId})` : ''}${pendingNewThread ? ' (pendingNewThread)' : ''}`);
@@ -1098,6 +1115,18 @@ Examples:
       if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
         throw new Error('This command was superseded or the device changed before it could be sent.');
       }
+      if (humanSource) {
+        const destination = human?.parentId ? await this.onResolveThread?.(human.parentId, openId)
+          : await this.onResolveActiveThread?.(openId, activeDevice.deviceId);
+        if (destination?.threadId !== threadId || (human?.parentId && (!destination || !('deviceId' in destination)
+          || destination.deviceId !== activeDevice.deviceId)) || (!human?.parentId
+          && (await this.bindingManager.getActiveDevice(openId))?.deviceId !== activeDevice.deviceId)
+          || this.connectionHub.getAuthenticatedRoute(activeDevice.deviceId) !== route
+          || this.bindingManager.getCardThreadEpoch(openId, activeDevice.deviceId, 'schedule') !== epoch
+          || selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
+          throw new Error('The human message destination changed before dispatch.');
+        }
+      }
       // Send command to device
       const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
         type: MessageType.COMMAND,
@@ -1105,6 +1134,7 @@ Examples:
         timestamp: Date.now(),
         content,
         attachments,
+        ...(humanSource && { humanSource }),
         ...(fileReference ? { fileIds: [fileReference.id] } : {}),
         openId,
         threadId, // Forward threadId to CLI for per-thread routing

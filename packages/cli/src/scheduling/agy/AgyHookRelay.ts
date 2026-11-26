@@ -45,8 +45,9 @@ export class AgyHookRelay {
     await new Promise<void>(resolve => this.server.close(() => resolve()));
     await this.chain;
   }
-  readCheckpointTranscript(): Promise<TranscriptRecord[]> {
-    return this.read(this.transcriptPath(), 'Stop');
+  readCheckpointTranscript(session = this.session): Promise<TranscriptRecord[]> {
+    if (!session || !/^[a-zA-Z0-9_-]{1,128}$/.test(session)) throw new Error('Invalid AGY transcript session.');
+    return this.read(this.transcriptPath(session), 'Stop', session);
   }
   /** After group exit, confirm the native transcript still matches the last authenticated hook. */
   async confirmsTerminal(records: TranscriptRecord[]): Promise<boolean> {
@@ -55,8 +56,8 @@ export class AgyHookRelay {
       return records.length > 0 && isDeepStrictEqual(await this.read(this.transcriptPath(), 'Stop'), records);
     } catch { return false; }
   }
-  private transcriptPath(): string {
-    return path.join(this.root, '.gemini', 'antigravity-cli', 'brain', this.session!, '.system_generated', 'logs', 'transcript_full.jsonl');
+  private transcriptPath(session = this.session): string {
+    return path.join(this.root, '.gemini', 'antigravity-cli', 'brain', session!, '.system_generated', 'logs', 'transcript_full.jsonl');
   }
   private async receive(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const authorization = request.headers.authorization ?? '';
@@ -84,8 +85,8 @@ export class AgyHookRelay {
       this.fault(); response.writeHead(409).end();
     }
   }
-  private async read(locator: unknown, event: string): Promise<TranscriptRecord[]> {
-    const expected = this.transcriptPath();
+  private async read(locator: unknown, event: string, session = this.session): Promise<TranscriptRecord[]> {
+    const expected = this.transcriptPath(session);
     if (typeof locator !== 'string' || path.resolve(locator) !== expected) throw new Error('AGY transcript locator mismatch.');
     // Check every component, not just the basename. Refuse shared/redirected brain
     // paths even if the caller supplied a plausible conversation name.
