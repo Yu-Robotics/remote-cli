@@ -16,7 +16,7 @@ describe('AGY initial session settings confirmation', () => {
     await applyAgySessionSettings(state(), configure, { model: 'synthetic-model-high', effort: 'low' });
     expect(configure.mock.calls).toEqual([['model', 'synthetic-model-high'], ['thought_level', 'low']]);
   });
-  it.each(['low', 'medium', 'high'])('accepts exact canonical model/thought aliases for %s', async thought => {
+  it.each(['low', 'medium', 'high', 'xhigh'])('accepts exact canonical model/thought aliases for %s', async thought => {
     const configure = vi.fn().mockResolvedValue(state('synthetic-model', thought));
     await applyAgySessionSettings(state(), configure, { model: `synthetic-model-${thought}` });
     expect(configure).toHaveBeenCalledOnce();

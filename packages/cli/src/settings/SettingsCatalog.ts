@@ -96,7 +96,8 @@ export class SettingsCatalogReader {
     return this.withExecutor(config, thread, coordinator, target, async executor => {
       if (kind === 'model') {
         if (!executor.listModels) throw new Error('This backend does not expose a structured model catalog.');
-        const models = await executor.listModels();
+        const models = target === 'agy' && target === coordinator
+          ? await executor.listModels({ threadId: thread.id }) : await executor.listModels();
         const speed = includeSpeed && executor.listSpeeds && executor.setSpeed ? await executor.listSpeeds(models) : undefined;
         const current = models.find(model => model.isCurrent);
         const reported = executor.getExecutionMetadata?.()?.modelSource === 'reported';

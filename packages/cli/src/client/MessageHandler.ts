@@ -29,6 +29,7 @@ import { isDelegationEnabled } from '../thread/DelegationSettings';
 import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorGoalRunRequest, IExecutor } from '../executor/IExecutor';
 import { formatGoal, GOAL_USAGE, parseGoalCommand } from './GoalCommand';
 import { createExecutor } from '../executor';
+import { agyTokenStorageEnv } from '../executor/AgyExecutor';
 import { assertAgyWorkerLaneDeletable } from '../executor/agy/AgySessionSelection';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
@@ -2865,7 +2866,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const agyCommand = getBackendCommand('agy', executorConfig);
-      return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'agy');
+      return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'agy',
+        agyTokenStorageEnv(executorConfig.agy?.forceFileTokenStorage));
     }
 
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };

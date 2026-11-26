@@ -66,12 +66,14 @@ interface MenuState {
 }
 
 interface ChoicePage {
+  compact?: boolean;
   choices: SettingsChoice[];
   index: number;
   total: number;
 }
 
 interface ChoiceLayout {
+  compact: boolean;
   menu: SettingsMenu;
   pending?: PendingRequest;
   timedOut?: boolean;
@@ -516,8 +518,8 @@ export class SettingsCards {
     const layout = state.choiceLayout;
     if (layout?.menu === state.menu && layout.pending === state.pending
       && layout.timedOut === state.pending?.timedOut && layout.notice === state.notice) return layout.pages;
-    const remember = (pages: SettingsChoice[][]) => {
-      state.choiceLayout = { menu: state.menu, pending: state.pending, timedOut: state.pending?.timedOut, notice: state.notice, pages };
+    const remember = (pages: SettingsChoice[][], compact = false) => {
+      state.choiceLayout = { menu: state.menu, pending: state.pending, timedOut: state.pending?.timedOut, notice: state.notice, pages, compact };
       return pages;
     };
     const fits = (renderState: MenuState, page: ChoicePage) => this.withinBudget(renderState, this.renderInteractive(renderState, page));
@@ -526,6 +528,10 @@ export class SettingsCards {
     // Reserve callback revision width so paging cannot shift choice boundaries
     // when revisions gain digits. Reuse the layout until visible chrome changes.
     const packingState = { ...state, revision: Number.MAX_SAFE_INTEGER };
+
+    if (state.menu.kind === 'model' && fits(packingState, { choices, index: 0, total: 1, compact: true })) {
+      return remember([choices], true);
+    }
 
     const pages: SettingsChoice[][] = [];
     let offset = 0;
@@ -610,7 +616,7 @@ export class SettingsCards {
     const pages = state.terminal ? undefined : this.choicePages(state);
     const index = pages ? Math.min(state.page, pages.length - 1) : 0;
     const elements = state.terminal ? this.renderTerminal(state)
-      : this.renderInteractive(state, { choices: pages![index], index, total: pages!.length });
+      : this.renderInteractive(state, { choices: pages![index], index, total: pages!.length, compact: state.choiceLayout?.compact });
     // Budget guard: degrade to a static card instead of risking a split card
     // with controls detached from their bound chunk.
     if (!this.withinBudget(state, elements)) {
@@ -829,9 +835,20 @@ export class SettingsCards {
         primary: choice.value === selectedValue,
         disabled: blocked || choice.disabled,
       }));
-    for (let index = 0; index < choiceButtons.length; index += 2) choiceBody.push(this.row(choiceButtons.slice(index, index + 2)));
+    if (page.compact) {
+      // Standalone schema 2.0 buttons preserve labels and callbacks without a
+      // column per model and a column_set for each pair.
+      choiceBody.push(...choiceButtons);
+    } else {
+      for (let i = 0; i < choiceButtons.length; i += 2) choiceBody.push(this.row(choiceButtons.slice(i, i + 2)));
+    }
+    if (total > 1) choiceBody.push(this.row([
+      this.button(state, 'page', '◀ Prev', { value: String(index - 1), disabled: blocked || index === 0 }),
+      this.button(state, 'page', 'Next ▶', { value: String(index + 1), disabled: blocked || index >= total - 1 }),
+    ]));
+    const pageSummary = total > 1 ? `Page ${index + 1} of ${total} · ${choices.length} of ${menu.choices.length} choices on this page. ` : '';
     elements.push(...this.section(`**2 · ${menu.kind === 'model' ? 'Model' : 'Effort'} for ${escapeMarkdown(targetLabel)}**`,
-      'Tap a choice to apply it immediately — it is saved per backend for this thread and used by future workers.',
+      pageSummary + 'Tap a choice to apply it immediately — it is saved per backend for this thread and used by future workers.',
       choiceBody));
 
     if (menu.kind === 'model' && menu.speed) {
@@ -854,11 +871,6 @@ export class SettingsCards {
     const utility: any[] = [];
     utility.push(this.button(state, 'view', 'Refresh', { value: menu.targetBackend,
       disabled: Boolean(state.pending) || !menu.backends.some(backend => backend.value === menu.targetBackend && backend.installed) }));
-    if (total > 1) {
-      utility.push(this.button(state, 'page', '◀ Prev', { value: String(index - 1), disabled: blocked || index === 0 }));
-      utility.push(this.button(state, 'page', `${index + 1}/${total}`, { value: String(index), disabled: true }));
-      utility.push(this.button(state, 'page', 'Next ▶', { value: String(index + 1), disabled: blocked || index >= total - 1 }));
-    }
     if (menu.supportsReset) utility.push(this.button(state, 'reset', 'Reset to default', { disabled: blocked }));
     if (utility.length > 0) {
       elements.push(...this.section(`**${menu.speed ? '4' : '3'} · More actions**`,

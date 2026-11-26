@@ -207,6 +207,14 @@ function initialRuntime(overrides: Partial<ConstructorParameters<typeof AgyAcpRu
 }
 
 describe('AGY production fresh-session entry (synthetic native records)', () => {
+  it.each([false, true])('forwards forced file token storage to the ACP process (worker=%s)', async delegationWorker => {
+    vi.stubEnv('AGY_CLI_FORCE_FILE_TOKEN_STORAGE', 'false');
+    executor = createExecutor(new DirectoryGuard([cwd]), { type: 'agy', agy: { forceFileTokenStorage: true } },
+      cwd, 'synthetic-thread', undefined, undefined, { delegationWorker }) as AgyExecutor;
+    await executor.execute('fixture');
+    expect(last().launch.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('true');
+    expect(process.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('false');
+  });
   it.each(['confirmed', 'worker', 'loaded', 'mutation', 'extra args', 'planner mismatch', 'missing', 'wrong nonce', 'wrong source',
     'rewritten planner', 'malformed call', 'missing Stop',
     'wrong step', 'wrong status', 'late post-tool', 'other unfinished tool', 'failed Stop', 'rewritten receipt', 'idle tool'])(

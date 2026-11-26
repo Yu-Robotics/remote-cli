@@ -30,7 +30,7 @@ export async function applyAgySessionSettings(session: AcpSessionResult,
       state = await configure(option.id, requested.model);
       model = selection(state, 'model')?.currentValue;
       const thought = selection(state, 'thought_level')?.currentValue;
-      if (!model || model !== requested.model && !(thought && ['low', 'medium', 'high'].includes(thought)
+      if (!model || model !== requested.model && !(thought && ['low', 'medium', 'high', 'xhigh'].includes(thought)
         && requested.model === `${model}-${thought}`)) throw new AgySessionSettingsError('model');
     } catch { throw new AgySessionSettingsError('model'); }
   }

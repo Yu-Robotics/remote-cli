@@ -85,6 +85,7 @@ export function createExecutor(
         model: model ?? executorConfig.agy?.model,
         effort,
         autoApprove: executorConfig.agy?.autoApprove ?? true,
+        forceFileTokenStorage: executorConfig.agy?.forceFileTokenStorage,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
         delegationWorker: runtime.delegationWorker,

@@ -196,7 +196,8 @@ export interface IExecutor {
   /** Clear a model override so the backend default is used. */
   clearModel?(): Promise<void> | void;
   /** List models available to the authenticated backend account. */
-  listModels?(): Promise<ExecutorModelInfo[]>;
+  /** A metadata preview may read the catalog of its original main thread. */
+  listModels?(context?: { threadId: string }): Promise<ExecutorModelInfo[]>;
   listSpeeds?(models?: ExecutorModelInfo[]): Promise<ExecutorSpeedInfo | undefined>;
   /** Undefined follows native configuration; "default" explicitly selects Standard. */
   setSpeed?(speed: string | undefined): Promise<ExecuteResult>;

@@ -167,7 +167,7 @@ describe('config command', () => {
       expect(mockConfig.set).not.toHaveBeenCalled();
     });
 
-    it.each(['maintenance.updateNotice', 'maintenance.subscriptionInspection'])('stores %s as a boolean so the documented opt-out works', async key => {
+    it.each(['maintenance.updateNotice', 'maintenance.subscriptionInspection', 'executor.agy.forceFileTokenStorage'])('validates and stores %s as a boolean', async key => {
       expect(await configCommand({ action: 'set', key, value: 'false' })).toMatchObject({ success: true, value: false });
       expect(mockConfig.set).toHaveBeenLastCalledWith(key, false);
       expect(await configCommand({ action: 'set', key, value: 'true' })).toMatchObject({ success: true, value: true });

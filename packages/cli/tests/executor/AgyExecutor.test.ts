@@ -223,6 +223,69 @@ describe('AGY ACP-only executor policies', () => {
     expect(await executor.listModels()).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'synthetic-model' })]));
     expect(fixture.runtimes).toHaveLength(0); expect(spawn).not.toHaveBeenCalled();
   });
+  it.each([
+    { configured: true, inherited: 'false', expected: 'true' },
+    { configured: false, inherited: 'true', expected: 'true' },
+    { configured: undefined, inherited: 'false', expected: 'false' },
+    { configured: undefined, inherited: undefined, expected: undefined },
+  ])('passes token storage policy to catalog and account helpers ($configured, $inherited)', async ({
+    configured, inherited, expected,
+  }) => {
+    const key = 'AGY_CLI_FORCE_FILE_TOKEN_STORAGE';
+    vi.stubEnv(key, inherited ?? '');
+    if (inherited === undefined) delete process.env[key];
+    executor = createExecutor(new DirectoryGuard([fixture.home]), { type: 'agy', agy: { forceFileTokenStorage: configured } },
+      cwd, 'synthetic-thread') as AgyExecutor;
+    const queries: string[][] = [];
+    vi.mocked(execFile).mockImplementation(((_command: string, args: string[], options: any, callback: any) => {
+      queries.push(args);
+      expect(options.env[key]).toBe(expected);
+      callback(null, args[0] === 'models' ? 'fixture-model\tFixture Model\n' : 'Fixture usage');
+    }) as any);
+    await executor.listModels();
+    await executor.getAccountUsage();
+    await executor.listModels({ threadId: 'synthetic-thread' });
+    expect(queries).toEqual([['models'], ['-p', '/usage'], ['-p', '/credits'], ['models']]);
+
+    expect(process.env[key]).toBe(inherited);
+  });
+  it('refreshes from the selected thread provider settings and working directory on every request', async () => {
+    const threadHome = path.join(fixture.home, '.remote-cli', 'agy-homes', 'synthetic-thread');
+    const settingsDir = path.join(threadHome, '.gemini', 'antigravity-cli');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    const settings = path.join(settingsDir, 'settings.json');
+    vi.mocked(execFile).mockImplementation(((command: string, args: string[], options: any, callback: any) => {
+      expect(command).toBe('agy');
+      expect(args).toEqual(['models']);
+      expect(options.cwd).toBe(cwd);
+      expect(options.env).toMatchObject({ HOME: threadHome, USERPROFILE: threadHome });
+      const { model } = JSON.parse(fs.readFileSync(settings, 'utf8'));
+      callback(null, model + '\tFixture model\n');
+    }) as any);
+    for (const model of ['first-provider-model', 'replacement-model']) {
+      fs.writeFileSync(settings, JSON.stringify({ model }));
+      expect((await executor.listModels()).map(item => item.id)).toEqual([model]);
+    }
+    const preview = make({ threadId: 'settings-meta-synthetic', delegationWorker: true });
+    expect((await preview.listModels({ threadId: 'synthetic-thread' }))[0].id).toBe('replacement-model');
+    await expect(preview.listModels({ threadId: '..' })).rejects.toThrow('Invalid AGY catalog thread ID');
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(fixture.runtimes).toHaveLength(0);
+  });
+
+  it('queries the account catalog before a thread HOME exists without allocating preview state', async () => {
+    const id = 'settings-meta-synthetic';
+    executor = make({ threadId: id, delegationWorker: true });
+    vi.mocked(execFile).mockImplementation(((_command: string, args: string[], options: any, callback: any) => {
+      expect(args).toEqual(['models']);
+      expect(options.cwd).toBe(cwd);
+      expect(options.env.HOME).toBe(fixture.home);
+      callback(null, 'account-model\tAccount Model\n');
+    }) as any);
+    expect((await executor.listModels())[0].id).toBe('account-model');
+    expect(fs.existsSync(path.join(fixture.home, '.remote-cli', 'agy-homes', id))).toBe(false);
+    expect(fixture.runtimes).toHaveLength(0);
+  });
   it('reports unavailable/invalid informational output without starting chat', async () => {
     vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: any, callback: any) => callback(new Error('Synthetic unavailable'), '')) as any);
     expect(await executor.getAccountUsage()).toBeNull(); await expect(executor.listModels()).rejects.toThrow('Failed to list');

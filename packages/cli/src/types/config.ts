@@ -43,6 +43,8 @@ export interface AgyExecutorConfig {
   model?: string;
   /** Auto-approve all tool permissions. Default: true. False = future Feishu approval flow. */
   autoApprove?: boolean;
+  /** Force AGY's native file token storage. Otherwise inherit the process environment. */
+  forceFileTokenStorage?: boolean;
   /** Override agy binary command (default: 'agy') */
   command?: string;
 }

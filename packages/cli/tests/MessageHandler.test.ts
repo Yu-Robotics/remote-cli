@@ -3092,11 +3092,14 @@ describe('MessageHandler', () => {
       );
     });
 
-    it('should honor executor.agy.command override for the agy binary', async () => {
-      useBackend({ type: 'agy', agy: { command: '/opt/agy-custom' } });
+    it('passes the configured AGY command and token storage policy to informational slash commands', async () => {
+      const command = path.join(ctx.workingDirectory, 'agy-custom');
+      useBackend({ type: 'agy', agy: { command, forceFileTokenStorage: true } });
       const { child, done } = await runSlash('/usage');
 
-      expect(mockSpawn).toHaveBeenCalledWith('/opt/agy-custom', ['-p', '/usage'], expect.anything());
+      expect(mockSpawn).toHaveBeenCalledWith(command, ['-p', '/usage'], expect.objectContaining({
+        env: expect.objectContaining({ AGY_CLI_FORCE_FILE_TOKEN_STORAGE: 'true' }),
+      }));
 
       child.emit('exit', 0);
       await done;

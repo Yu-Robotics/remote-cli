@@ -42,6 +42,14 @@ beforeEach(() => { policies.codex.clear(); policies.claude.clear(); policies.rea
 afterEach(() => { vi.useRealTimers(); });
 
 describe('isolated native settings catalogs', () => {
+  it('uses the original AGY catalog for main-thread previews and the account catalog for worker preferences', async () => {
+    const f = fixture();
+    await f.reader.read(config, thread, 'agy', 'agy', 'model');
+    expect(f.executor.listModels).toHaveBeenLastCalledWith({ threadId: thread.id });
+    await f.reader.read(config, thread, 'codex', 'agy', 'model');
+    expect(f.executor.listModels).toHaveBeenLastCalledWith();
+  });
+
   it('queries native speed capability only for negotiated model cards and preserves target preferences', async () => {
     const listSpeeds = vi.fn(async () => ({ choices: [{ value: 'priority', displayName: 'Native Fast', description: 'Native description' }], default: null }));
     const f = fixture({ listSpeeds, setSpeed: vi.fn() });

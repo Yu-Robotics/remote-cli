@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.288] - 2026-11-26
+
+### Fixed
+- Add a device preference for AGY file-backed authentication across model discovery and ACP sessions, and accept confirmed XHigh model variants.
+- Query the AGY catalog in the working directory and profile of the selected main thread, including settings-card refreshes.
+
+### Changed
+- Fit the full model catalog on one card when compact model buttons and speed controls fit the Feishu limits.
+- Show the page and catalog size beside paginated model and effort choices, with navigation directly below the choices.
+
 ## [1.6.287] - 2026-11-26
 
 ### Fixed

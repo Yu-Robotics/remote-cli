@@ -25,6 +25,7 @@ export interface AgyExecutorOptions {
   model?: string;
   effort?: string;
   autoApprove?: boolean;
+  forceFileTokenStorage?: boolean;
   initialWorkingDirectory?: string;
   agyCommand?: string;
   threadId?: string;
@@ -92,6 +93,10 @@ function mapAgyTool(
 
 export { parseAgyModels };
 
+export function agyTokenStorageEnv(forceFileTokenStorage?: boolean): Record<string, string> {
+  return forceFileTokenStorage === true ? { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: 'true' } : {};
+}
+
 /** ACP is the sole conversation transport. Legacy metadata remains readable only
  * for explicit selection reset and exact history cleanup. */
 export class AgyExecutor implements IExecutor {
@@ -99,6 +104,7 @@ export class AgyExecutor implements IExecutor {
   private model?: string;
   private effort?: string;
   private readonly autoApprove: boolean;
+  private readonly tokenStorageEnv: Record<string, string>;
   private readonly agyCommand: string;
   private readonly threadId?: string;
   private readonly agyHome?: string;
@@ -130,6 +136,7 @@ export class AgyExecutor implements IExecutor {
   constructor(private readonly directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.model = options.model; this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true; this.agyCommand = options.agyCommand ?? 'agy';
+    this.tokenStorageEnv = agyTokenStorageEnv(options.forceFileTokenStorage);
     this.threadId = options.threadId; this.delegationWorker = options.delegationWorker ?? false;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.currentWorkingDirectory = options.initialWorkingDirectory ? directoryGuard.resolveWorkingDirectory(options.initialWorkingDirectory) : process.cwd();
@@ -499,9 +506,13 @@ export class AgyExecutor implements IExecutor {
   private buildEnv(): NodeJS.ProcessEnv {
     const delegationEnv = this.delegationConnection ? delegationEnvironment(this.delegationConnection)
       : this.delegationWorker ? { REMOTE_CLI_DELEGATION_URL: undefined, REMOTE_CLI_DELEGATION_TOKEN: undefined } : {};
-    if (!this.agyHome) return { ...process.env, ...delegationEnv };
-    this.ensureThreadHome();
-    return { ...process.env, HOME: this.agyHome, ...(this.delegationWorker && process.platform === 'win32' ? { USERPROFILE: this.agyHome } : {}), ...delegationEnv };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...this.tokenStorageEnv, ...delegationEnv };
+    if (this.agyHome) {
+      this.ensureThreadHome();
+      env.HOME = this.agyHome;
+      if (this.delegationWorker && process.platform === 'win32') env.USERPROFILE = this.agyHome;
+    }
+    return env;
   }
 
   /**
@@ -813,12 +824,21 @@ export class AgyExecutor implements IExecutor {
     });
   }
 
-  async listModels(): Promise<ExecutorModelInfo[]> {
+  async listModels(context?: { threadId: string }): Promise<ExecutorModelInfo[]> {
+    // An existing thread may have its own provider settings. Before its first
+    // launch (including metadata previews), query the shared account directly.
+    if (context && !/^[a-zA-Z0-9_-]{1,128}$/.test(context.threadId)) throw new Error('Invalid AGY catalog thread ID.');
+    const home = context ? path.join(os.homedir(), '.remote-cli', 'agy-homes', context.threadId) : this.agyHome;
+    const env: NodeJS.ProcessEnv = { ...process.env, ...this.tokenStorageEnv };
+    if (home && fs.existsSync(path.join(home, '.gemini', 'antigravity-cli'))) {
+      env.HOME = home;
+      env.USERPROFILE = home;
+    }
     return new Promise((resolve, reject) => {
       execFile(
         this.agyCommand,
         ['models'],
-        { timeout: 10_000, maxBuffer: 1024 * 1024 },
+        { cwd: this.currentWorkingDirectory, env, timeout: 10_000, maxBuffer: 1024 * 1024 },
         (error, stdout) => {
           if (error) {
             reject(new Error(`Failed to list AGY models: ${error.message}`));

@@ -226,6 +226,13 @@ async function handleSetConfig(
     return { success: true, value: value === 'true' };
   }
 
+  if (key === 'executor.agy.forceFileTokenStorage') {
+    if (value !== 'true' && value !== 'false') return { success: false, error: `${key} requires true or false.` };
+    const enabled = value === 'true';
+    await config.set(key, enabled);
+    return { success: true, value: enabled };
+  }
+
   if (key === 'maintenance.updateNotice' || key === 'maintenance.subscriptionInspection') {
     if (value !== 'true' && value !== 'false') return { success: false, error: 'Maintenance options require true or false.' };
     const enabled = value === 'true';

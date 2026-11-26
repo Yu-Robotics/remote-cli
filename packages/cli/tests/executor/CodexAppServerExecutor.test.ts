@@ -976,6 +976,24 @@ describe('CodexAppServerExecutor', () => {
     await second;
   });
 
+  it('lists and selects models past a four-entry first page without starting a conversation', async () => {
+    const firstPage = ['model-a', 'model-b', 'model-c', 'model-d'];
+    const nextPage = ['model-e', 'model-f'];
+    const request = vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      expect(method).toBe('model/list');
+      expect(params).toMatchObject({ includeHidden: false });
+      const cursor = params.cursor;
+      if (cursor === null) return { data: firstPage.map(id => ({ id })), nextCursor: 'opaque-next' };
+      expect(cursor).toBe('opaque-next');
+      return { data: nextPage.map(id => ({ id })), nextCursor: null };
+    });
+
+    expect((await executor.listModels()).map(model => model.id)).toEqual([...firstPage, ...nextPage]);
+    expect(request).toHaveBeenCalledTimes(2);
+    await expect(executor.setModel('model-f')).resolves.toMatchObject({ success: true });
+    expect(request.mock.calls.map(([method]) => method)).toEqual(Array(4).fill('model/list'));
+  });
+
   it('paginates model metadata and ignores malformed catalog entries', async () => {
     vi.spyOn(transport, 'request').mockImplementation(async (method: string, params?: any) => {
       transport.running = true;

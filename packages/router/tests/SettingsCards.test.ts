@@ -769,17 +769,50 @@ describe('SettingsCards', () => {
     expect(buttonsOf(transport.update.mock.calls.at(-1)[1]).some(button => button.behaviors[0].value.op === 'apply' && !button.disabled)).toBe(true);
   });
 
+  it('fits ten Codex models, native speeds and all eight backend targets on one card', async () => {
+    transport.speedAvailable = vi.fn(() => true);
+    const ids = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark',
+      'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini', 'gpt-5.1'];
+    const { elements } = present(modelMenu({
+      coordinatorBackend: 'codex', targetBackend: 'codex', configuredValue: ids[0], effectiveValue: ids[0], defaultValue: ids[0],
+      choices: ids.map(value => ({ value, label: value.toUpperCase(), description: 'Native coding and reasoning model.' })),
+      speed: { choices: [
+        { value: 'default', label: 'Standard', description: 'Use standard processing.' },
+        { value: 'priority', label: 'Fast', description: 'Faster processing at a higher usage rate.' },
+      ] },
+    }));
+    const header = { title: { tag: 'plain_text', content: '🎯 Model settings' }, template: 'blue' };
+    const card = { schema: '2.0', header, body: { elements } };
+    expect(taggedNodes(card)).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThanOrEqual(16 * 1024);
+    const buttons = buttonsOf(elements);
+    expect(buttons.filter(b => b.behaviors[0].value.op === 'apply').map(b => b.behaviors[0].value.value)).toEqual(ids);
+    expect(buttons.some(b => b.behaviors[0].value.op === 'page')).toBe(false);
+    for (const [value] of BACKENDS) clickPayload(elements, 'view', value);
+    expect(buttons.find(b => b.text.content === 'Refresh')?.disabled).toBe(false);
+    clickPayload(elements, 'reset');
+    clickPayload(elements, 'speed_apply', 'default');
+    clickPayload(elements, 'speed_apply', 'priority');
+    clickPayload(elements, 'speed_reset');
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', ids[9]));
+    expect(transport.send.mock.calls.at(-1)[1]).toMatchObject({ operation: 'apply', snapshotId: 'snap-model', value: ids[9] });
+  });
+
   it('paginates large catalogs locally without CLI round-trips', async () => {
-    const choices = Array.from({ length: 20 }, (_, index) => ({ value: `model-${index}`, label: `Model ${index}` }));
+    const choices = Array.from({ length: 40 }, (_, index) => ({ value: `model-${index}`, label: `Model ${index}` }));
     const { elements } = present(modelMenu({ choices, omittedChoices: 5 }));
+    const pageCount = buttonsOf(elements).filter(button => button.behaviors[0].value.op === 'apply').length;
+    expect(JSON.stringify(elements)).toContain(`${pageCount} of 40 choices on this page`);
+    expect(JSON.stringify(elements)).toContain('Page 1 of');
     expect(JSON.stringify(elements)).toContain('5 more via the text command');
     expect(JSON.stringify(elements)).toContain('Model 0');
-    expect(JSON.stringify(elements)).not.toContain('Model 9"');
+    expect(pageCount).toBeLessThan(40);
     await cards.click('owner', 'card-1', clickPayload(elements, 'page', '1'));
     expect(transport.send).not.toHaveBeenCalled();
     await flush();
     const patched = transport.update.mock.calls.at(-1)[1];
-    expect(JSON.stringify(patched)).toContain('Model 9');
+    expect(JSON.stringify(patched)).toContain('Page 2 of');
+    expect(clickPayload(patched, 'apply', `model-${pageCount}`)).toBeDefined();
     expect(JSON.stringify(patched)).not.toContain('Model 0"');
     await expect(cards.click('owner', 'card-1', { ...clickPayload(patched, 'page', '2'), value: '9' })).rejects.toThrow('page');
   });
@@ -1122,7 +1155,7 @@ describe('SettingsCards', () => {
     const model = present(modelMenu({
       backends: BACKENDS.map(([value]) => ({ value, label: `${value}-${long}`, installed: value !== 'pi',
         ...(value === 'pi' ? { reason: long } : {}) })),
-      choices: Array.from({ length: 20 }, (_, index) => ({ value: `m-${index}`, label: `${index}-${long}`,
+      choices: Array.from({ length: 40 }, (_, index) => ({ value: `m-${index}`, label: `${index}-${long}`,
         ...(index === 3 ? { disabled: true, reason: long } : {}) })),
       omittedChoices: 7, supportsReset: true,
     }));
