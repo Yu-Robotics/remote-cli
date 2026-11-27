@@ -42,21 +42,14 @@ describe('stop command', () => {
   });
 
   describe('when server is not running', () => {
-    it('should report that server is not running', async () => {
+    it('reports that server is not running, suggests start, and exits with code 1', async () => {
       mockPidManager.getRunningPid.mockResolvedValue(null);
 
       await stopCommand();
 
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('not running'));
-      expect(processExitSpy).toHaveBeenCalledWith(1);
-    });
-
-    it('should suggest start command', async () => {
-      mockPidManager.getRunningPid.mockResolvedValue(null);
-
-      await stopCommand();
-
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('remote-cli-router start'));
+      expect(processExitSpy).toHaveBeenCalledWith(1);
     });
   });
 

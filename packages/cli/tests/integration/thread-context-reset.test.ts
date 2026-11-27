@@ -436,7 +436,7 @@ describe('thread-wide conversation reset', () => {
       await scope.close(true);
       await Promise.allSettled([setup]);
     }
-  });
+  }, 30_000); // Includes real Git checkout, worker shutdown, and artifact cleanup.
 
   it('blocks every old context after later direct-pointer cleanup fails, including reload, and allows an explicit retry', async () => {
     const worker = await lane('codex');

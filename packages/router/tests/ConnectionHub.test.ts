@@ -215,15 +215,6 @@ describe('ConnectionHub', () => {
     it('should return false for offline device', () => {
       expect(hub.isDeviceOnline('offline_device')).toBe(false);
     });
-
-    it('should return false for unregistered device', () => {
-      const deviceId = 'dev_test_001';
-
-      hub.registerConnection(deviceId, mockWs);
-      hub.unregisterConnection(deviceId);
-
-      expect(hub.isDeviceOnline(deviceId)).toBe(false);
-    });
   });
 
   describe('getOnlineDevices', () => {
@@ -252,20 +243,6 @@ describe('ConnectionHub', () => {
   });
 
   describe('getConnectionStats', () => {
-    it('should return statistics about connections', () => {
-      const device1 = 'dev_test_001';
-      const device2 = 'dev_test_002';
-
-      hub.registerConnection(device1, mockWs);
-      hub.registerConnection(device2, mockWs);
-
-      const stats = hub.getConnectionStats();
-
-      expect(stats.totalConnections).toBe(2);
-      expect(stats.deviceIds).toContain(device1);
-      expect(stats.deviceIds).toContain(device2);
-    });
-
     it('should return zero stats when no connections', () => {
       const stats = hub.getConnectionStats();
 

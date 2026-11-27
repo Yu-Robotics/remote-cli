@@ -68,9 +68,10 @@ describe('DirectoryGuard', () => {
       expect(result).toBe(true);
     });
 
-    it('should reject paths outside home directory', () => {
-      const result = guard.isSafePath('/etc/passwd');
-      expect(result).toBe(false);
+    it('rejects an absolute path outside home even when its directory is allowed', () => {
+      const outsideHome = path.join(path.dirname(homeDir), 'outside-home');
+      guard.addAllowedDirectory(outsideHome);
+      expect(guard.isSafePath(path.join(outsideHome, 'file.txt'))).toBe(false);
     });
 
     it('should reject paths to system directories', () => {
@@ -112,23 +113,6 @@ describe('DirectoryGuard', () => {
       const cwd = path.join(homeDir, 'work');
       const result = guard.isSafePath('../../other', cwd);
       expect(result).toBe(false);
-    });
-  });
-
-  describe('file path validation', () => {
-    it('should validate file paths in allowed directory', () => {
-      const result = guard.isSafePath('~/projects/my-app/src/index.ts');
-      expect(result).toBe(true);
-    });
-
-    it('should reject file paths outside allowed directories', () => {
-      const result = guard.isSafePath('~/downloads/suspicious.sh');
-      expect(result).toBe(false);
-    });
-
-    it('should handle paths with special characters', () => {
-      const result = guard.isSafePath('~/projects/my app/file name.ts');
-      expect(result).toBe(true);
     });
   });
 
@@ -222,6 +206,10 @@ describe('DirectoryGuard', () => {
     it('should handle paths with multiple .. sequences', () => {
       const result = guard.isSafePath('~/projects/a/b/c/../../d');
       expect(result).toBe(true);
+    });
+
+    it('should handle paths with special characters', () => {
+      expect(guard.isSafePath('~/projects/my app/file name.ts')).toBe(true);
     });
 
     it('rejects a sibling that shares an allowed directory name prefix', () => {

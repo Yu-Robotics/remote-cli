@@ -107,6 +107,18 @@ describe('RouterServer - generated image lifecycle', () => {
       .filter((element: any) => element?.tag === 'markdown' && /could not be uploaded/i.test(element.content ?? ''))
       .map((element: any) => element.content);
 
+  function holdNextUpload() {
+    let start!: () => void;
+    let finish!: (key: string) => void;
+    const started = new Promise<void>(resolve => { start = resolve; });
+    const result = new Promise<string>(resolve => { finish = resolve; });
+    mockFeishuHandler.uploadImage.mockImplementationOnce(() => {
+      start();
+      return result;
+    });
+    return { started, finish: () => finish('image-key-1') };
+  }
+
   beforeEach(() => {
     vi.useRealTimers();
     sockets = [];
@@ -144,7 +156,6 @@ describe('RouterServer - generated image lifecycle', () => {
       allowedMethods: vi.fn(() => (ctx: any, next: any) => next()),
     }));
 
-    let uploadDelay = 0;
     mockFeishuHandler = {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -159,11 +170,7 @@ describe('RouterServer - generated image lifecycle', () => {
       sendStreamingStart: vi.fn().mockResolvedValue('card-1'),
       updateStreamingMessage: vi.fn().mockResolvedValue(undefined),
       finalizeStreamingMessage: vi.fn().mockResolvedValue(undefined),
-      uploadImage: vi.fn().mockImplementation(async () => {
-        if (uploadDelay > 0) await new Promise(resolve => setTimeout(resolve, uploadDelay));
-        return 'image-key-1';
-      }),
-      setUploadDelay: (ms: number) => { uploadDelay = ms; },
+      uploadImage: vi.fn().mockResolvedValue('image-key-1'),
     };
     (FeishuLongConnHandler as unknown as any).mockImplementation(() => mockFeishuHandler);
 
@@ -203,27 +210,35 @@ describe('RouterServer - generated image lifecycle', () => {
     await sendText(onMessage, 'm1', 'working on it');
     await sendImage(onMessage, 'm1', pngBytes(1));
     await sendResponse(onMessage, 'm1');
-    await new Promise(resolve => setTimeout(resolve, 20));
     expect(imageElements().length).toBe(1);
     expect(failureHints().length).toBe(0);
     expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalled();
   });
 
-  it('drains an in-flight upload across the response instead of discarding it', async () => {
-    mockFeishuHandler.setUploadDelay(120);
+  it.each(['foreground', 'queued', 'recovered'])('drains an in-flight upload before finalizing a %s stream', async kind => {
+    vi.useFakeTimers();
     const onMessage = await connectAndBind('device-1');
-    await startSession('m1');
-    // Fire both without awaiting either: the response must drain the accepted
-    // upload before the terminal patch instead of discarding it.
-    const imagePromise = sendImage(onMessage, 'm1', pngBytes(2));
-    const responsePromise = sendResponse(onMessage, 'm1');
-    await imagePromise;
-    await responsePromise;
-    expect(imageElements().length).toBe(1);
-    const finalizeOrder = mockFeishuHandler.finalizeStreamingMessage.mock.invocationCallOrder[0] ?? Infinity;
-    const lastImagePatch = mockFeishuHandler.updateStreamingMessage.mock.invocationCallOrder.at(-1) ?? 0;
-    expect(lastImagePatch).toBeLessThan(finalizeOrder);
-  }, 10_000);
+    if (kind === 'queued') await sendQueueStarted(onMessage, 'm1');
+    else if (kind === 'recovered') await sendTaskResume(onMessage, 'm1');
+    else await startSession('m1');
+
+    await sendText(onMessage, 'm1', 'answer');
+    const upload = holdNextUpload();
+    const image = sendImage(onMessage, 'm1', pngBytes(2));
+    await upload.started;
+    const response = sendResponse(onMessage, 'm1');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+    upload.finish();
+    await Promise.all([image, response]);
+
+    expect(imageElements()).toHaveLength(1);
+    expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+    expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
+      .toContainEqual(expect.objectContaining({ tag: 'img', img_key: 'image-key-1' }));
+    expect(mockFeishuHandler.updateStreamingMessage.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(mockFeishuHandler.finalizeStreamingMessage.mock.invocationCallOrder[0]);
+  });
 
   it('fences a late image after the drain deadline while keeping the text result', async () => {
     vi.useFakeTimers();
@@ -274,7 +289,6 @@ describe('RouterServer - generated image lifecycle', () => {
     await sendImage(onMessage, 'm1', pngBytes(5)); // duplicate
     await sendImage(onMessage, 'm1', pngBytes(6)); // distinct
     await sendResponse(onMessage, 'm1');
-    await new Promise(resolve => setTimeout(resolve, 20));
     expect(mockFeishuHandler.uploadImage).toHaveBeenCalledTimes(2);
     expect(imageElements().length).toBe(2);
   });
@@ -284,7 +298,6 @@ describe('RouterServer - generated image lifecycle', () => {
     await startSession('m1');
     for (let index = 0; index < 10; index++) await sendImage(onMessage, 'm1', pngBytes(10 + index));
     await sendResponse(onMessage, 'm1');
-    await new Promise(resolve => setTimeout(resolve, 30));
     expect(mockFeishuHandler.uploadImage).toHaveBeenCalledTimes(8);
     expect(imageElements().length).toBe(8);
     expect(failureHints().length).toBeGreaterThan(0);
@@ -296,18 +309,22 @@ describe('RouterServer - generated image lifecycle', () => {
     const oversized = Buffer.alloc(3 * 1024 * 1024, 7).toString('base64');
     await sendImage(onMessage, 'm1', oversized);
     await sendResponse(onMessage, 'm1');
-    await new Promise(resolve => setTimeout(resolve, 10));
     expect(mockFeishuHandler.uploadImage).not.toHaveBeenCalled();
     expect(failureHints().length).toBe(1);
     expect(JSON.stringify(mockFeishuHandler.updateStreamingMessage.mock.calls)).not.toContain('/repo');
   });
 
   it('keeps image ordering FIFO across uploads', async () => {
-    mockFeishuHandler.setUploadDelay(15);
+    vi.useFakeTimers();
+    const upload = holdNextUpload();
     const onMessage = await connectAndBind('device-1');
     await startSession('m1');
     const first = sendImage(onMessage, 'm1', pngBytes(21));
+    await upload.started;
     const second = sendImage(onMessage, 'm1', pngBytes(22));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFeishuHandler.uploadImage).toHaveBeenCalledTimes(1);
+    upload.finish();
     await Promise.all([first, second]);
     await sendResponse(onMessage, 'm1');
     const payloads = mockFeishuHandler.uploadImage.mock.calls.map(call => call[0]);
@@ -316,65 +333,36 @@ describe('RouterServer - generated image lifecycle', () => {
   }, 10_000);
 
   it('does not serialize independent streams or stall text updates', async () => {
-    mockFeishuHandler.setUploadDelay(100);
+    const upload = holdNextUpload();
     const onMessage = await connectAndBind('device-1');
     await startSession('m1', 'thread-a');
     await startSession('m2', 'thread-b');
     const imagePromise = sendImage(onMessage, 'm1', pngBytes(31));
-    // m2 text is handled while m1's upload is still draining.
+    await upload.started;
     await sendText(onMessage, 'm2', 'independent text');
     expect(mockFeishuHandler.updateStreamingMessage.mock.calls
       .some(call => call[1].some((e: any) => e?.content === 'independent text'))).toBe(true);
+    upload.finish();
     await imagePromise;
     await sendResponse(onMessage, 'm1');
   }, 10_000);
 
   it('fences accepted work when the stream is replaced before the upload settles', async () => {
-    mockFeishuHandler.uploadImage.mockImplementation(async () => {
-      await new Promise(resolve => setTimeout(resolve, 150));
-      return 'image-key-1';
-    });
+    const upload = holdNextUpload();
     const onMessage = await connectAndBind('device-1');
     await startSession('m1');
     // Replace the stream state (same messageId) while the terminal response
     // is still draining the accepted upload.
     const imagePromise = sendImage(onMessage, 'm1', pngBytes(41));
+    await upload.started;
     const responsePromise = sendResponse(onMessage, 'm1');
     await startSession('m1');
+    upload.finish();
     await imagePromise;
     await responsePromise;
     expect(imageElements().length).toBe(0);
   }, 10_000);
 
-  it('drains an in-flight upload for a queued stream before finalization', async () => {
-    mockFeishuHandler.setUploadDelay(120);
-    const onMessage = await connectAndBind('device-1');
-    await sendQueueStarted(onMessage, 'm1');
-    await sendText(onMessage, 'm1', 'queued output');
-    const imagePromise = sendImage(onMessage, 'm1', pngBytes(51));
-    const responsePromise = sendResponse(onMessage, 'm1');
-    await imagePromise;
-    await responsePromise;
-    expect(imageElements().length).toBe(1);
-    const finalizeOrder = mockFeishuHandler.finalizeStreamingMessage.mock.invocationCallOrder[0] ?? Infinity;
-    const lastImagePatch = mockFeishuHandler.updateStreamingMessage.mock.invocationCallOrder.at(-1) ?? 0;
-    expect(lastImagePatch).toBeLessThan(finalizeOrder);
-  }, 10_000);
-
-  it('drains an in-flight upload for a recovered stream before finalization', async () => {
-    mockFeishuHandler.setUploadDelay(120);
-    const onMessage = await connectAndBind('device-1');
-    await sendTaskResume(onMessage, 'm1');
-    await sendText(onMessage, 'm1', 'recovered output');
-    const imagePromise = sendImage(onMessage, 'm1', pngBytes(61));
-    const responsePromise = sendResponse(onMessage, 'm1');
-    await imagePromise;
-    await responsePromise;
-    expect(imageElements().length).toBe(1);
-    const finalizeOrder = mockFeishuHandler.finalizeStreamingMessage.mock.invocationCallOrder[0] ?? Infinity;
-    const lastImagePatch = mockFeishuHandler.updateStreamingMessage.mock.invocationCallOrder.at(-1) ?? 0;
-    expect(lastImagePatch).toBeLessThan(finalizeOrder);
-  }, 10_000);
   it.each(['queued', 'recovered'])('closes %s image intake at response ingress while card creation is pending', async kind => {
     vi.useFakeTimers();
     const onMessage = await connectAndBind('device-1');

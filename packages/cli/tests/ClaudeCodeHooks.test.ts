@@ -234,16 +234,6 @@ describe('ClaudeCodeHooks', () => {
       expect(handler).toHaveBeenCalledTimes(3);
       expect(handler.mock.calls.map(c => c[0].status)).toEqual(['completed', 'failed', 'stopped']);
     });
-
-    it('should not invoke handler after removeAllHandlers', async () => {
-      const handler = vi.fn();
-      hooks.onTaskNotification(handler);
-      hooks.removeAllHandlers();
-
-      await hooks.notifyTaskNotification(createNotification());
-
-      expect(handler).not.toHaveBeenCalled();
-    });
   });
 
   describe('tool execution', () => {
@@ -424,11 +414,13 @@ describe('ClaudeCodeHooks', () => {
       const confirmHandler = vi.fn().mockResolvedValue(true);
       const inputHandler = vi.fn().mockResolvedValue('input');
       const taskHandler = vi.fn();
+      const taskNotificationHandler = vi.fn();
 
       hooks.onAuthorizationRequired(authHandler);
       hooks.onConfirmationRequired(confirmHandler);
       hooks.onUserInputRequired(inputHandler);
       hooks.onTaskStarted(taskHandler);
+      hooks.onTaskNotification(taskNotificationHandler);
 
       // Populate cache
       await hooks.requestAuthorization({
@@ -441,7 +433,7 @@ describe('ClaudeCodeHooks', () => {
 
       hooks.removeAllHandlers();
 
-      // Handlers should no longer be called
+      // Handlers and cached decisions should no longer apply
       const authResult = await hooks.requestAuthorization({
         actionType: 'file_access',
         description: 'Test',
@@ -457,6 +449,21 @@ describe('ClaudeCodeHooks', () => {
 
       const inputResult = await hooks.requestUserInput({ prompt: 'Test', type: 'text' });
       expect(inputResult).toBe(null);
+
+      await hooks.notifyTaskStarted({
+        taskId: 'task-1',
+        description: 'Test',
+        workingDirectory: process.cwd(),
+        startTime: Date.now(),
+      });
+      await hooks.notifyTaskNotification({
+        taskId: 'b4a2f1',
+        status: 'completed',
+        summary: 'Done',
+        outputFile: '',
+      });
+      expect(taskHandler).not.toHaveBeenCalled();
+      expect(taskNotificationHandler).not.toHaveBeenCalled();
     });
   });
 

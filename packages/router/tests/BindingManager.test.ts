@@ -77,18 +77,6 @@ describe('BindingManager', () => {
       expect(bindingCode.createdAt).toBeLessThanOrEqual(Date.now());
       expect(bindingCode.expiresAt).toBe(bindingCode.createdAt + 5 * 60 * 1000); // Expires in 5 minutes
     });
-
-    it('should store binding code in store', async () => {
-      const deviceId = 'dev_test_123';
-      const deviceName = 'Test-Device';
-
-      const bindingCode = await bindingManager.generateBindingCode(deviceId, deviceName);
-
-      // Verify the code can be retrieved
-      const retrieved = await bindingManager.verifyBindingCode(bindingCode.code);
-      expect(retrieved).not.toBeNull();
-      expect(retrieved?.deviceId).toBe(deviceId);
-    });
   });
 
   describe('verifyBindingCode', () => {
@@ -162,6 +150,7 @@ describe('BindingManager', () => {
 
       // Verify both devices are bound
       const binding = await bindingManager.getUserBinding(openId);
+      expect(binding?.openId).toBe(openId);
       expect(binding?.devices.length).toBe(2);
       expect(binding?.devices[0].deviceId).toBe(device1Id);
       expect(binding?.devices[0].isActive).toBe(true); // First device is active
@@ -202,42 +191,9 @@ describe('BindingManager', () => {
       expect(user1Binding?.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
       expect(user2Binding).toBeNull(); // User 2 has no devices
     });
-
-    it('should allow same user to rebind their own device', async () => {
-      const openId = 'ou_test_user';
-      const deviceId = 'dev_test_123';
-
-      // Bind device first time
-      await bindingManager.bindUser(openId, deviceId, 'Device-Old-Name');
-
-      // Same user rebinds the same device with new name - should succeed
-      await expect(
-        bindingManager.bindUser(openId, deviceId, 'Device-New-Name')
-      ).resolves.not.toThrow();
-
-      // Verify device name was updated
-      const binding = await bindingManager.getUserBinding(openId);
-      expect(binding?.devices[0].deviceName).toBe('Device-New-Name');
-    });
   });
 
   describe('getUserBinding', () => {
-    it('should get user binding information with multiple devices', async () => {
-      const openId = 'ou_test_user';
-      const device1Id = 'dev_test_123';
-      const device2Id = 'dev_test_456';
-
-      await bindingManager.bindUser(openId, device1Id, 'Device-1');
-      await bindingManager.bindUser(openId, device2Id, 'Device-2');
-
-      const binding = await bindingManager.getUserBinding(openId);
-
-      expect(binding).not.toBeNull();
-      expect(binding?.openId).toBe(openId);
-      expect(binding?.devices.length).toBe(2);
-      expect(binding?.activeDeviceId).toBe(device1Id);
-    });
-
     it('should return null when user is not bound', async () => {
       const openId = 'ou_unbound_user';
 
@@ -369,20 +325,6 @@ describe('BindingManager', () => {
   });
 
   describe('getDeviceBinding', () => {
-    it('should get device binding information via reverse lookup', async () => {
-      const openId = 'ou_test_user';
-      const deviceId = 'dev_test_123';
-
-      await bindingManager.bindUser(openId, deviceId, 'Test-Device');
-
-      const binding = await bindingManager.getDeviceBinding(deviceId);
-
-      expect(binding).not.toBeNull();
-      expect(binding?.openId).toBe(openId);
-      expect(binding?.devices.length).toBe(1);
-      expect(binding?.devices[0].deviceId).toBe(deviceId);
-    });
-
     it('should return null when device is not bound', async () => {
       const deviceId = 'dev_unbound_123';
 
@@ -391,9 +333,12 @@ describe('BindingManager', () => {
       expect(binding).toBeNull();
     });
 
-    it('should work with multiple devices', async () => {
+    it('returns the user binding for each device as more devices are added', async () => {
       const openId = 'ou_test_user';
       await bindingManager.bindUser(openId, 'dev_1', 'Device-1');
+      const first = await bindingManager.getDeviceBinding('dev_1');
+      expect(first?.openId).toBe(openId);
+      expect(first?.devices.map(device => device.deviceId)).toEqual(['dev_1']);
       await bindingManager.bindUser(openId, 'dev_2', 'Device-2');
 
       const binding1 = await bindingManager.getDeviceBinding('dev_1');

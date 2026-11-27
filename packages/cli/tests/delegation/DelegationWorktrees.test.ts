@@ -142,21 +142,21 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     } finally { phaseListeners.delete(listener); }
   };
   // Waiting for a drain must not add that drain to the set it drains.
-  const gitWait = async <T>(name: string | (() => string), operation: Promise<T>): Promise<T> => {
+  const gitWait = async <T>(name: string | (() => string), operation: Promise<T>, timeoutMs = 30_000): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           phaseAdmissionClosed = true;
-          reject(new Error(`Git lifecycle phase exceeded 30 seconds: ${typeof name === 'string' ? name : name()}`));
+          reject(new Error(`Git lifecycle phase exceeded ${timeoutMs / 1000} seconds: ${typeof name === 'string' ? name : name()}`));
           notifyPhase();
-        }, 30_000);
+        }, timeoutMs);
       })]);
     } finally { clearTimeout(timer); }
   };
-  const gitPhase = <T>(name: string | (() => string), action: () => Promise<T>): Promise<T> => {
+  const gitPhase = <T>(name: string | (() => string), action: () => Promise<T>, timeoutMs?: number): Promise<T> => {
     try { assertAdmission(); } catch (error) { return Promise.reject(error); }
-    return gitWait(name, trackCall(Promise.resolve().then(() => { assertAdmission(); return action(); })));
+    return gitWait(name, trackCall(Promise.resolve().then(() => { assertAdmission(); return action(); })), timeoutMs);
   };
   const awaitEntry = (name: string, entered: Promise<void>, operation: Promise<unknown>) => Promise.race([
     entered, operation.then(() => { throw new Error(`Fixture operation ended before entry: ${name}`); }),
@@ -260,6 +260,27 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       await Promise.allSettled([running, ...(settling ? [settling] : []), ...pendingCalls]);
     }
   }, phaseBudget(3));
+
+  it('keeps a checkout phase tracked beyond the ordinary deadline and bounded by the checkout deadline', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const timeoutMs = gitCommands.CHECKPOINT_LIMITS.checkoutMs;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = gitPhase('apply and reclaim', () => gate, timeoutMs);
+    const timedOut = expect(running).rejects.toThrow(`Git lifecycle phase exceeded ${timeoutMs / 1000} seconds: apply and reclaim`);
+    try {
+      await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+      expect(phaseAdmissionClosed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await timedOut;
+      expect(phaseAdmissionClosed).toBe(true);
+      expect(pendingCalls.size).toBe(1);
+    } finally {
+      release();
+      await Promise.allSettled([running, timedOut, ...pendingCalls]);
+      vi.useRealTimers();
+    }
+  });
 
   it('does not enter a scheduled Git phase once teardown has begun', async () => {
     const action = vi.fn(async () => undefined);
@@ -940,10 +961,11 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await result(scope, first.taskId, 'first-result');
     const inspection: any = await gitPhase('inspect the first conversation artifact', () =>
       scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect'));
+    // One tool call rechecks the delivery checkpoint, applies the artifact and reclaims the checkout.
     await gitPhase('apply and reclaim the first conversation artifact', async () => {
       expect(await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
         expectedRevision: inspection.revision }, 'apply')).toMatchObject({ disposition: 'applied' });
-    });
+    }, gitCommands.CHECKPOINT_LIMITS.checkoutMs);
     await gitPhase('verify reclamation and add sibling changes', async () => {
       await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
       expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
@@ -960,7 +982,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       return second;
     });
     await result(scope, second.taskId, 'second-result');
-  }, phaseBudget(17));
+  }, phaseBudget(16) + gitCommands.CHECKPOINT_LIMITS.checkoutMs);
 
   it('reuses a historically delivered lane before the next worker without deleting its checkout at admission', async () => {
     const scope = manager.begin(parent);

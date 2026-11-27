@@ -1388,14 +1388,6 @@ describe('FeishuLongConnHandler', () => {
     });
   });
 
-  describe('getBindingManager', () => {
-    it('should return binding manager instance', () => {
-      const result = handler.getBindingManager();
-
-      expect(result).toBe(mockBindingManager);
-    });
-  });
-
   describe('splitElementsIntoChunks', () => {
     it.each([180, 181])('enforces the %i-node boundary including nested button text', total => {
       const nested = Array.from({ length: 45 }, (_, index) => ({
