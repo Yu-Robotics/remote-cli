@@ -99,6 +99,7 @@ interface PendingDelivery {
   occurrenceId: string;
   afterCancellation?: boolean;
   success: boolean;
+  skippedBeforeAdmission?: true;
   output?: string;
   error?: string;
 }
@@ -381,6 +382,7 @@ export class ScheduleService {
     // fences replay even after an old diagnostic receipt leaves this window.
     record.completedOccurrences = [...(record.completedOccurrences ?? []), occurrenceId].slice(-this.maxOccurrences);
     this.pending.set(id, { id, scheduleId: record.id, occurrenceId, success: result.success,
+      ...(skipped && { skippedBeforeAdmission: true as const }),
       ...(record.cancelRequested && { afterCancellation: true }),
       ...(result.output !== undefined && { output: bounded(result.output, OUTPUT_BYTES) }),
       ...(result.error !== undefined && { error: bounded(result.error, ERROR_BYTES) }) });
@@ -1173,7 +1175,9 @@ export class ScheduleService {
             this.pending.delete(id); await this.persist(); return;
           }
           delivery = { id, schedule: structuredClone(record), occurrenceId: pending.occurrenceId,
-            success: pending.success, ...(pending.output !== undefined && { output: pending.output }),
+            success: pending.success,
+            ...(pending.skippedBeforeAdmission && { skippedBeforeAdmission: true as const }),
+            ...(pending.output !== undefined && { output: pending.output }),
             ...(pending.error !== undefined && { error: pending.error }) };
         });
         if (!delivery || this.closing || !this.current(delivery.schedule) || !this.pending.has(id)
@@ -1357,10 +1361,13 @@ export class ScheduleService {
       records.set(record.id, structuredClone(record) as unknown as ScheduleRecord);
     }
     for (const value of catalog.pending) {
-      const item = object(value, ['id', 'scheduleId', 'occurrenceId', 'success', 'output', 'error', 'afterCancellation']);
+      const item = object(value, ['id', 'scheduleId', 'occurrenceId', 'success', 'skippedBeforeAdmission', 'output', 'error', 'afterCancellation']);
       validateScheduleId(item.scheduleId); text(item.occurrenceId);
       if (item.id !== deliveryId(item.scheduleId, item.occurrenceId) || !records.has(item.scheduleId)
         || pending.has(item.id as string) || typeof item.success !== 'boolean') throw new Error('Invalid pending schedule delivery.');
+      const record = records.get(item.scheduleId)!;
+      if (item.skippedBeforeAdmission !== undefined && (item.skippedBeforeAdmission !== true || item.success
+        || record.engine !== 'host' || record.backend !== 'agy')) throw new Error('Invalid skipped-before-admission result.');
       for (const [field, limit] of [['output', OUTPUT_BYTES], ['error', ERROR_BYTES]] as const) {
         if (item[field] !== undefined && (typeof item[field] !== 'string' || Buffer.byteLength(item[field] as string) > limit)) throw new Error('Invalid delivery text.');
       }

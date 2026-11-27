@@ -21,12 +21,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
+import { FEISHU_MESSAGE_CLOCK_SKEW_MS, FEISHU_MESSAGE_MAX_AGE_MS, IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
 import { isDelegationEnabled } from '../thread/DelegationSettings';
-import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorGoalRunRequest, IExecutor } from '../executor/IExecutor';
+import type { AgyHumanConfirmation, ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorGoalRunRequest, IExecutor } from '../executor/IExecutor';
+import type { ManagedToolConnection } from '../managed/contract';
 import { formatGoal, GOAL_USAGE, parseGoalCommand } from './GoalCommand';
 import { createExecutor } from '../executor';
 import { agyTokenStorageEnv } from '../executor/AgyExecutor';
@@ -302,6 +303,9 @@ export class MessageHandler {
   private scheduleResultsSupported = false;
   private readonly activeHumanMessages = new Set<string>();
   private authenticatedRegistration?: string;
+  private humanRouteRevision = 0;
+  private humanClock = 0;
+
   private scheduleBinding?: DeviceBinding;
   private queueAwaitingRegistration = false;
   private scheduleCardsSupported = false;
@@ -352,6 +356,7 @@ export class MessageHandler {
       this.discardQueueCommands(command => !command.binding);
       this.authenticatedRegistration = undefined;
       this.scheduleBinding = undefined;
+      this.cancelRecoveredInputs();
       this.scheduleResultsSupported = false;
       this.scheduleCardsSupported = false;
       this.scheduleToolCardsSupported = false;
@@ -519,6 +524,7 @@ export class MessageHandler {
       case 'binding_confirm': {
         const data = (message as any).data;
         this.scheduleResultsSupported = data?.success === true && data.capabilities?.scheduleResultsV1 === true;
+        const previousRegistration = this.authenticatedRegistration;
         this.authenticatedRegistration = data?.success === true && typeof data.registrationId === 'string'
           && data.registrationId.length > 0 && data.registrationId.length <= 128 ? data.registrationId : undefined;
         const binding = data?.scheduleBinding;
@@ -530,8 +536,12 @@ export class MessageHandler {
           ? { deviceId: binding.deviceId, openId: binding.openId, epoch: binding.epoch } : undefined;
         this.queueAwaitingRegistration = data?.success !== true || (data.capabilities?.hostSchedulesV1 === true && !this.scheduleBinding);
         if (!this.queueAwaitingRegistration) this.discardQueueCommands(command => !this.queueBindingMatches(command));
-        if (previousBinding?.openId !== this.scheduleBinding?.openId || previousBinding?.epoch !== this.scheduleBinding?.epoch
-          || previousBinding?.deviceId !== this.scheduleBinding?.deviceId) {
+        const bindingChanged = previousBinding?.openId !== this.scheduleBinding?.openId || previousBinding?.epoch !== this.scheduleBinding?.epoch
+          || previousBinding?.deviceId !== this.scheduleBinding?.deviceId;
+        if (bindingChanged || previousRegistration !== this.authenticatedRegistration) {
+          this.cancelRecoveredInputs();
+        }
+        if (bindingChanged) {
           this.imageConnectionEpoch++;
           this.scheduleCards.invalidate();
           this.clearScheduleCardReceipts();
@@ -666,6 +676,24 @@ export class MessageHandler {
     this.automaticUpdateInProgress = false;
   }
 
+  private cancelRecoveredInputs(): void {
+    this.humanRouteRevision++;
+    for (const thread of this.threadManager.listThreads()) {
+      this.threadPool.getExistingExecutor(thread.id)?.cancelRecoveredInput?.();
+    }
+  }
+
+  private agyHumanRouteKey(source: NonNullable<IncomingMessage['humanSource']>, openId: string | undefined, threadId: string): string {
+    return JSON.stringify([source.deviceId, source.bindingEpoch, openId ?? '', source.registrationId, threadId]);
+  }
+
+  private humanTimestampFresh(createdAt: number): boolean {
+    const now = Date.now();
+    this.humanClock = Math.max(this.humanClock, now);
+    return Number.isSafeInteger(createdAt) && this.humanClock <= now + FEISHU_MESSAGE_CLOCK_SKEW_MS
+      && createdAt <= now + FEISHU_MESSAGE_CLOCK_SKEW_MS && createdAt > this.humanClock - FEISHU_MESSAGE_MAX_AGE_MS;
+  }
+
   /**
    * Handle command message — route to the correct thread executor.
    */
@@ -674,20 +702,28 @@ export class MessageHandler {
     const content = message.content?.trim() ?? '';
     const queueInput = !content.startsWith('/') || /^\/queue(?:\s|$)/.test(content);
     const receivedEpoch = this.imageConnectionEpoch;
+    const routeRevision = this.humanRouteRevision;
     const binding = this.scheduleBinding;
-    const humanSourceCurrent = () => {
+    const humanRouteCurrent = () => {
       const source = message.humanSource;
-      const now = Date.now();
-      return !!binding && this.scheduleBinding === binding && this.wsClient.isConnected()
+      return !!binding && routeRevision === this.humanRouteRevision && this.wsClient.isConnected()
+        && receivedEpoch === this.imageConnectionEpoch
         && !this.isDestroyed && !!source && (message.threadId ?? this.threadManager.getDefaultThread().id) === threadId
         && binding.deviceId === source.deviceId && binding.openId === message.openId
         && !!this.authenticatedRegistration && source.registrationId === this.authenticatedRegistration
-        && binding.epoch === source.bindingEpoch && source.createdAt <= now && source.createdAt > now - 300_000;
+        && binding.epoch === source.bindingEpoch;
     };
-    const sourceCurrent = () => (!message.humanSource || humanSourceCurrent()) && (!queueInput || (!this.queueAwaitingRegistration && receivedEpoch === this.imageConnectionEpoch
+    const routeCurrent = () => (!message.humanSource || humanRouteCurrent()) && (!queueInput || (!this.queueAwaitingRegistration && receivedEpoch === this.imageConnectionEpoch
       && (!this.scheduleBinding || this.scheduleBinding.openId === message.openId)));
-    if (!sourceCurrent()) return;
+    if (!routeCurrent()) return;
+    const failExpired = () => this.sendResponse(message.messageId, threadId,
+      { success: false, error: 'The original Feishu message expired or its timestamp is too far ahead. Send a new message.' }, true);
+    const sourceCurrent = () => routeCurrent() && (!message.humanSource || this.humanTimestampFresh(message.humanSource.createdAt));
     this.messageOpenIds.set(message.messageId, message.openId);
+    if (!sourceCurrent()) {
+      failExpired();
+      return;
+    }
     // Old peers may still send this retired command with credentials.
     if (/^\/proxy(?:\s|$)/i.test(content)) {
       this.sendResponse(message.messageId, threadId, { success: false, error: 'Machine proxy settings were removed. Use /machine add with a direct SSH destination.' }, true);
@@ -726,7 +762,8 @@ export class MessageHandler {
     const body = () => {
       if (!sourceCurrent() || !admissionCurrent()) return Promise.resolve();
       if (!clearing && !management) this.threadManager.contextResets.assertReady(threadId);
-      return this.handleAdmittedCommandMessage(message, fileOrder, () => sourceCurrent() && admissionCurrent());
+      return this.handleAdmittedCommandMessage(message, fileOrder, () => sourceCurrent() && admissionCurrent(),
+        () => (!message.humanSource || humanRouteCurrent()) && admissionCurrent());
     };
     this.messageOpenIds.set(message.messageId, message.openId);
     if (isSessionControl(content) && this.automaticUpdateInProgress) {
@@ -798,13 +835,16 @@ export class MessageHandler {
     } finally {
       // Native readers retain their exclusion while settling, but an invalidated
       // request that never acquired an operation still needs a terminal response.
-      if (!sourceCurrent()) this.messageOpenIds.delete(message.messageId);
-      else if (!admissionCurrent()) cancelAdmission();
+      if (!sourceCurrent()) {
+        if (routeCurrent() && this.messageOpenIds.has(message.messageId)) failExpired();
+        this.messageOpenIds.delete(message.messageId);
+      } else if (!admissionCurrent()) cancelAdmission();
       if (this.hostWaiters.has(threadId)) void this.startNextQueuedCommand(threadId);
     }
   }
 
-  private async handleAdmittedCommandMessage(message: IncomingMessage, fileOrder?: number, admissionCurrent = () => true): Promise<void> {
+  private async handleAdmittedCommandMessage(message: IncomingMessage, fileOrder?: number, admissionCurrent = () => true,
+    humanRouteCurrent = admissionCurrent): Promise<void> {
     const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
@@ -887,9 +927,6 @@ export class MessageHandler {
     }
 
     let executor = this.threadPool.getExecutor(resolvedThreadId);
-    const recover = message.humanSource && this.threadPool.getBackendKey(resolvedThreadId) === 'agy'
-      && executor.needsAgyHumanRecovery?.(message.humanSource.originalMessageId);
-    const resumeMessage = recover ? content : undefined;
     this.sendStreamContext(messageId, resolvedThreadId, executor);
 
     const goalCommand = parseGoalCommand(settingsCommand);
@@ -994,11 +1031,38 @@ export class MessageHandler {
     }
     const inputExecutor = this.delegation.waitingExecutor(resolvedThreadId) ?? executor;
     if (!goalRequest && 'isWaitingInput' in inputExecutor && typeof inputExecutor.isWaitingInput === 'function') {
-      const ex = inputExecutor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
+      const ex = inputExecutor as {
+        isWaitingInput(): boolean;
+        requiresAuthenticatedInput?(): boolean;
+        sendInput(input: string, confirmation?: AgyHumanConfirmation): boolean;
+      };
       if (ex.isWaitingInput()) {
         const input = content?.trim();
         if (input) {
-          const sent = ex.sendInput(input);
+          let sent = false;
+          if (inputExecutor === executor && ex.requiresAuthenticatedInput?.()) {
+            const source = message.humanSource;
+            const plainHumanReply = !!source && !isSlashCommand && !input.startsWith('/')
+              && !attachments?.length && !message.fileIds?.length
+              && this.threadPool.getBackendKey(resolvedThreadId) === 'agy'
+              && admissionCurrent();
+            if (!plainHumanReply) {
+              this.sendResponse(messageId, resolvedThreadId, {
+                success: false,
+                error: '❌ AGY recovery questions require a fresh authenticated Feishu text reply in this thread.',
+              });
+              return;
+            }
+            sent = ex.sendInput(input, {
+              originalMessageId: source.originalMessageId,
+              createdAt: source.createdAt,
+              current: () => admissionCurrent() && this.threadPool.getExistingExecutor(resolvedThreadId) === executor
+                && this.threadPool.getBackendKey(resolvedThreadId) === 'agy',
+              routeKey: this.agyHumanRouteKey(source, openId, resolvedThreadId),
+            });
+          } else {
+            sent = ex.sendInput(input);
+          }
           this.sendResponse(messageId, resolvedThreadId, {
             success: sent,
             output: sent ? `✅ Sent: "${input}"` : undefined,
@@ -1016,6 +1080,9 @@ export class MessageHandler {
       }
     }
 
+    const recover = message.humanSource && this.threadPool.getBackendKey(resolvedThreadId) === 'agy'
+      && executor.needsAgyHumanRecovery?.(message.humanSource.originalMessageId);
+    const resumeMessage = recover ? content : undefined;
     const ordinaryMessage = !isSlashCommand && !content?.trim().startsWith('/');
     if (ordinaryMessage) {
       try {
@@ -1136,12 +1203,25 @@ export class MessageHandler {
       if (resumeMessage) {
         if (!executor.resumeAgyChat) throw new Error('This AGY executor does not support recovery from a Feishu message.');
         const resume = executor.resumeAgyChat.bind(executor);
+        const operationActive = () => !this.cancelledOperations.has(operationToken)
+          && this.activeThreadOperations.get(resolvedThreadId)?.token === operationToken
+          && !this.abortOperations.has(resolvedThreadId);
+        const source = message.humanSource!;
+        const routeCurrent = () => humanRouteCurrent() && operationActive()
+          && this.threadPool.getExistingExecutor(resolvedThreadId) === executor
+          && this.threadPool.getBackendKey(resolvedThreadId) === 'agy';
+        const routeKey = this.agyHumanRouteKey(source, openId, resolvedThreadId);
         await this.executeCommand(messageId, resolvedThreadId, resumeMessage, executor, undefined, false, {
           recoverHumanTurn: (_prompt, options) => {
-            if (!admissionCurrent()) throw new Error('The original Feishu message expired.');
-            const { originalMessageId, createdAt } = message.humanSource!;
-            return resume(resumeMessage, options, { originalMessageId, createdAt, current: () => admissionCurrent()
-              && this.threadPool.getExistingExecutor(resolvedThreadId) === executor && this.threadPool.getBackendKey(resolvedThreadId) === 'agy' });
+            if (!admissionCurrent() || !operationActive()) throw new Error('The original Feishu message expired.');
+            const { originalMessageId, createdAt } = source;
+            return resume(resumeMessage, options, {
+              originalMessageId,
+              createdAt,
+              current: () => admissionCurrent() && routeCurrent(),
+              routeCurrent,
+              routeKey,
+            });
           },
         });
         return;
@@ -2149,6 +2229,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       queueMicrotask(() => { void this.startNextQueuedCommand(threadId); });
       return;
     }
+    const routeRevision = this.humanRouteRevision;
     let entered = false;
     const current = () => entered || (!this.queueAwaitingRegistration && this.queueBindingMatches(command)
       && this.threadQueues.get(threadId)?.[0] === command);
@@ -2195,22 +2276,35 @@ You can also use natural language commands to control Claude Code CLI.`,
       };
       const source = command.humanSource;
       const agyUserMessage = !!source && this.threadPool.getBackendKey(threadId) === 'agy';
-      const authorized = () => {
+      const operationActive = () => !this.cancelledOperations.has(operationToken)
+        && this.activeThreadOperations.get(threadId)?.token === operationToken
+        && !this.abortOperations.has(threadId);
+      const routeCurrent = () => {
         const binding = this.scheduleBinding;
-        const now = Date.now();
-        return !!source && current() && !this.isDestroyed && this.wsClient.isConnected() && !!binding
+        return !!source && routeRevision === this.humanRouteRevision && current() && operationActive() && !this.isDestroyed && this.wsClient.isConnected() && !!binding
           && binding.deviceId === source.deviceId && binding.epoch === source.bindingEpoch
           && binding.openId === command.openId && !!this.authenticatedRegistration
-          && source.registrationId === this.authenticatedRegistration && source.createdAt <= now && source.createdAt > now - 300_000
+          && source.registrationId === this.authenticatedRegistration
           && (source.threadId ?? this.threadManager.getDefaultThread().id) === threadId
           && this.threadPool.getExistingExecutor(threadId) === executor && this.threadPool.getBackendKey(threadId) === 'agy';
       };
+      const authorized = () => routeCurrent() && !!source && this.humanTimestampFresh(source.createdAt);
+      if (agyUserMessage && !routeCurrent()) {
+        take();
+        return;
+      }
+      if (agyUserMessage && !authorized()) throw new Error('The original Feishu message expired or its timestamp is too far ahead.');
       const recover = agyUserMessage && executor.needsAgyHumanRecovery?.(source.originalMessageId);
       const recoverHumanTurn = recover ? (_prompt: string, options: ExecuteOptions) => {
         if (!executor.resumeAgyChat) throw new Error('This AGY executor does not support recovery from a Feishu message.');
         if (!authorized()) throw new Error('The original Feishu message expired or its route changed.');
-        return executor.resumeAgyChat(command.content, options, { originalMessageId: source.originalMessageId,
-          createdAt: source.createdAt, current: authorized });
+        return executor.resumeAgyChat(command.content, options, {
+          originalMessageId: source.originalMessageId,
+          createdAt: source.createdAt,
+          current: authorized,
+          routeCurrent,
+          routeKey: this.agyHumanRouteKey(source, command.openId, threadId),
+        });
       } : undefined;
       const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
       await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments, { current, start, take }, {
@@ -3089,8 +3183,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       if ((goalRequest || !openId) && executor.configureManagedTools && this.delegationBridges.has(threadId)) {
         await executor.configureManagedTools(undefined);
         assertCurrent();
-        this.detachDelegationBridge(threadId);
+        if (!executor.hasDeferredManagedTools?.()) this.detachDelegationBridge(threadId);
       }
+      let desiredBridgeGroups: ManagedToolConnection['groups'] | undefined;
       if (thread && isDelegationEnabled(thread) && executor.configureDelegation) {
         const backend = this.threadPool.getBackendKey(threadId);
         if (!thread.delegationBackends?.includes(backend)) {
@@ -3131,10 +3226,12 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         delegationBridge = this.delegationBridges.get(threadId) ?? new DelegationBridge();
         this.delegationBridges.set(threadId, delegationBridge);
-        const connection = await delegationBridge.start(executor.configureManagedTools && openId && !goalRequest ? ['delegation', 'scheduling'] : undefined);
+        desiredBridgeGroups = executor.configureManagedTools && openId && !goalRequest ? ['delegation', 'scheduling'] : undefined;
+        const connection = await delegationBridge.start(desiredBridgeGroups, { preserveExistingGroups: true });
         assertCurrent();
         await (executor.configureManagedTools ?? executor.configureDelegation).call(executor, connection);
         assertCurrent();
+        if (!executor.hasDeferredManagedTools?.()) delegationBridge.setGroups(desiredBridgeGroups);
         if (delegationScope.isClosed() || this.isDestroyed || this.abortOperations.has(threadId)) {
           throw new Error('Delegation was cancelled before the coordinator started');
         }
@@ -3173,8 +3270,10 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (!delegationBridge) {
           delegationBridge = this.delegationBridges.get(threadId) ?? new DelegationBridge();
           this.delegationBridges.set(threadId, delegationBridge);
-          const connection = await delegationBridge.start(['scheduling']);
+          desiredBridgeGroups = ['scheduling'];
+          const connection = await delegationBridge.start(desiredBridgeGroups, { preserveExistingGroups: true });
           assertCurrent(); await executor.configureManagedTools(connection); assertCurrent();
+          if (!executor.hasDeferredManagedTools?.()) delegationBridge.setGroups(desiredBridgeGroups);
         }
         scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, readOnly: !!recoverHumanTurn, bindingEpoch: this.scheduleBinding?.epoch, current: context.current,
           nativeAction: id => executor.nativeScheduleAction?.(id),
@@ -3319,6 +3418,9 @@ You can also use natural language commands to control Claude Code CLI.`,
             onAgyHumanPromptAdmitted: (current: () => boolean) => {
               if (humanQueryCurrent || !active || !isCurrent() || !current()) return;
               humanQueryCurrent = () => active && current();
+              if (!executor.hasDeferredManagedTools?.()) {
+                delegationBridge?.setGroups(desiredBridgeGroups);
+              }
               retireActivation = delegationBridge?.activate((name, args) => scheduleScope!.invoke(name, args));
             },
           }),
@@ -4382,9 +4484,11 @@ You can also use natural language commands to control Claude Code CLI.`,
         const bridge = this.delegationBridges.get(owner.threadId) ?? new DelegationBridge();
         this.delegationBridges.set(owner.threadId, bridge);
         const thread = this.threadManager.getThread(owner.threadId);
-        const connection = await bridge.start(thread && isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+        const groups: ManagedToolConnection['groups'] = thread && isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling'];
+        const connection = await bridge.start(groups, { preserveExistingGroups: true });
         if (!current()) throw new Error('Schedule purge owner changed.');
         await executor.configureManagedTools(connection);
+        if (!executor.hasDeferredManagedTools?.()) bridge.setGroups(groups);
       }
       if (needsVerification) return await executor.withReviewedNativeCleanup!(id, current, async host => {
         this.schedulePurgeHosts.set(owner.threadId, host);
@@ -4603,8 +4707,10 @@ You can also use natural language commands to control Claude Code CLI.`,
           // Keep ownership so inactive backends are cleaned when next resumed.
           if (!thread.delegationBackends) await this.threadManager.updateThread(threadId, { delegationBackends: [backend] });
         }
-        await this.delegationBridges.get(threadId)?.close();
-        this.delegationBridges.delete(threadId);
+        if (!executor.hasDeferredManagedTools?.()) {
+          await this.delegationBridges.get(threadId)?.close();
+          this.delegationBridges.delete(threadId);
+        }
       }
       await this.threadManager.updateThread(threadId, { delegation: enabled });
       return { success: true, output: `Delegation ${enabled ? 'enabled' : 'disabled'} for this thread.` };

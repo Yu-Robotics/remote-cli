@@ -49,10 +49,14 @@ export class ConnectionHub {
    * @param deviceId Device unique identifier
    * @param ws WebSocket connection
    */
-  registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean; agyHumanRecoveryV1?: boolean }): void {
+  registerConnection(deviceId: string, ws: WebSocket, capabilities?: {
+    queueStarted?: boolean; agyHumanRecoveryV1?: boolean;
+    authenticatedRoute?: { openId: string; registrationId: string };
+  }): void {
     if (capabilities?.agyHumanRecoveryV1 === true) this.humanRecoveryConnections.add(ws);
     else this.humanRecoveryConnections.delete(ws);
-    this.authenticatedRoutes.delete(ws);
+    if (capabilities?.authenticatedRoute) this.authenticatedRoutes.set(ws, { deviceId, ...capabilities.authenticatedRoute });
+    else this.authenticatedRoutes.delete(ws);
     this.fileSessions.delete(deviceId);
     const oldWs = this.connections.get(deviceId);
     // Replace the mapping first so the old socket cannot unregister its replacement.

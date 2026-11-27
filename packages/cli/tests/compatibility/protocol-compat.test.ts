@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
-import { CLI_VERSION, PROTOCOL_VERSION } from '../../src/types';
+import { CLI_VERSION, PROTOCOL_VERSION, type OutgoingMessage } from '../../src/types';
 import { buildReleaseIndex, releasePage } from '../../src/maintenance/ReleaseNotes';
 
 vi.mock('ws');
@@ -40,6 +40,17 @@ describe('CLI wire compatibility', () => {
       timestamp: expect.any(Number),
       data: { deviceId: 'device-1', protocolVersion: 1, capabilities: { queueStarted: true, outputAttachmentHintsV1: true, taskRecovery: true, scheduleResultsV1: true, hostSchedulesV1: true, agyHumanRecoveryV1: true, scheduleCardsV1: true, scheduleToolCardsV1: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, workerContextReset: true, streamingContext: true, activityProgress: true, settingsCards: true, modelSpeedSettings: true, directoryCards: true, delegationCards: true, updateNotice: true, subscriptionInspection: true, bankedResetReminder: true } },
     });
+  });
+
+  it.each([false, true])('sends an AGY scheduled result with the skip flag present only when applicable (%s)', skipped => {
+    const message: OutgoingMessage = {
+      type: 'response', messageId: 'scheduled-result', threadId: 'thread-1', success: false, timestamp: Date.now(),
+      queueStarted: { source: 'schedule', scheduleId: 'fixture', threadName: 'example', backend: 'agy',
+        cwd: '.', preview: 'Synthetic task', remainingCount: 0 },
+      ...(skipped && { skippedBeforeAdmission: true }),
+    };
+    client.send(message);
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual(message);
   });
 
   it('sends the heartbeat wire format without a message id', async () => {

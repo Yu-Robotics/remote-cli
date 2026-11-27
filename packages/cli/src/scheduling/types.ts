@@ -156,6 +156,7 @@ export interface ScheduleDelivery {
   schedule: ScheduleRecord;
   occurrenceId: string;
   success: boolean;
+  skippedBeforeAdmission?: true;
   output?: string;
   error?: string;
 }

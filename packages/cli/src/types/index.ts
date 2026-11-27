@@ -8,6 +8,8 @@ import type { ThreadSummary } from '../thread/types';
  * See CLAUDE.md § Protocol Versioning for rules on when to bump.
  */
 export const PROTOCOL_VERSION = 1;
+export const FEISHU_MESSAGE_MAX_AGE_MS = 300_000;
+export const FEISHU_MESSAGE_CLOCK_SKEW_MS = 30_000;
 
 /**
  * CLI npm package version, used to compare against the router version on startup.
@@ -273,6 +275,8 @@ export interface OutgoingMessage {
   type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume' | 'stream_context';
   messageId: string;
   success?: boolean;
+  /** Optional on a failed, correlated AGY host timer result that never ran. */
+  skippedBeforeAdmission?: true;
   /** Negotiated, dedicated settings card; legacy peers receive output only. */
   settingsMenu?: import('./Settings').SettingsMenu;
   /** Optional scheduleCardsV1 view; legacy peers receive text only. */

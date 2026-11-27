@@ -32,11 +32,22 @@ export class ManagedToolBridge {
     };
   }
 
-  async start(groups?: ManagedToolConnection['groups']): Promise<ManagedToolConnection> {
-    if (this.connection) { this.connection = { ...this.connection, groups }; return this.connection; }
-    if (this.starting) return this.starting;
+  async start(groups?: ManagedToolConnection['groups'], options?: { preserveExistingGroups?: boolean }): Promise<ManagedToolConnection> {
+    if (this.connection) {
+      if (options?.preserveExistingGroups) return { ...this.connection, groups };
+      this.connection = { ...this.connection, groups };
+      return this.connection;
+    }
+    if (this.starting) {
+      const connection = await this.starting;
+      return options?.preserveExistingGroups ? { ...connection, groups } : connection;
+    }
     this.starting = this.listen(groups);
     try { return await this.starting; } finally { this.starting = undefined; }
+  }
+
+  setGroups(groups?: ManagedToolConnection['groups']): void {
+    if (this.connection) this.connection = { ...this.connection, groups };
   }
 
   private async listen(groups?: ManagedToolConnection['groups']): Promise<ManagedToolConnection> {

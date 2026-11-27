@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.290] - 2026-11-27
+
+### Fixed
+- Resume eligible host timers on an authenticated, idle AGY conversation with verified synchronous tool history. Preserve the original schedule, checkpoint ownership and skipped-slot receipts.
+- Allow the original user to answer AGY questions during recovery, cancel queued recovery before dispatch, and continue after an idle AGY transport exits.
+- Tolerate small clock differences when delivering authenticated Feishu messages and wait for binding confirmation before routing a recovered conversation.
+- Show skipped scheduled occurrences on the result card and repair a relocated file-login link when refreshing an AGY catalog.
+
 ## [1.6.289] - 2026-11-26
 
 ### Fixed

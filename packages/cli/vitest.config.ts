@@ -36,6 +36,7 @@ export const nativeOwnershipTestFiles = [
   'tests/scheduling/AgyHookOwnership.test.ts',
   'tests/scheduling/AgyHookRelay.test.ts',
   'tests/executor/AgyAcpRuntime.test.ts',
+  'tests/executor/AgyHomeAuth.test.ts',
   'tests/ClaudePersistentExecutor.scheduling.test.ts',
   'tests/ScheduleService.test.ts',
   'tests/MessageHandler.schedule.test.ts',

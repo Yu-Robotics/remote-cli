@@ -452,7 +452,7 @@ describe('ScheduleService', () => {
       }
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
-      for (const [delivery] of deliver.mock.calls) expect(delivery).toMatchObject({ success: false, error: reason });
+      for (const [delivery] of deliver.mock.calls) expect(delivery).toMatchObject({ success: false, skippedBeforeAdmission: true, error: reason });
       await service.destroy();
       service = await run(dispatch);
       const rows = await service.list(owner);
@@ -465,8 +465,56 @@ describe('ScheduleService', () => {
       }
       await tick(interval);
       await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(3));
+      expect(deliver.mock.calls.at(-1)?.[0]).toMatchObject({ success: true });
+      expect(deliver.mock.calls.at(-1)?.[0]).not.toHaveProperty('skippedBeforeAdmission');
       expect(dispatch.mock.calls.map(([row, id]) => [row.id, id]).at(-1)).toEqual(['cron', `host-${clock}`]);
       expect(dispatch).toHaveBeenCalledTimes(3);
+    });
+
+    it('retries an unflagged legacy failure outbox without relabeling it', async () => {
+      const reason = 'Legacy skipped result';
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, _admit) =>
+        ({ success: false, skippedBeforeAdmission: true, error: reason }));
+      let service = await run(dispatch);
+      await service.create(owner, { ...hostInput('once'), backend: 'agy' });
+      deliver.mockRejectedValue(new Error('Offline'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      const catalog = await read();
+      await service.destroy();
+      delete catalog.pending[0].skippedBeforeAdmission;
+      await fs.writeFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
+      service = await run(dispatch);
+      deliver.mockResolvedValue(undefined);
+      await service.retryDeliveries();
+      expect(deliver.mock.calls.at(-1)?.[0]).toMatchObject({ success: false, error: reason });
+      expect(deliver.mock.calls.at(-1)?.[0]).not.toHaveProperty('skippedBeforeAdmission');
+      await service.retryDeliveries();
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect((await read()).pending).toEqual([]);
+    });
+
+    it.each([
+      { skippedBeforeAdmission: false },
+      { skippedBeforeAdmission: 'true' },
+      { skippedBeforeAdmission: true, success: true },
+      { skippedBeforeAdmission: true, backend: 'claude' },
+    ])('rejects an invalid skipped-before-admission outbox entry %o', async fields => {
+      const dispatch = vi.fn<Parameters<Dispatch>, ReturnType<Dispatch>>(async (_record, _id, _admit) =>
+        ({ success: false, skippedBeforeAdmission: true, error: 'Synthetic skip' }));
+      let service = await run(dispatch);
+      await service.create(owner, { ...hostInput('once'), backend: 'agy' });
+      deliver.mockRejectedValue(new Error('Offline'));
+      await tick(interval);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      const catalog = await read();
+      await service.destroy();
+      Object.assign(catalog.pending[0], fields);
+      if (fields.backend) catalog.records[0].backend = fields.backend;
+      await fs.writeFile(path.join(directory, HOST_SCHEDULE_CATALOG_FILE), JSON.stringify(catalog));
+      await expect(run(dispatch)).rejects.toThrow(/Invalid (?:skipped-before-admission result|host occurrence outcome)/);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
     });
 
     it('records two failed cron slots and a later success across restart with independent outbox receipts', async () => {

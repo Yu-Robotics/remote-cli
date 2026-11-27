@@ -83,11 +83,14 @@ describe('Router wire compatibility', () => {
   });
 
   it('recognizes manual AGY recovery only on an opted-in connection', async () => {
+    const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
+    const hub = vi.mocked(feishu.setConnectionHub).mock.calls[0][0];
+    socket.send.mockImplementationOnce(() => {
+      expect(hub.isDeviceOnline('device-1')).toBe(false);
+    });
     await receive({ type: 'binding_request', data: {
       deviceId: 'device-1', protocolVersion: 1, capabilities: { agyHumanRecoveryV1: true },
     } });
-    const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
-    const hub = vi.mocked(feishu.setConnectionHub).mock.calls[0][0];
     expect(hub.supportsAgyHumanRecovery('device-1')).toBe(true);
     expect(hub.supportsQueueStarted('device-1')).toBe(false);
   });

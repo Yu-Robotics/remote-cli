@@ -117,6 +117,26 @@ describe('JsonStore', () => {
     expect(await fs.readFile(storePath, 'utf8')).not.toContain('original-message');
   });
 
+  it('bounds event skew and keeps the receipt expiry watermark across small clock rewinds', async () => {
+    await store.initialize();
+    const t = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(t);
+    try {
+      await store.consumeAgyConfirmation('ahead', t + 20_000);
+      await expect(store.consumeAgyConfirmation('future', t + 40_000)).rejects.toThrow();
+      await expect(store.consumeAgyConfirmation('old', t - 301_000)).rejects.toThrow();
+      clock.mockReturnValue(t - 10_000);
+      await store.consumeAgyConfirmation('fresh', t - 10_000);
+      await expect(store.consumeAgyConfirmation('ahead', t + 20_000)).rejects.toThrow('already claimed');
+      await expect(store.consumeAgyConfirmation('expired-before-rewind', t - 301_000)).rejects.toThrow();
+      expect(JSON.parse(await fs.readFile(storePath, 'utf8')).agyConfirmations.updatedAt).toBe(t);
+      clock.mockReturnValue(t + 319_999);
+      await expect(store.consumeAgyConfirmation('ahead', t + 20_000)).rejects.toThrow('already claimed');
+      clock.mockReturnValue(t + 320_000);
+      await expect(store.consumeAgyConfirmation('ahead', t + 20_000)).rejects.toThrow('expired');
+    } finally { clock.mockRestore(); }
+  });
+
   it('refuses capacity pressure without evicting fresh confirmations and expires them by original creation time', async () => {
     await store.initialize();
     const clock = Date.now();

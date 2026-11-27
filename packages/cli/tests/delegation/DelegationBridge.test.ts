@@ -23,6 +23,23 @@ describe('delegation transport and discovery', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it('prepares replacement groups during startup without authorizing them on the current bridge', async () => {
+    const bridge = new DelegationBridge(); bridges.push(bridge);
+    const [current, next] = await Promise.all([
+      bridge.start(['scheduling']),
+      bridge.start(['delegation', 'scheduling'], { preserveExistingGroups: true }),
+    ]);
+    expect(next).toEqual({ ...current, groups: ['delegation', 'scheduling'] });
+    const handler = vi.fn(async () => ({}));
+    bridge.activate(handler);
+    const discover = () => fetch(next.url, { method: 'POST', headers: { authorization: 'Bearer ' + next.token },
+      body: JSON.stringify({ name: 'remote_cli_list_backends', args: {}, callId: 'discovery' }) });
+    expect((await discover()).status).toBe(400);
+    expect(handler).not.toHaveBeenCalled();
+    bridge.setGroups(next.groups);
+    expect((await discover()).status).toBe(200);
+  });
+
   it('rejects malformed operations before invoking a worker', async () => {
     const bridge = new DelegationBridge(); bridges.push(bridge);
     const connection = await bridge.start();

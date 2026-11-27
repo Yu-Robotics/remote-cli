@@ -56,6 +56,8 @@ describe('BindingManager', () => {
     await bindingManager.bindUser('owner', 'device', 'Device');
     const epoch = bindingManager.getCardThreadEpoch('owner', 'device', 'schedule');
     const at = Date.now();
+    const boundAt = (await bindingManager.getActiveDevice('owner'))!.boundAt;
+    await expect(bindingManager.consumeAgyConfirmation('owner', 'device', epoch, 'pre-binding', boundAt - 1)).rejects.toThrow('binding changed');
     await expect(bindingManager.consumeAgyConfirmation('another', 'device', epoch, 'message', at)).rejects.toThrow();
     await expect(bindingManager.consumeAgyConfirmation('owner', 'device', 'stale', 'message', at)).rejects.toThrow();
     await expect(bindingManager.consumeAgyConfirmation('owner', 'device', epoch, 'message', at)).resolves.toBeUndefined();

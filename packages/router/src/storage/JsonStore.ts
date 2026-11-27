@@ -6,6 +6,9 @@ import os from 'os';
 import { createHash, randomUUID } from 'crypto';
 import { reconcileCardThreads, validCardThread, type CardThreadAssociation, type CardThreadState } from './CardThreadState';
 
+const FEISHU_MESSAGE_MAX_AGE_MS = 300_000;
+const FEISHU_MESSAGE_CLOCK_SKEW_MS = 30_000;
+
 interface StoreData {
   version: number;
   agyConfirmations?: { updatedAt: number; receipts: Record<string, number> };
@@ -194,24 +197,25 @@ export class JsonStore {
     this.assertReconciled();
     const ledger = this.data.agyConfirmations;
     if (!ledger) return true;
-    return createdAt > ledger.updatedAt - 300_000 && !Object.hasOwn(ledger.receipts, createHash('sha256').update(id).digest('hex'));
+    return createdAt > ledger.updatedAt - FEISHU_MESSAGE_MAX_AGE_MS && !Object.hasOwn(ledger.receipts, createHash('sha256').update(id).digest('hex'));
   }
 
   async consumeAgyConfirmation(id: string, createdAt: number): Promise<void> {
     await this.commitQueued(current => {
       const now = Date.now();
       const previous = current.agyConfirmations;
-      if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(id) || !Number.isSafeInteger(createdAt) || createdAt > now || createdAt <= now - 300_000
-        || previous !== undefined && (!previous || !Number.isSafeInteger(previous.updatedAt) || previous.updatedAt > now
+      const updatedAt = Math.max(now, previous?.updatedAt ?? now);
+      if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(id) || !Number.isSafeInteger(createdAt) || createdAt > now + FEISHU_MESSAGE_CLOCK_SKEW_MS || createdAt <= updatedAt - FEISHU_MESSAGE_MAX_AGE_MS
+        || previous !== undefined && (!previous || !Number.isSafeInteger(previous.updatedAt) || previous.updatedAt > now + FEISHU_MESSAGE_CLOCK_SKEW_MS
           || !isRecord(previous.receipts) || Object.entries(previous.receipts).some(([key, time]) =>
-            !/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(time) || time > previous.updatedAt))) {
+            !/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(time) || time > previous.updatedAt + FEISHU_MESSAGE_CLOCK_SKEW_MS))) {
         throw new Error('The AGY confirmation is invalid or expired.');
       }
-      const receipts = Object.fromEntries(Object.entries(previous?.receipts ?? {}).filter(([, time]) => time > now - 300_000));
+      const receipts = Object.fromEntries(Object.entries(previous?.receipts ?? {}).filter(([, time]) => time > updatedAt - FEISHU_MESSAGE_MAX_AGE_MS));
       const key = createHash('sha256').update(id).digest('hex');
       if (Object.hasOwn(receipts, key) || Object.keys(receipts).length >= 4096) throw new Error('This Feishu message was already claimed or message receipt storage is full.');
       receipts[key] = createdAt;
-      return { ...current, agyConfirmations: { updatedAt: now, receipts } };
+      return { ...current, agyConfirmations: { updatedAt, receipts } };
     });
   }
 

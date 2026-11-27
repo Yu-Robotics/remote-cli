@@ -94,10 +94,10 @@ describe('fresh device binding with first key enrollment', () => {
     const messages: any[] = [];
     ws.on('message', data => messages.push(JSON.parse(data.toString())));
     await once(ws, 'open');
-    const send = (signature?: string) => ws.send(JSON.stringify({
+    const send = (signature?: string, capabilities: Record<string, boolean> = {}) => ws.send(JSON.stringify({
       type: 'binding_request', data: {
         deviceId, protocolVersion: 1,
-        capabilities: { fileTransferV1: true, outputFilesV1: true },
+        capabilities: { fileTransferV1: true, outputFilesV1: true, ...capabilities },
         ...(signature ? { deviceSignature: signature } : {}),
       },
     }));
@@ -134,6 +134,39 @@ describe('fresh device binding with first key enrollment', () => {
     const binding = await (server as any).bindingManager.getDeviceBinding('fresh-device');
     expect(binding.devices[0].requiresDeviceAuth).toBeUndefined();
     await expectAuthenticated('fresh-device', key);
+  });
+
+  it('confirms the authenticated human route before any dispatch on its published socket', async () => {
+    const device = 'fixture-device', key = keys();
+    await redeem('owner', await requestCode(device, key));
+    const capabilities = { agyHumanRecoveryV1: true, taskRecovery: true, queueStarted: true, scheduleResultsV1: true, hostSchedulesV1: true };
+    const client = await connect(device);
+    client.send(undefined, capabilities);
+    const challenge = await client.next('device_challenge');
+    const hub = (server as any).connectionHub;
+    expect(hub.isDeviceOnline(device)).toBe(false);
+    const publish = hub.registerConnection.bind(hub);
+    vi.spyOn(hub, 'registerConnection').mockImplementation((...args) => {
+      publish(...args);
+      void hub.sendToDevice(device, { type: 'fixture_dispatch', route: hub.getAuthenticatedRoute(device) });
+    });
+    client.send(proof(key, device, challenge.data.nonce), capabilities);
+    await client.next('fixture_dispatch');
+    expect(client.messages.map(m => m.type)).toEqual(['device_challenge', 'binding_confirm', 'fixture_dispatch']);
+    const confirmation = client.messages[1].data;
+    expect(confirmation.scheduleBinding).toMatchObject({ deviceId: device, openId: 'owner' });
+    expect(client.messages[2].route).toEqual({ openId: 'owner', deviceId: device, registrationId: confirmation.registrationId });
+  });
+
+  it('rejects a recovery capability dropped between challenge and signed registration', async () => {
+    const device = 'fixture-device', key = keys();
+    await redeem('owner', await requestCode(device, key));
+    const client = await connect(device);
+    client.send(undefined, { agyHumanRecoveryV1: true });
+    const challenge = await client.next('device_challenge');
+    client.send(proof(key, device, challenge.data.nonce));
+    expect((await client.next('error')).data.code).toBe('DEVICE_AUTH_REQUIRED');
+    expect((server as any).connectionHub.isDeviceOnline(device)).toBe(false);
   });
 
   it('retains the code and auth-required marker across failure and restart until same-owner retry', async () => {

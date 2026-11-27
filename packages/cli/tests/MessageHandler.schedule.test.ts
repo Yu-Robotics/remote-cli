@@ -311,6 +311,28 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(f.executor.execute).not.toHaveBeenCalled();
   });
 
+  it('accepts a small clock difference and reports invalid timestamps only on the bound route', async () => {
+    await f.bind(); f.setBackend('agy');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const send = (offset: number, openId = 'owner') => f.send('Continue', 'thread-a', { openId, isSlashCommand: false,
+      humanSource: { ...source(), createdAt: now + offset } });
+    await send(20_000);
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+    for (const offset of [40_000, -301_000]) {
+      await send(offset);
+      expect(f.responses().at(-1)).toMatchObject({ success: false, openId: 'owner', error: expect.stringContaining('timestamp') });
+    }
+    const count = f.responses().length;
+    await send(40_000, 'another-owner');
+    expect(f.responses()).toHaveLength(count);
+    clock.mockReturnValue(now - 10_000);
+    await send(-301_000);
+    expect(f.responses().at(-1)?.success).toBe(false);
+    await send(-10_000);
+    expect(f.executor.execute).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects expired queued recovery metadata without dispatching either execution path', async () => {
     await f.bind();
     f.setBackend('agy');
@@ -388,8 +410,11 @@ describe('MessageHandler schedule management and delivery', () => {
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true,
       registrationId: 'replacement-registration', scheduleBinding: binding,
       capabilities: { scheduleResultsV1: true, hostSchedulesV1: true } } } as any);
+    const original = f.responses().at(-1)!.messageId;
+    const before = f.responses().filter(response => response.messageId === original).length;
     await f.send('/queue confirm ' + confirmation!.id);
-    await vi.waitFor(() => expect(f.responses().at(-1)?.success).toBe(false));
+    await vi.waitFor(() => expect(f.handler['threadQueues'].get('thread-a')).toBeUndefined());
+    expect(f.responses().filter(response => response.messageId === original)).toHaveLength(before);
     expect(resume).not.toHaveBeenCalled();
     expect(f.executor.execute).not.toHaveBeenCalled();
   });

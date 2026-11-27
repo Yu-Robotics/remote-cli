@@ -50,6 +50,7 @@ interface CardDeliveryOptions {
   bare?: boolean;
   current?: () => Promise<boolean>;
   onDelivered?: (cardIds: string[], queueCardId?: string) => void | Promise<void>;
+  skippedBeforeAdmission?: boolean;
 }
 
 function escapeCardText(value: unknown): string {
@@ -1126,6 +1127,10 @@ Examples:
           || selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
           throw new Error('The human message destination changed before dispatch.');
         }
+      } else if (human && this.connectionHub.supportsAgyHumanRecovery(activeDevice.deviceId)
+        && this.connectionHub.getAuthenticatedRoute(activeDevice.deviceId)) {
+        // A signed connection may replace a legacy peer while its card is being prepared.
+        throw new Error('The device registered an authenticated route before dispatch. Resend the message.');
       }
       // Send command to device
       const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
@@ -2014,7 +2019,8 @@ Examples:
       if (shell) shell.finishedAt = Date.now();
       const bare = options?.bare === true;
       // Build completion note
-      let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : success ? '✅ Completed' : '❌ Failed';
+      let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation'
+        : options?.skippedBeforeAdmission ? '⏭️ Skipped without execution' : success ? '✅ Completed' : '❌ Failed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }

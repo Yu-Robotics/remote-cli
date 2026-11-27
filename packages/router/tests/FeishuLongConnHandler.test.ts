@@ -991,6 +991,21 @@ describe('FeishuLongConnHandler', () => {
       });
     });
 
+    it('renders skipped-before-admission separately from the ordinary failure footer', async () => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      expect(await handler.finalizeStreamingMessage('skipped-card', [{ tag: 'markdown', content: 'Skipped result' }],
+        undefined, 'owner', undefined, undefined, undefined, undefined, undefined, undefined, false, { skippedBeforeAdmission: true })).toBe(true);
+      let content = mockClient.im.message.patch.mock.calls.at(-1)[0].data.content;
+      expect(content).toContain('⏭️ Skipped without execution');
+      expect(content).not.toContain('❌ Failed');
+
+      expect(await handler.finalizeStreamingMessage('failed-card', [{ tag: 'markdown', content: 'Ordinary failure' }],
+        undefined, 'owner', undefined, undefined, undefined, undefined, undefined, undefined, false)).toBe(true);
+      content = mockClient.im.message.patch.mock.calls.at(-1)[0].data.content;
+      expect(content).toContain('❌ Failed');
+      expect(content).not.toContain('Skipped without execution');
+    });
+
     const finalElements = (count: number) => Array.from({ length: count }, (_, i) => ({
       tag: 'markdown', content: `Fixture row ${i}: ${'a'.repeat(400)}`,
     }));
@@ -3128,12 +3143,13 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleSlashCommandPassthrough', () => {
-    it.each(['default', 'selected', 'reply', 'app', 'old peer'])('forwards ordinary text with the correct recovery authority: %s', async target => {
+    it.each(['default', 'selected', 'reply', 'app', 'old peer', 'replaced peer'])('forwards ordinary text with the correct recovery authority: %s', async target => {
       const device = { deviceId: 'fixture-device' };
       mockBindingManager.getUserBinding.mockResolvedValue({ devices: [device] });
       mockBindingManager.getActiveDevice.mockResolvedValue(device);
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.supportsAgyHumanRecovery.mockReturnValue(target !== 'old peer');
+      if (target === 'replaced peer') mockConnectionHub.supportsAgyHumanRecovery.mockReturnValueOnce(false);
       mockConnectionHub.sendToDevice.mockResolvedValue(true);
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'fixture-card' } });
       handler.setOnResolveThread(async () => ({ threadId: 'original', deviceId: device.deviceId }));
@@ -3143,6 +3159,11 @@ describe('FeishuLongConnHandler', () => {
         message: { message_type: 'text', create_time: String(createdAt), message_id: 'fixture-message',
           parent_id: target === 'reply' ? 'original-card' : undefined, content: JSON.stringify({ text: 'Continue here' }) } };
       await (handler as any).handleMessageEvent(event);
+      if (target === 'replaced peer') {
+        expect(mockConnectionHub.sendToDevice).not.toHaveBeenCalled();
+        expect(mockBindingManager.consumeAgyConfirmation).not.toHaveBeenCalled();
+        return;
+      }
       expect(mockConnectionHub.sendToDevice).toHaveBeenCalledOnce();
       const frame = mockConnectionHub.sendToDevice.mock.calls[0][1];
       const threadId = target === 'reply' ? 'original' : target === 'selected' ? 'selected-id' : undefined;
@@ -3156,6 +3177,23 @@ describe('FeishuLongConnHandler', () => {
       mockBindingManager.consumeAgyConfirmation.mockRejectedValue(new Error('Consumed'));
       await (handler as any).handleMessageEvent(event);
       expect(mockConnectionHub.sendToDevice).toHaveBeenCalledOnce();
+    });
+
+    it('refuses a fresh skewed message when its active device changes during card creation', async () => {
+      const original = { deviceId: 'fixture-device' }, replacement = { deviceId: 'replacement-device' };
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [original, replacement] });
+      mockBindingManager.getActiveDevice.mockResolvedValue(original);
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsAgyHumanRecovery.mockReturnValue(true);
+      mockClient.im.message.create.mockImplementationOnce(async () => {
+        mockBindingManager.getActiveDevice.mockResolvedValue(replacement);
+        return { data: { message_id: 'fixture-card' } };
+      });
+      const createdAt = Date.now() + 20_000;
+      await (handler as any).handleRegularCommand('owner', 'fixture-message', 'Continue', undefined,
+        false, undefined, undefined, undefined, undefined, true, undefined, { createdAt });
+      expect(mockBindingManager.consumeAgyConfirmation).toHaveBeenCalledWith('owner', original.deviceId, 'binding', 'fixture-message', createdAt);
+      expect(mockConnectionHub.sendToDevice).not.toHaveBeenCalled();
     });
 
     it('should passthrough unknown command to device', async () => {

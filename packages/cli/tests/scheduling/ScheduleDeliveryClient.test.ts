@@ -47,6 +47,27 @@ describe('ScheduleDeliveryClient', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('forwards a true-only skipped-before-admission flag without changing success', async () => {
+    Object.assign(delivery.schedule, { backend: 'agy', engine: 'host', bindingEpoch: 'original-binding' });
+    Object.assign(delivery, { success: false, skippedBeforeAdmission: true, error: 'Skipped before admission' });
+    const pending = client.deliver(delivery, 'Original thread');
+    const result = ws.send.mock.calls[1][0];
+    expect(result).toMatchObject({ type: 'response', success: false, skippedBeforeAdmission: true });
+    ack(delivery.id); await pending;
+  });
+
+  it.each([
+    { flag: false, success: false, backend: 'agy' },
+    { flag: 'true', success: false, backend: 'agy' },
+    { flag: true, success: true, backend: 'agy' },
+    { flag: true, success: false, backend: 'claude' },
+  ])('rejects an invalid skipped-before-admission delivery %o', async ({ flag, success, backend }) => {
+    Object.assign(delivery.schedule, { backend, engine: 'host', bindingEpoch: 'original-binding' });
+    Object.assign(delivery, { success, skippedBeforeAdmission: flag });
+    await expect(client.deliver(delivery, 'Original thread')).rejects.toThrow('routing metadata');
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
   it('accepts a synchronous response receipt without losing it', async () => {
     ws.send.mockImplementation(frame => { if (frame.type === 'response') ack(frame.messageId); return true; });
     await client.deliver(delivery, 'Thread');

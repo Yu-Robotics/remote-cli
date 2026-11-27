@@ -743,6 +743,7 @@ export class RouterServer {
       let subscriptionInspectionEnabled = false;
       let bankedResetReminderEnabled = false;
       let authenticationPending = false;
+      let challengedHumanRecovery = false;
       let automaticEnrollmentEnabled = false;
       let automaticEnrollmentAuthority: EnrollmentAuthority | undefined;
       let automaticEnrollmentRequestPending = false;
@@ -978,7 +979,7 @@ export class RouterServer {
                   const enrolled = await this.deviceAuth.get(requestedId);
                   const binding = await this.bindingManager.getDeviceBinding(requestedId);
                   const requiresAuthentication = binding?.devices?.some(device => device.deviceId === requestedId && device.requiresDeviceAuth);
-                  if (requiresAuthentication && !enrolled) {
+                  if ((requiresAuthentication || challengedHumanRecovery) && !enrolled) {
                     ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device key enrollment is incomplete. Approve the device key and retry.' } }));
                     ws.close();
                     break;
@@ -986,6 +987,7 @@ export class RouterServer {
                   if (enrolled) {
                     if (!message.data.deviceSignature && !enrolled.revoked) {
                       if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
+                      challengedHumanRecovery ||= requested?.agyHumanRecoveryV1 === true;
                       const nonce = this.deviceAuth.challenge(ws, requestedId);
                       ws.send(JSON.stringify({ type: 'device_challenge', data: { nonce } }));
                       if (challengeTimer) clearTimeout(challengeTimer);
@@ -1000,6 +1002,17 @@ export class RouterServer {
                       break;
                     }
                     authenticatedOwner = proof.openId;
+                    if (challengedHumanRecovery || requested?.agyHumanRecoveryV1 === true) {
+                      const epoch = this.bindingManager.getCardThreadEpoch(proof.openId, requestedId, 'schedule');
+                      if (!epoch || !offersHostSchedules || requested?.agyHumanRecoveryV1 !== true) {
+                        ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Human message routing could not be confirmed. Reconnect and retry.' } }));
+                        ws.close();
+                        break;
+                      }
+                      // Resolve the authority before publishing the socket. Registration
+                      // and its confirmation frame must follow without an intervening await.
+                      scheduleBinding = { openId: proof.openId, deviceId: requestedId, epoch };
+                    }
                   }
                   if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
                   if (!authenticatedOwner) {
@@ -1049,17 +1062,22 @@ export class RouterServer {
                 this.scheduleCards.disconnect(deviceId);
                 this.scheduleCardConnections.delete(deviceId);
                 if (!this.connectionHub.isCurrentConnection(deviceId, ws)) this.cancelThreadInventories(deviceId);
-                if (requested?.queueStarted === true || requested?.agyHumanRecoveryV1 === true) {
-                  this.connectionHub.registerConnection(deviceId, ws, {
-                    ...(requested.queueStarted === true && { queueStarted: true }),
-                    ...(requested.agyHumanRecoveryV1 === true && { agyHumanRecoveryV1: true }),
-                  });
-                } else {
-                  this.connectionHub.registerConnection(deviceId, ws);
-                }
                 const registrationId = authenticatedOwner ? randomUUID() : undefined;
-                if (registrationId && authenticatedOwner) this.connectionHub.setAuthenticatedRoute(deviceId, ws, authenticatedOwner, registrationId);
-                console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
+                const publishAfterConfirm = !!authenticatedOwner && requested?.agyHumanRecoveryV1 === true;
+                const publish = () => {
+                  if (requested?.queueStarted === true || requested?.agyHumanRecoveryV1 === true) {
+                    this.connectionHub.registerConnection(requestedId, ws, {
+                      ...(requested.queueStarted === true && { queueStarted: true }),
+                      ...(requested.agyHumanRecoveryV1 === true && { agyHumanRecoveryV1: true }),
+                      ...(publishAfterConfirm && registrationId && authenticatedOwner && { authenticatedRoute: { openId: authenticatedOwner, registrationId } }),
+                    });
+                  } else {
+                    this.connectionHub.registerConnection(requestedId, ws);
+                  }
+                  if (!publishAfterConfirm && registrationId && authenticatedOwner) this.connectionHub.setAuthenticatedRoute(requestedId, ws, authenticatedOwner, registrationId);
+                  console.log(`Device registered: ${requestedId} (protocol v${clientVersion})`);
+                };
+                if (!publishAfterConfirm) publish();
                 this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
                 const outputsEnabled = Boolean(this.outputsAvailable && authenticatedOwner && message.data.capabilities?.outputFilesV1 === true);
                 if (outputsEnabled) this.outputSessions.set(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
@@ -1078,13 +1096,14 @@ export class RouterServer {
                 automaticEnrollmentAuthority = enrollmentBinding && enrollmentEpoch
                   ? Object.freeze({ openId: enrollmentBinding.openId, epoch: enrollmentEpoch }) : undefined;
                 automaticEnrollmentEnabled = Boolean(automaticEnrollmentAuthority);
-                if (filesEnabled) this.connectionHub.setFileSession(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
+                const fileSession = filesEnabled ? { id: randomUUID(), openId: authenticatedOwner! } : undefined;
+                if (fileSession && !publishAfterConfirm) this.connectionHub.setFileSession(deviceId, fileSession);
                 this.fileTransfers.disconnect(deviceId);
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
-                if (socketClosed || !this.connectionHub.isCurrentConnection(requestedId, ws)) break;
+                if (socketClosed || (!publishAfterConfirm && !this.connectionHub.isCurrentConnection(requestedId, ws))) break;
                 this.awaitingScheduleBindings.delete(requestedId);
-                if (offersHostSchedules) {
+                if (offersHostSchedules && !scheduleBinding) {
                   this.awaitingScheduleBindings.add(requestedId);
                   const owner = await this.bindingManager.getDeviceBinding(requestedId);
                   if (socketClosed || !this.connectionHub.isCurrentConnection(requestedId, ws)) break;
@@ -1167,6 +1186,10 @@ export class RouterServer {
                     } } : {}),
                   }
                 }));
+                if (publishAfterConfirm) {
+                  publish();
+                  if (fileSession) this.connectionHub.setFileSession(deviceId, fileSession);
+                }
               }
               break;
 
@@ -1191,7 +1214,9 @@ export class RouterServer {
               if (message.queueStarted?.source === 'schedule' || scheduledSession?.queueStarted?.source === 'schedule'
                 || (completed && this.completedTasks.get(message.messageId)?.scheduleRoute)) {
                 if (!deviceId || message.queueStarted?.source !== 'schedule' || typeof message.success !== 'boolean'
-                  || message.queueConfirmation || message.data?.queueConfirmation) break;
+                  || message.queueConfirmation || message.data?.queueConfirmation
+                  || message.skippedBeforeAdmission !== undefined && (message.skippedBeforeAdmission !== true
+                    || message.success || message.queueStarted.backend !== 'agy')) break;
                 const { openId, threadId, cwd, queueStarted, messageId } = message;
                 const epoch = queueStarted.bindingEpoch ?? scheduledSession?.selectionFence?.epoch ?? this.selections.capture(openId, deviceId).epoch;
                 const route = JSON.stringify([openId, threadId, cwd, epoch, queueStarted.scheduleId, queueStarted.backend, queueStarted.bindingEpoch]);
@@ -1209,7 +1234,8 @@ export class RouterServer {
                     || (!queueStarted.bindingEpoch && scheduledSession.selectionFence?.epoch !== epoch)
                     || scheduledSession.queueStarted.backend !== queueStarted.backend) break;
                   const delivered = await this.finalizeStreamingMessage(messageId, message.success, message.output,
-                    message.error, undefined, cwd, undefined, undefined, undefined, undefined, owned);
+                    message.error, undefined, cwd, undefined, undefined, undefined, undefined, owned,
+                    message.skippedBeforeAdmission === true);
                   if (!delivered || !await owned()) break;
                   this.rememberCompletedTask(messageId, deviceId, route);
                 }
@@ -2739,7 +2765,7 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
     return async () => current() && (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId && current();
   }
 
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown, scheduleMenu?: unknown, deliveryCurrent?: () => Promise<boolean>): Promise<boolean> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown, scheduleMenu?: unknown, deliveryCurrent?: () => Promise<boolean>, skippedBeforeAdmission = false): Promise<boolean> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return false;
     const task = taskCorrelation(messageId);
@@ -2855,7 +2881,8 @@ Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
             queueConfirmation,
             executionMetadata,
             false,
-            { current: deliveryCurrent, onDelivered: (ids, queueCard) =>
+            { current: deliveryCurrent, ...(skippedBeforeAdmission && { skippedBeforeAdmission: true }),
+              onDelivered: (ids, queueCard) =>
               this.registerDeliveredThreadCards(messageId, streamData, ids, queueCard, queueConfirmation?.id) }
           );
           if (finalized === false) throw new Error('Failed to finalize task card');

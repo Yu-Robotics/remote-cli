@@ -53,7 +53,9 @@ export class ScheduleDeliveryClient {
     if ([delivery.id, schedule.id, schedule.openId, schedule.threadId].some(value =>
       typeof value !== 'string' || !value.trim() || value.length > 256 || /[\x00-\x1f\x7f]/.test(value))
       || !schedule.cwd || schedule.cwd.length > 4096 || !validBackend
-      || host && (!schedule.bindingEpoch || schedule.bindingEpoch.length > 256)) {
+      || host && (!schedule.bindingEpoch || schedule.bindingEpoch.length > 256)
+      || delivery.skippedBeforeAdmission !== undefined && (delivery.skippedBeforeAdmission !== true
+        || delivery.success || !host || schedule.backend !== 'agy')) {
       return Promise.reject(new Error('Invalid scheduled result routing metadata'));
     }
     if (this.acceptsOwner && !this.acceptsOwner(schedule)) return Promise.reject(new Error('Scheduled result owner is unavailable.'));
@@ -85,6 +87,7 @@ export class ScheduleDeliveryClient {
       if (this.acceptsOwner && !this.acceptsOwner(schedule)) throw new Error('Scheduled result owner changed.');
       pending.responseStarted = true;
       if (!this.wsClient.send({ type: 'response', ...routing, timestamp: Date.now(), success: delivery.success,
+        ...(delivery.skippedBeforeAdmission === true && { skippedBeforeAdmission: true as const }),
         output: boundedResult(delivery.output), error: boundedResult(delivery.error) })) {
         throw new Error('Scheduled result was not sent');
       }

@@ -223,7 +223,36 @@ describe.each(['claude', 'dsh', 'agy', 'codex', 'opencode', 'kimi', 'zcode', 'pi
     await receive(socket, response({ success: false, output: 'Partial result', error: 'Native task failed' }));
     const final = feishu.finalizeStreamingMessage.mock.calls[0];
     expect(JSON.stringify(final[1])).toContain('Partial result'); expect(JSON.stringify(final[1])).toContain('Native task failed');
-    expect(final[10]).toBe(false); expect(acks(socket)).toHaveLength(1);
+    expect(final[10]).toBe(false); expect(final[11]).not.toHaveProperty('skippedBeforeAdmission');
+    expect(acks(socket)).toHaveLength(1);
+  });
+
+  it('marks only an AGY skipped-before-admission result and acknowledges its retry without another card', async () => {
+    const socket = connect(); await register(socket, capabilities); await receive(socket, start());
+    await receive(socket, response({ success: false, skippedBeforeAdmission: true, error: 'Skipped before admission' }));
+    if (backend !== 'agy') {
+      expect(feishu.finalizeStreamingMessage).not.toHaveBeenCalled();
+      expect(acks(socket)).toHaveLength(0);
+      return;
+    }
+    const final = feishu.finalizeStreamingMessage.mock.calls[0];
+    expect(final[10]).toBe(false);
+    expect(final[11]).toMatchObject({ skippedBeforeAdmission: true });
+    await receive(socket, response({ success: false, skippedBeforeAdmission: true, error: 'Skipped before admission' }));
+    expect(feishu.finalizeStreamingMessage).toHaveBeenCalledOnce();
+    expect(acks(socket)).toHaveLength(2);
+  });
+
+  it.each([
+    { success: true, skippedBeforeAdmission: true },
+    { success: false, skippedBeforeAdmission: false },
+    { success: false, skippedBeforeAdmission: 'true' },
+  ])('rejects an invalid skipped-before-admission flag %o', async invalid => {
+    const socket = connect(); await register(socket, capabilities); await receive(socket, start());
+    await receive(socket, response(invalid));
+    expect(feishu.finalizeStreamingMessage).not.toHaveBeenCalled();
+    expect(feishu.sendMessage).not.toHaveBeenCalled();
+    expect(acks(socket)).toHaveLength(0);
   });
 
   it('deduplicates completed starts even after start-ID cleanup and acknowledges retried results', async () => {

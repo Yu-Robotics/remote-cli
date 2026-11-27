@@ -5,16 +5,17 @@ import { AgyChatHost, restoreAgyToolErrors } from './AgyChatHost';
 import { agyHostScheduleHistory } from './AgySessionSelection';
 import { creationReceipt, nativeRestartNotice, nativeWake, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import { AgyCommandTasks, type AgyCommandCheckpoint } from './AgyCommandTasks';
+import { agyHistoryDigest, restoreAgyVerifiedHistory, verifyAgyTerminalHistory, type AgyVerifiedHistory } from './AgyRecoveredHistory';
 import { AgyPermissions } from './AgyPermissions';
 import type { ApprovalAction } from '../../types';
 import { ActivityTracker } from '../Activity';
 import type { AcpContentBlock, AcpSessionResult } from '../acp/AcpTypes';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { AcpClient, type AcpTransport, type AcpEventCallbacks, type AcpSessionSetup, type AcpToolCallUpdate } from '../acp/AcpClient';
 import { applyAgySessionSettings } from './AgySessionSettings';
 import { AgyAcpStartupError, type AgyAcpStartupStage } from './AgyAcpDiagnostics';
 import type { AcpMcpServer } from '../acp/AcpTypes';
-import type { ExecuteOptions, ExecuteResult } from '../IExecutor';
+import type { AgyHumanConfirmation, ExecuteOptions, ExecuteResult } from '../IExecutor';
 import { AgyScheduleHost } from '../../scheduling/agy/AgyScheduleHost';
 import { AgyHookRelay, installAgyScheduleHooks } from '../../scheduling/agy/AgyHookRelay';
 import { nativeBindings } from '../../native/NativeBindings';
@@ -35,6 +36,8 @@ export interface AgyAcpRuntimeOptions {
   hostScheduleChat?: boolean;
   commandCheckpoint?: AgyCommandCheckpoint;
   toolErrorDigest?: string;
+  /** Checkpointed historical prefix verified after authenticated manual recovery. */
+  verifiedHistory?: AgyVerifiedHistory;
   validatedChatLoad?: boolean;
   beforeSessionLoad?(): void;
   consumeManualConfirmation?(): void;
@@ -44,10 +47,17 @@ export interface AgyAcpRuntimeOptions {
   beforePrompt?(): void;
   settledPrompt?(reusable: boolean): void;
   /** Exact local group release only; this cannot certify empty native queues. */
-  ownedSessionClosed(id: string, cleanHistory?: string, unpromptedHistory?: string, commands?: AgyCommandCheckpoint, toolErrorDigest?: string): void;
+  ownedSessionClosed(id: string, cleanHistory?: string, unpromptedHistory?: string, commands?: AgyCommandCheckpoint, toolErrorDigest?: string,
+    verifiedHistory?: AgyVerifiedHistory): void;
   /** Persist before the native schedule tool can run, even if its receipt is lost. */
   retainScheduleOwner(sessionId: string, hostId: string, retired: boolean): void;
   mapTool(name: string, args: Record<string, unknown>): { name: string; input: Record<string, unknown> };
+}
+
+interface RecoveryQuestionAuthority {
+  routeCurrent(): boolean;
+  consume(answer: AgyHumanConfirmation): void;
+  check(answer: AgyHumanConfirmation): void;
 }
 
 /** ACP host for fresh main chat and qualified worker continuity. Loading never grants schedule admission. */
@@ -79,7 +89,7 @@ export class AgyAcpRuntime {
   private humanQueryAdmission?: { open?: () => void };
   private ordinaryMain = false;
   private idleStop = false;
-  private recoveredHistory?: { count: number; lastStep: number; digest: string };
+  private recoveredHistory?: AgyVerifiedHistory;
   private readonly acceptedMessages = new Map<number, TranscriptRecord>();
   private hostScheduleSettled = false;
   private hostScheduleUnsafe = false;
@@ -98,7 +108,8 @@ export class AgyAcpRuntime {
   private nativeVersion?: string;
   private streamed = '';
   private question?: { args?: Record<string, unknown>; pendingCall?: string };
-  private answerQuestion?: (answer: string | undefined) => void;
+  private questionAuth?: RecoveryQuestionAuthority;
+  private answerQuestion?: (answer: string | undefined, source?: AgyHumanConfirmation) => void;
   private callbacks: AcpEventCallbacks;
   constructor(private readonly options: AgyAcpRuntimeOptions) {
     this.manualTurnPending = !!options.beforeManualLoad;
@@ -214,7 +225,7 @@ export class AgyAcpRuntime {
       const history = this.recoveredHistory;
       if (history) {
         const prefix = rows.slice(0, history.count);
-        if (createHash('sha256').update(JSON.stringify(prefix)).digest('hex') !== history.digest
+        if (agyHistoryDigest(prefix) !== history.digest
           || (event === 'PreInvocation' && Number(payload.initialNumSteps) <= history.lastStep)
           || (['PreToolUse', 'PostToolUse'].includes(event) && Number(payload.stepIdx) <= history.lastStep)) {
           this.hostScheduleUnsafe = true;
@@ -324,12 +335,21 @@ export class AgyAcpRuntime {
     // Consume a clean checkpoint under the per-HOME kernel gate, before spawning.
     let restoredErrors: ReturnType<typeof restoreAgyToolErrors> | undefined;
     const idleHistory = this.options.commandCheckpoint?.idleDenialHistory;
-    if (this.options.toolErrorDigest !== undefined || idleHistory !== undefined) {
+    const verifiedHistory = this.options.verifiedHistory;
+    let checkpointBound = false;
+    if (this.options.toolErrorDigest !== undefined || idleHistory !== undefined || verifiedHistory !== undefined) {
       if (!this.options.validatedChatLoad || !this.options.sessionId || this.options.worker || !this.options.hostScheduleChat) {
         throw new Error('AGY tool checkpoint requires the original main conversation.');
       }
       this.relay.bindSession(this.options.sessionId);
+      checkpointBound = true;
       let rows = await this.relay.readCheckpointTranscript();
+      // Revalidate the recovered prefix in this process. Later evidence is
+      // restored relative to the same live control boundary as its retired host.
+      if (verifiedHistory !== undefined) {
+        this.recoveredHistory = restoreAgyVerifiedHistory(rows, verifiedHistory);
+        rows = rows.slice(verifiedHistory.count);
+      }
       if (idleHistory !== undefined) {
         this.commands = new AgyCommandTasks(this.options.sessionId, this.options.home, this.options.commandCheckpoint);
         rows = this.commands.restoreHistory(rows);
@@ -374,8 +394,7 @@ export class AgyAcpRuntime {
       if (!this.client.loadSessionWithSetup) throw new Error('AGY ACP session load setup is unavailable.');
       if (this.options.beforeManualLoad) {
         const rows = await this.relay.readCheckpointTranscript(this.options.sessionId);
-        this.recoveredHistory = { count: rows.length, lastStep: rows.at(-1)?.step_index ?? -1,
-          digest: createHash('sha256').update(JSON.stringify(rows)).digest('hex') };
+        this.recoveredHistory = { count: rows.length, lastStep: rows.at(-1)?.step_index ?? -1, digest: agyHistoryDigest(rows) };
         this.restore.run(this.options.beforeManualLoad);
       }
       session = await this.client.loadSessionWithSetup(this.options.sessionId, this.options.cwd, this.options.mcpServers, setup);
@@ -394,7 +413,7 @@ export class AgyAcpRuntime {
       if (this.options.hostScheduleChat && !this.options.worker) {
         this.commands ??= new AgyCommandTasks(session.sessionId, this.options.home, this.options.commandCheckpoint);
       }
-      if (!restoredErrors && idleHistory === undefined) this.relay.bindSession(session.sessionId);
+      if (!checkpointBound) this.relay.bindSession(session.sessionId);
     } else {
     this.host = new AgyScheduleHost(this.client, session.sessionId, {
       threadId: this.options.threadId, cwd: this.options.cwd,
@@ -419,7 +438,8 @@ export class AgyAcpRuntime {
     });
   }
 
-  async execute(prompt: string, options: ExecuteOptions, confirmHuman?: () => void): Promise<ExecuteResult> {
+  async execute(prompt: string, options: ExecuteOptions, confirmHuman?: () => void,
+    questionAuth?: RecoveryQuestionAuthority): Promise<ExecuteResult> {
     await this.start();
     if (this.active || this.settingsBusy) throw new Error('AGY foreground turn is already active.');
     if (confirmHuman && (options.hostScheduleSessionId !== undefined || !this.needsHumanContinuation)) {
@@ -432,6 +452,7 @@ export class AgyAcpRuntime {
     if (this.chat && !this.chat.reusable && this.permissionDeclined) throw new Error('AGY permission outcome prevents continuation.');
     this.active = options; this.permissionDeclined = false; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     this.hostScheduleSettled = false;
+    this.questionAuth = questionAuth;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inactive: ReturnType<typeof setTimeout> | undefined;
     this.activity = () => {
@@ -459,7 +480,7 @@ export class AgyAcpRuntime {
           };
           this.humanQueryAdmission = grant;
         }
-        return this.manualTurnPending ? this.client!.prompt(this.sessionId!, input) : this.promptWithQuestions(input);
+        return this.promptWithQuestions(input);
       };
       this.ordinaryMain = !this.options.worker && options.hostScheduleSessionId === undefined
         && (!this.options.managedCoordinator || options.agyHumanMessage || this.manualTurnPending || !!confirmHuman);
@@ -483,11 +504,8 @@ export class AgyAcpRuntime {
             if (foreignMessage(row) && !nativeWake(row)) this.acceptedMessages.set(row.step_index, structuredClone(row));
           }
         }
-        // Only a settled plain history can re-enable bound host timers after manual admission.
-        if (!this.idleStop || !this.latestRecords.length || this.latestRecords.some((row, index) =>
-          row.step_index !== index || row.status !== 'DONE' || row.tool_calls?.length || !(nativeRestartNotice(row)
-            || row.source === 'USER_EXPLICIT' && row.type === 'USER_INPUT'
-            || row.source === 'MODEL' && row.type === 'PLANNER_RESPONSE'))) this.hostScheduleUnsafe = true;
+        // Only settled terminal history can re-enable bound host timers after manual admission.
+        if (!this.idleStop || !this.verifiedRecovery()) this.hostScheduleUnsafe = true;
       }
       this.hostScheduleSettled = completed && this.foregroundReusable;
       // Confirmed foreground command management keeps ordinary chat live. continuityUnsafe already
@@ -506,12 +524,25 @@ export class AgyAcpRuntime {
     } finally {
       if (timer) clearTimeout(timer);
       if (inactive) clearTimeout(inactive);
-      this.permissions.cancel(); this.answerQuestion?.(undefined); this.question = undefined;
+      this.permissions.cancel(); this.answerQuestion?.(undefined); this.question = undefined; this.questionAuth = undefined;
       this.tracker.reset(); this.tracker.setCallback(undefined); this.activity = undefined; this.active = undefined; this.tools.clear();
       this.humanQueryAdmission = undefined;
       this.ordinaryMain = false;
       this.commands?.endForeground();
     }
+  }
+  /** The unchanged historical prefix and the hook-observed recovery suffix must
+   * both consist of settled synchronous calls; foreign or wake rows stay fenced. */
+  private verifiedRecovery(): boolean {
+    const history = this.recoveredHistory, rows = this.latestRecords;
+    if (!history || rows.length <= history.count) return false;
+    const prefix = rows.slice(0, history.count), suffix = rows.slice(history.count);
+    if (agyHistoryDigest(prefix) !== history.digest) return false;
+    try {
+      verifyAgyTerminalHistory(prefix);
+      verifyAgyTerminalHistory(suffix, history.count, true);
+    } catch { return false; }
+    return true;
   }
   private async promptWithQuestions(blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
     for (;;) {
@@ -519,11 +550,21 @@ export class AgyAcpRuntime {
       const terminal = await this.client!.prompt(this.sessionId!, blocks);
       if (terminal.stopReason !== 'end_turn' || !question.pendingCall || !question.args || this.blocked || this.closing
         || !(this.chat ?? this.host!.schedules).suspendForeground()) return terminal;
+      if (this.questionAuth && !this.questionAuth.routeCurrent()) {
+        this.continuityUnsafe = true;
+        this.chat?.fence('AGY recovery question route changed before input.');
+        return { stopReason: 'cancelled' };
+      }
       // ACP settles its request while the hook invocation remains open.
       // The next native prompt on this session resumes that invocation.
       this.activity?.();
+      let source: AgyHumanConfirmation | undefined;
       const answer = await new Promise<string | undefined>(resolve => {
-        this.answerQuestion = value => { this.answerQuestion = undefined; resolve(value); };
+        this.answerQuestion = (value, confirmation) => {
+          this.answerQuestion = undefined;
+          source = confirmation;
+          resolve(value);
+        };
         const questions = this.retained && Array.isArray(question.args?.questions) ? question.args.questions : [];
         const text = questions.flatMap(item => typeof item?.question === 'string' && Array.isArray(item.options)
           ? [item.question, ...item.options.filter((option: unknown) => typeof option === 'string')
@@ -533,6 +574,12 @@ export class AgyAcpRuntime {
         if (text) this.active?.onDisplayText?.(text);
       });
       if (answer === undefined || this.closing || this.blocked) return { stopReason: 'cancelled' };
+      if (this.questionAuth) {
+        const auth = this.questionAuth;
+        const confirmation = source;
+        if (!confirmation) throw new Error('Missing AGY recovery answer confirmation.');
+        this.restore!.run(() => auth.check(confirmation));
+      }
       this.activity?.();
       blocks = [{ type: 'text', text: answer }];
     }
@@ -562,10 +609,26 @@ export class AgyAcpRuntime {
   }
   action(id: string) { return this.host?.schedules.action(id); }
   isWaitingInput(): boolean { return this.permissions.waiting || !!this.answerQuestion; }
-  sendInput(input: string): boolean {
+  get requiresAuthenticatedInput(): boolean { return this.isWaitingInput() && (!!this.questionAuth || this.manualTurnPending); }
+  cancelRecoveredInput(): void {
+    if (this.requiresAuthenticatedInput) { this.permissions.cancel(); this.cancelForeground(); }
+  }
+  sendInput(input: string, confirmation?: AgyHumanConfirmation): boolean {
+    if (!this.isWaitingInput() || !input.trim()) return false;
+    if (this.questionAuth || this.manualTurnPending) {
+      if (!this.questionAuth || !confirmation) return false;
+      if (!this.questionAuth.routeCurrent()) {
+        this.cancelForeground();
+        return false;
+      }
+      try {
+        this.restore!.run(() => this.questionAuth!.consume(confirmation));
+      } catch {
+        return false;
+      }
+    }
     if (!this.answerQuestion) return this.permissions.input(input);
-    if (!input.trim()) return false;
-    this.answerQuestion(input);
+    this.answerQuestion(input, confirmation);
     return true;
   }
   respondToApproval(id: string, action: ApprovalAction): boolean { return this.permissions.respond(id, action); }
@@ -630,8 +693,11 @@ export class AgyAcpRuntime {
     if (this.host || this.chat) {
       const safe = !this.hostScheduleUnsafe && !this.relayFault && this.checkpointEligible;
       const errors = safe && cleanHistory ? this.chat?.checkpointToolErrors() : undefined;
+      // Command and tool evidence after a verified prefix is bound to the live control rows only.
+      const verified = safe && cleanHistory ? this.recoveredHistory : undefined;
       this.options.ownedSessionClosed(this.sessionId!, safe ? cleanHistory : undefined, safe ? unpromptedHistory : undefined,
-        safe && cleanHistory ? this.commands?.snapshot(this.latestRecords) : undefined, ...(errors ? [errors] : []));
+        safe && cleanHistory ? this.commands?.snapshot(this.latestRecords.slice(verified?.count ?? 0)) : undefined,
+        ...(errors || verified ? [errors] : []), ...(verified ? [{ ...verified }] : []));
     }
     this.closed = true;
 

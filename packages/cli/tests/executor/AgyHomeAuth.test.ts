@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { execFile } from 'child_process';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
+import { kernelGate } from '../../src/delegation/OwnershipRuntime';
 import type { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 const fixture = vi.hoisted(() => ({ home: '' }));
@@ -99,6 +100,53 @@ describe('AGY per-thread native authentication', () => {
     fs.symlinkSync(redirect, path.join(gemini, 'antigravity-cli'), 'junction');
     await expect(executor.listModels()).rejects.toThrow('redirected thread HOME');
     expect(fs.readdirSync(redirect)).toEqual([]);
+  });
+
+  it('repairs the relocated native login link during a catalog query after a competing repair releases it', async context => {
+    if (!requireFileSymlinks(() => context.skip())) return;
+    const dir = threadCli();
+    const link = path.join(dir, 'antigravity-oauth-token');
+    const oldToken = path.join(root, 'previous-home', '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+    fs.symlinkSync(oldToken, link, 'file');
+    const originalTarget = fs.readlinkSync(link);
+    fs.writeFileSync(masterToken, 'synthetic shared credential');
+    const home = path.dirname(path.dirname(dir));
+    const gate = kernelGate(path.join(home, '.remote-cli-agy-file-login.gate'))!;
+    try {
+      await expect(executor.listModels()).rejects.toThrow('being restored');
+      expect(fs.readlinkSync(link)).toBe(originalTarget);
+    } finally { gate.close(); }
+    vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: any, callback: any) => {
+      expect(fs.realpathSync(link)).toBe(masterToken);
+      callback(null, 'synthetic-model\tSynthetic Model\n');
+    }) as any);
+    expect((await executor.listModels())[0].id).toBe('synthetic-model');
+    expect(threadCli()).toBe(dir);
+    expect(fs.readdirSync(dir).filter(name => name.startsWith('.remote-cli-login-'))).toEqual([]);
+  });
+
+  it('preserves an unrecognized dangling link in the thread profile', async context => {
+    if (!requireFileSymlinks(() => context.skip())) return;
+    const link = path.join(threadCli(), 'antigravity-oauth-token');
+    const unrelated = path.join(root, 'custom-login');
+    fs.symlinkSync(unrelated, link, 'file');
+    const originalTarget = fs.readlinkSync(link);
+    fs.writeFileSync(masterToken, 'synthetic shared credential');
+    await expect(executor.listModels()).rejects.toThrow('original file store');
+    expect(fs.readlinkSync(link)).toBe(originalTarget);
+  });
+
+  it('leaves the relocated link alone when the shared credential points outside the account store', async context => {
+    if (!requireFileSymlinks(() => context.skip())) return;
+    const link = path.join(threadCli(), 'antigravity-oauth-token');
+    const previous = path.join(root, 'old', '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+    fs.symlinkSync(previous, link, 'file');
+    const originalTarget = fs.readlinkSync(link);
+    const otherFile = path.join(root, 'other-file');
+    fs.writeFileSync(otherFile, 'synthetic content');
+    fs.symlinkSync(otherFile, masterToken, 'file');
+    await expect(executor.listModels()).rejects.toThrow('original file store');
+    expect(fs.readlinkSync(link)).toBe(originalTarget);
   });
 
   it('exposes the native login file without sharing conversation data', context => {

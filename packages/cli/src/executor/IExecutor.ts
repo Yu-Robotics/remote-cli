@@ -7,6 +7,10 @@ export interface AgyHumanConfirmation {
   originalMessageId: string;
   createdAt: number;
   current(): boolean;
+  /** Same active registration, binding, thread, and operation without the initial message's expiry. */
+  routeCurrent?(): boolean;
+  /** Opaque route identity tying follow-up question replies to the same registration and thread. */
+  routeKey?: string;
 }
 
 export interface ExecuteOptions {
@@ -181,13 +185,17 @@ export interface IExecutor {
   nativeScheduleAction?(id: string): import('../scheduling/types').NativeScheduleToolAction | undefined;
   /** Register scoped control-tool groups without enabling delegation or changing native timing support. */
   configureManagedTools?(connection?: import('../managed/contract').ManagedToolConnection): Promise<void>;
+  /** True when a requested managed-tool change was staged for the next safe host transition. */
+  hasDeferredManagedTools?(): boolean;
   getGoal?(): Promise<ExecutorGoal | null>;
   executeGoal?(request: ExecutorGoalRunRequest, options: ExecuteOptions): Promise<ExecuteResult>;
   pauseGoal?(): Promise<ExecuteResult>;
   clearGoal?(): Promise<ExecuteResult>;
   isGoalRunning?(): boolean;
   isWaitingInput?(): boolean;
-  sendInput?(input: string): boolean;
+  requiresAuthenticatedInput?(): boolean;
+  cancelRecoveredInput?(): void;
+  sendInput?(input: string, confirmation?: AgyHumanConfirmation): boolean;
   respondToApproval?(requestId: string, action: ApprovalAction): boolean;
   compact?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   compactWhenFull?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;

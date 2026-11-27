@@ -718,9 +718,12 @@ During that foreground reply, you can also ask to see this thread’s managed sc
 
 A timer cannot initiate this recovery. If a timer comes due while the chat
 is waiting for your next message, the CLI skips that occurrence and keeps
-future recurring slots. After recovery, a verified, idle text-only conversation
-can accept future host-timed turns. A conversation with earlier tool activity
-can continue in foreground chat while its timers stay blocked.
+future recurring slots. From 1.6.290, the result card labels a skipped occurrence.
+After your message restores the original chat, a bound timer can run again once AGY
+confirms the chat is idle and remote-cli can verify that past tool calls finished.
+This includes a completed read-only schedule query that returned an error. Unknown
+background work or unresolved ownership keeps the timer waiting. Missed slots stay
+skipped. If AGY asks a question during recovery, reply in the original Feishu thread.
 
 Explicit `/clear` may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
@@ -2064,7 +2067,7 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 | `/effort` | Open model-specific native effort choices for the original thread |
 | `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-The model card uses compact buttons when they allow the complete catalog to fit on one page alongside speed controls. When a model catalog spans multiple pages, the card shows the current page, the number shown and the total number of choices on the card. Use Next or Prev beside the model choices. Refresh queries the selected backend again. For an AGY main conversation, the query uses the thread’s working directory and existing AGY profile. Before that profile exists, it uses the account catalog. With file-backed login enabled, existing threads can pick up the shared login file on model refresh.
+The model card uses compact buttons when they allow the complete catalog to fit on one page alongside speed controls. When a model catalog spans multiple pages, the card shows the current page, the number shown and the total number of choices on the card. Use Next or Prev beside the model choices. Refresh queries the selected backend again. For an AGY main conversation, the query uses the thread’s working directory and existing AGY profile. Before that profile exists, it uses the account catalog. With file-backed login enabled, a model refresh reconnects a missing shared login file or a broken link that still identifies the native login file in a previous home directory.
 
 On devices where AGY should use an existing file-backed login, set `remote-cli config set executor.agy.forceFileTokenStorage true`. The CLI passes AGY's native `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=true` setting to model discovery and ACP conversations, including workers. The default preserves AGY's normal credential selection. The available models depend on the selected login.
 
