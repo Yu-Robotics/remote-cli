@@ -590,6 +590,9 @@ export class AgyAcpRuntime {
       }
       this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled'
         && (!this.options.worker || result.success && result.stopReason === 'end_turn'));
+      const nativeFailureError = options.hostScheduleSessionId !== undefined && options.hostScheduleSessionId === this.sessionId
+        && !this.options.worker && this.hostScheduleSafe && !this.permissionDeclined && !this.commands?.pending
+        && 'nativeFailureError' in result && typeof result.nativeFailureError === 'string' ? result.nativeFailureError : undefined;
       const completed = result.success && result.stopReason === 'end_turn';
       if (this.manualTurnPending) {
         if (!completed) return { success: false, error: result.output || 'AGY recovery turn did not complete.', output: result.output };
@@ -614,7 +617,8 @@ export class AgyAcpRuntime {
         options.onStream?.(result.output); options.onDisplayText?.(result.output);
       }
       return { success: result.success, output: result.output, sessionAbbr: this.sessionId?.slice(0, 8),
-        ...(!result.success && { error: result.output || 'AGY native turn failed.' }) };
+        ...(nativeFailureError && { confirmedHostScheduleFailure: true as const }),
+        ...(!result.success && { error: nativeFailureError || result.output || 'AGY native turn failed.' }) };
     } catch (error) {
       this.hostScheduleUnsafe = true;
       throw error;

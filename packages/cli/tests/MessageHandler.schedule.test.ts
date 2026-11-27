@@ -1,4 +1,4 @@
-import { AgyManualResumeScheduleSkip } from '../src/scheduling/types';
+import { AgyHostScheduleUnavailable, AgyManualResumeScheduleSkip } from '../src/scheduling/types';
 import { ScheduleCards } from '../../router/src/feishu/ScheduleCards';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/promises';
@@ -192,6 +192,31 @@ describe('MessageHandler schedule management and delivery', () => {
       service.options.hostDispatch(record, occurrenceId, admit, signal);
     return { record, dispatch, deliver: () => service.options.deliver({ schedule: record, id: 'host-task:run', occurrenceId: 'run', success: true, output: 'Synthetic result' }) };
   }
+
+  it.each(['unavailable', 'consumed', 'unconfirmed', 'changed session', 'changed executor', 'eligible'])(
+    'settles a failed AGY occurrence independently of future admission (%s)', async state => {
+      f.setBackend('agy');
+      const { dispatch } = await dispatchFixture();
+      f.executor.execute.mockImplementationOnce(async () => {
+        if (state === 'changed session') f.executor.getSessionId.mockReturnValue('replacement');
+        if (state === 'changed executor') vi.spyOn(f.pool, 'getExistingExecutor').mockReturnValue({ ...f.executor });
+        if (state !== 'eligible') f.executor.checkHostScheduleSession.mockImplementation(() => {
+          if (state === 'consumed') throw new AgyManualResumeScheduleSkip('consumed');
+          throw new AgyHostScheduleUnavailable('Further timers unavailable.');
+        });
+        return { success: false, error: 'Native failure', output: 'Native output',
+          ...(state !== 'unconfirmed' && { confirmedHostScheduleFailure: true as const }) };
+      });
+      const result = await dispatch();
+      if (['unconfirmed', 'changed session', 'changed executor'].includes(state)) {
+        expect(result).toMatchObject({ success: false, outcomeUnknown: true });
+        expect(result.output).toBeUndefined();
+      } else {
+        expect(result).toMatchObject({ success: false, error: 'Native failure', output: 'Native output' });
+        expect(result.outcomeUnknown).toBeUndefined();
+        expect(result.stopSchedule).toBe(state === 'eligible' ? undefined : true);
+      }
+    });
 
   it('allows cancellation while host admission is pending, alongside retained native history', async () => {
     await history(); installRetainedCleanup();
@@ -598,6 +623,46 @@ describe('MessageHandler schedule management and delivery', () => {
     controller.abort();
     expect(await queued).toBeUndefined();
     expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('delivers the native AGY failure and output and retires its recurring schedule', async () => {
+    f.setBackend('agy');
+    vi.spyOn(hooks, 'installAgyScheduleHooks').mockImplementation(syntheticAgyHooks.installAgyScheduleHooks);
+    vi.spyOn(hooks, 'AgyHookRelay').mockImplementation((home, accept) =>
+      new syntheticAgyHooks.AgyHookRelay(home, accept) as unknown as hooks.AgyHookRelay);
+    class Client extends SyntheticAgyActivityClient {
+      async prompt(_session: string, blocks: { text: string }[]) {
+        const failed = blocks[0].text === 'Synthetic scheduled task';
+        this.hook('SessionStart');
+        const invocation = { initialNumSteps: this.rows.length, invocationNum: 0 };
+        this.hook('PreInvocation', invocation);
+        this.rows.push({ step_index: this.rows.length, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE',
+          content: failed ? 'Partial report' : 'Ready' });
+        this.hook('PostInvocation', invocation);
+        this.hook('Stop', { terminationReason: failed ? 'ERROR' : 'NO_TOOL_CALL', error: failed ? 'Provider failure' : '',
+          fullyIdle: true, continuationActive: false });
+        return { stopReason: 'end_turn' };
+      }
+    }
+    vi.spyOn(acp, 'AcpClient').mockImplementation((command, args, cwd, callbacks) =>
+      new Client(command, args, cwd, callbacks!) as unknown as acp.AcpClient);
+    const executor = new AgyExecutor(new DirectoryGuard([f.cwd]), { threadId: 'thread-a', initialWorkingDirectory: f.cwd });
+    vi.spyOn(f.pool, 'getExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    vi.spyOn(f.pool, 'getExistingExecutor').mockReturnValue(executor as unknown as typeof f.executor);
+    try {
+      await f.bind();
+      await expect(executor.execute('Initialize')).resolves.toMatchObject({ success: true });
+      await f.send('/schedule cron "0 9 * * *" --tz UTC -- Synthetic scheduled task');
+      const [job] = await records();
+      const service = f.handler['schedules']!;
+      vi.spyOn(service as any, 'now').mockReturnValue(job.nextDueAt);
+      await service['wakeHosts']();
+      await vi.waitFor(() => expect(f.scheduledResults()).toMatchObject([
+        { success: false, error: 'Provider failure', output: 'Partial report' },
+      ]));
+      expect(await service.list(job)).toMatchObject([{ state: 'failed', lastOccurrence: {
+        dueAt: job.nextDueAt, status: 'failed', error: 'Provider failure' } }]);
+    } finally { await executor.destroy(); }
   });
 
   it.each(['DONE', 'ERROR'])('delivers one pinned AGY occurrence after a foreground %s and command exit', async status => {

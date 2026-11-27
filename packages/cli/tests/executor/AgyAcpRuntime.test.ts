@@ -929,6 +929,34 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(executor.hasDeferredManagedTools()).toBe(false);
   });
 
+  it.each(['paired failure', 'success', 'ordinary', 'cancelled', 'ACP limit', 'unknown Stop', 'empty error', 'not idle', 'wrong session',
+    'duplicate Stop', 'missing Stop', 'missing PostInvocation', 'relay fault', 'lost ACP response'])(
+    'reports confirmed host-scheduled AGY failure only for a paired native terminal (%s)', async scenario => {
+      const { id } = await captureTimedSession();
+      const options = scenario === 'ordinary' ? {} : { hostScheduleSessionId: id };
+      const turn = executor.execute('check failure\nhold', options);
+      await vi.waitFor(() => expect(last().prompts.at(-1)).toBe('check failure\nhold'));
+      const client = last();
+      if (scenario === 'success') client.row('PLANNER_RESPONSE', 'Scheduled reply');
+      if (scenario !== 'missing PostInvocation') client.hook('PostInvocation');
+      const stop = { terminationReason: scenario === 'unknown Stop' ? 'UNKNOWN' : scenario === 'success' ? 'NO_TOOL_CALL' : 'ERROR',
+        ...(scenario === 'wrong session' && { conversationId: 'other-synthetic-session' }),
+        error: ['empty error', 'success'].includes(scenario) ? '' : 'Synthetic inference failure', fullyIdle: scenario !== 'not idle', continuationActive: false };
+      if (scenario !== 'missing Stop') client.hook('Stop', stop);
+      if (scenario === 'duplicate Stop') client.hook('Stop', stop);
+      if (scenario === 'relay fault') native.fault();
+      if (scenario === 'lost ACP response') client.rejectPrompt(new Error('Synthetic transport loss'));
+      else client.release({ stopReason: scenario === 'cancelled' ? 'cancelled' : scenario === 'ACP limit' ? 'max_tokens' : 'end_turn' });
+      if (['wrong session', 'missing Stop', 'missing PostInvocation', 'relay fault', 'lost ACP response'].includes(scenario)) {
+        await expect(turn).rejects.toThrow();
+      } else {
+        const result = await turn;
+        expect(result.success).toBe(scenario === 'success');
+        if (scenario === 'paired failure') expect(result).toHaveProperty('confirmedHostScheduleFailure', true);
+        else expect(result).not.toHaveProperty('confirmedHostScheduleFailure');
+      }
+    });
+
   it.each(['question', 'permission'])('declines unattended input once with %s first', async first => {
     const { id } = await captureTimedSession();
     const required = vi.fn(), stream = vi.fn();

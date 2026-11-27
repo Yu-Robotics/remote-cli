@@ -90,6 +90,8 @@ export class AgyChatHost {
   private ordinaryMain = false;
   private policyFailure?: string;
   private idleStop = false;
+  // Undefined until the first Stop. Any later hook makes attribution ambiguous.
+  private nativeErrorStop?: string | null;
   // A human-only terminal is local to this host and its unchanged native history.
   private humanHistory?: { count: number; digest: string };
   private settledHumanTurn = false;
@@ -140,6 +142,9 @@ export class AgyChatHost {
     }
     this.settledHumanTurn = false;
     this.idleStop = this.active && event === 'Stop' && payload.fullyIdle === true && payload.continuationActive === false;
+    if (this.nativeErrorStop !== undefined) this.nativeErrorStop = null;
+    else if (event === 'Stop') this.nativeErrorStop = this.idleStop && this.invocationStart !== undefined
+      && payload.terminationReason === 'ERROR' && typeof payload.error === 'string' && payload.error.trim() ? payload.error : null;
     if (this.checkingLoadedHistory) {
       if (!['SessionStart', 'PreInvocation'].includes(event) || !this.reusable) this.fence(foregroundFailure);
       if (event === 'PreInvocation') this.checkingLoadedHistory = false;
@@ -322,11 +327,12 @@ export class AgyChatHost {
   }
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input),
-    admission: 'strict' | 'main' | 'confirmed-human' = 'strict'): Promise<{ success: boolean; output: string; stopReason: string }> {
+    admission: 'strict' | 'main' | 'confirmed-human' = 'strict'): Promise<{ success: boolean; output: string; stopReason: string; nativeFailureError?: string }> {
     if (this.active || this.blocked || !this.reusable && !(admission === 'confirmed-human' && this.humanContinuation)) throw new Error(this.blocked ?? this.policyFailure ?? 'AGY chat is busy or has unsettled native work.');
     this.ordinaryMain = admission !== 'strict';
     this.settledHumanTurn = false;
     this.idleStop = false;
+    this.nativeErrorStop = undefined;
     this.turnStart = undefined; this.observedTools.clear(); this.postedTools.clear(); this.requiredTerminal = undefined;
     this.turnRejections.length = 0; this.dispatches.length = 0; this.invocationStart = undefined;
     this.monitor.beginForeground(); this.active = true; this.cancelled = false;
@@ -358,7 +364,8 @@ export class AgyChatHost {
       }
       if (settled && !this.reusable) this.policyFailure ??= foregroundFailure;
       this.settledHumanTurn = settled;
-      return { ...result, stopReason: terminal.stopReason };
+      return { ...result, stopReason: terminal.stopReason,
+        ...(!result.success && this.nativeErrorStop && terminal.stopReason === 'end_turn' ? { nativeFailureError: this.nativeErrorStop } : {}) };
     } catch (error) {
       this.fence('AGY chat outcome is unconfirmed; retained history cannot be resumed automatically.'); throw error;
     } finally {

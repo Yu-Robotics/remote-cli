@@ -53,6 +53,8 @@ export interface ExecuteOptions {
 }
 
 export interface ExecuteResult {
+  /** The pinned AGY turn returned a verified native failure terminal. */
+  confirmedHostScheduleFailure?: true;
   success: boolean;
   output?: string;
   error?: string;

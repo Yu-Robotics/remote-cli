@@ -74,7 +74,7 @@ import { ScheduleService, HOST_SCHEDULE_CATALOG_FILE, SCHEDULE_CATALOG_FILE, typ
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertHostScheduleBackend, HOST_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
-import { AgyManualResumeScheduleSkip, type ScheduleOwner, type ScheduleRecord } from '../scheduling/types';
+import { AgyHostScheduleUnavailable, AgyManualResumeScheduleSkip, type ScheduleOwner, type ScheduleRecord } from '../scheduling/types';
 
 /**
  * Detected backend information
@@ -4304,7 +4304,13 @@ You can also use natural language commands to control Claude Code CLI.`,
             output: display || result.output,
             error: occurrence.abortReceipt };
         }
-        check(true, true);
+        try { check(true, true); }
+        catch (error) {
+          // An admission refusal stops future slots. A verified terminal still belongs to this occurrence.
+          if (record.backend !== 'agy' || result.success || outcomeUnknown || !stopSchedule
+            || !('confirmedHostScheduleFailure' in result && result.confirmedHostScheduleFailure === true)
+            || !(error instanceof AgyHostScheduleUnavailable)) throw error;
+        }
         // Prefer the public display stream, but preserve the executor's final
         // output when a backend only returns its answer at turn completion.
         const error = !result.success && this.hostBindingCurrent(record)

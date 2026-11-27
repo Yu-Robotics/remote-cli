@@ -1,8 +1,11 @@
 import type { NativeScheduleBackend } from './ScheduleCapabilities';
 import type { BackendKey } from '../types/config';
 
+/** The original AGY selection is identifiable but cannot admit another timer. */
+export class AgyHostScheduleUnavailable extends Error {}
+
 /** A pinned AGY timer cannot authorize recovery of a saved main conversation. */
-export class AgyManualResumeScheduleSkip extends Error {
+export class AgyManualResumeScheduleSkip extends AgyHostScheduleUnavailable {
   constructor(state: 'required' | 'consumed') {
     super(state === 'required'
       ? 'The original AGY conversation has no clean checkpoint. Send a normal Feishu message in its thread to resume.'

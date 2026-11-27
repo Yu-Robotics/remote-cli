@@ -1,4 +1,4 @@
-import { AgyManualResumeScheduleSkip } from '../scheduling/types';
+import { AgyHostScheduleUnavailable, AgyManualResumeScheduleSkip } from '../scheduling/types';
 import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
 import { agyHostScheduleHistory, agyOwnershipReview, agySavedSelectionDeletion, assertAgySelectionResettable, detachAgySelection } from './agy/AgySessionSelection';
 import { createHash, randomUUID } from 'crypto';
@@ -238,9 +238,12 @@ export class AgyExecutor implements IExecutor {
       }
       return;
     }
-    if (!this.acp.hostScheduleAvailable || this.acp.sessionId !== id || !this.hostGeneration
-      || pointer.hostGeneration !== this.hostGeneration) {
-      throw new Error('AGY host timing requires a verified foreground conversation with no uncertain native work.');
+    if (this.acp.sessionId !== id || !this.hostGeneration || pointer.hostGeneration !== this.hostGeneration) {
+      throw new Error('The original AGY conversation changed.');
+    }
+    if (!this.acp.hostScheduleAvailable) {
+      if (!mainGeneration || !this.ownedPointerCurrent()) throw new Error('The original AGY conversation changed.');
+      throw new AgyHostScheduleUnavailable('AGY host timing requires a verified foreground conversation with no uncertain native work.');
     }
   }
   private ownedPointerCurrent(): boolean {

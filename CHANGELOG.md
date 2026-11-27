@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.294] - 2026-11-27
+
+### Fixed
+- Preserve the original error and output from a confirmed AGY scheduled failure when the same conversation becomes ineligible for future timers.
+
 ## [1.6.293] - 2026-11-27
 
 ### Fixed

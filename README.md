@@ -596,6 +596,8 @@ once AGY confirms the command ended and the foreground turn has settled.
 If a scheduled turn encounters a confirmed ordinary tool error after restart,
 the next human message can continue in that AGY chat. A pending managed-tool
 connection change takes effect on the next verified reload.
+A confirmed AGY scheduled failure retains its original error and output when
+the same conversation becomes unavailable for future timers.
 
 From CLI 1.6.266, `/abort` interrupts the current scheduled run. A recurring
 task keeps its next scheduled time. To stop future runs, use `/schedule cancel <id>`.
