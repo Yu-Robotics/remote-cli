@@ -31,6 +31,7 @@ export interface AgyExecutorOptions {
   agyCommand?: string;
   threadId?: string;
   delegationWorker?: boolean;
+  disposableWorkerCheckout?: string;
   inactivityTimeoutMs?: number;
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -117,6 +118,7 @@ export class AgyExecutor implements IExecutor {
   private readonly threadId?: string;
   private readonly agyHome?: string;
   private readonly delegationWorker: boolean;
+  private readonly disposableWorkerCheckout?: string;
   private readonly inactivityTimeoutMs: number;
   private readonly sessionFilePath: string;
   private conversationId: string | null = null;
@@ -133,7 +135,8 @@ export class AgyExecutor implements IExecutor {
   private nativeObserver?: (target: AgyDeletionTarget) => Promise<void>;
   private nativeCaptureFailure?: () => Promise<void>;
   private nativeCaptureUnconfirmed = false;
-  private workerProof?: { sessionId: string; policy: string; settled: boolean; closed: boolean };
+  private workerProof?: { sessionId: string; policy: string; settled: boolean; closed: boolean; claim?: string;
+    interrupted?: { binding: string; store: string; prefix: AgyVerifiedHistory } };
   private scheduleOwner?: { sessionId: string; hostId: string; retired: boolean };
   private resumeCurrent = false;
   private allocationUnconfirmed = false;
@@ -148,6 +151,7 @@ export class AgyExecutor implements IExecutor {
     this.autoApprove = options.autoApprove ?? true; this.agyCommand = options.agyCommand ?? 'agy';
     this.tokenStorageEnv = agyTokenStorageEnv(options.forceFileTokenStorage);
     this.threadId = options.threadId; this.delegationWorker = options.delegationWorker ?? false;
+    this.disposableWorkerCheckout = options.disposableWorkerCheckout;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.currentWorkingDirectory = options.initialWorkingDirectory ? directoryGuard.resolveWorkingDirectory(options.initialWorkingDirectory) : process.cwd();
     if (this.threadId) {
@@ -168,7 +172,7 @@ export class AgyExecutor implements IExecutor {
       this.scheduleOwner = owner;
     }
     if (this.delegationWorker && fs.existsSync(this.sessionFilePath + '.worker-policy')) {
-      this.workerProof = JSON.parse(fs.readFileSync(this.sessionFilePath + '.worker-policy', 'utf8'));
+      this.workerProof = this.readWorkerProof();
     }
   }
   private writeNativeState(file: string, data: unknown): void {
@@ -264,6 +268,27 @@ export class AgyExecutor implements IExecutor {
         && this.acp.sessionId === sessionId && !!this.hostGeneration
         && this.hostSelection(sessionId).hostGeneration === this.hostGeneration;
     } catch { return false; }
+  }
+  private readWorkerProof(): NonNullable<AgyExecutor['workerProof']> {
+    const file = this.sessionFilePath + '.worker-policy';
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 65536 || fs.realpathSync.native(file) !== path.join(fs.realpathSync.native(os.homedir()),
+      '.remote-cli', 'agy-sessions', this.threadId + '.json.worker-policy')) throw new Error('Unsafe AGY worker proof.');
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  }
+  private workerBinding(id: string): string {
+    const pointer = this.hostSelection(id);
+    const root = path.join(fs.realpathSync.native(os.homedir()), '.remote-cli');
+    if (pointer.retired !== false || fs.realpathSync.native(this.sessionFilePath) !== path.join(root, 'agy-sessions', this.threadId + '.json')
+      || fs.realpathSync.native(this.agyHome!) !== path.join(root, 'agy-homes', this.threadId!)) throw new Error('AGY worker selection changed.');
+    const stat = fs.lstatSync(this.sessionFilePath, { bigint: true });
+    const cwd = fs.realpathSync.native(this.currentWorkingDirectory);
+    // Git recreates the checkout at the same path. Its repository directory
+    // stays in place, while shared-directory workers retain the cwd itself.
+    const workspaceRoot = this.disposableWorkerCheckout ? path.dirname(fs.realpathSync.native(this.disposableWorkerCheckout)) : cwd;
+    const workspace = fs.statSync(workspaceRoot, { bigint: true });
+    return createHash('sha256').update(JSON.stringify([id, this.threadId, this.agyHome, cwd,
+      String(workspace.dev), String(workspace.ino), this.agyCommand, String(stat.dev), String(stat.ino), String(stat.ctimeNs)])).digest('hex');
   }
   private saveWorkerProof(): void {
     if (this.workerProof) this.writeNativeState(this.sessionFilePath + '.worker-policy', this.workerProof);
@@ -372,6 +397,7 @@ export class AgyExecutor implements IExecutor {
     if (this.legacy) throw new Error(this.delegationWorker
       ? 'Legacy AGY worker history cannot execute over ACP. Use this worker card Clear action or parent /clear after task/artifact closeout; original history is retained.'
       : 'Legacy AGY conversation cannot execute over ACP. Use explicit /clear to start fresh; original native history is retained.');
+    if (this.delegationWorker && this.workerProof && !this.conversationId) throw new Error('The saved AGY worker selection is missing; retained history cannot be replaced.');
     let cleanGeneration: string | undefined;
     let savedCheckpoint: { commands?: AgyCommandCheckpoint; toolErrorDigest?: string; verifiedHistory?: AgyVerifiedHistory } | undefined;
     if (this.conversationId) {
@@ -382,8 +408,9 @@ export class AgyExecutor implements IExecutor {
         cleanGeneration = pointer.hostGeneration;
         savedCheckpoint = pointer.hostScheduleCheckpoint;
       }
-      if (!manual && !cleanGeneration && !this.resumeCurrent && !(this.delegationWorker && proof?.sessionId === this.conversationId
-        && proof.policy === 'hook-denial-v2' && proof.settled && proof.closed)) {
+      if (!manual && !cleanGeneration && (!this.resumeCurrent || this.delegationWorker) && !(this.delegationWorker && proof?.sessionId === this.conversationId
+        && (proof.policy === 'hook-denial-v2' && !proof.interrupted || proof.policy === 'worker-abort-v1' && !!proof.interrupted)
+        && proof.settled === true && proof.closed === true)) {
         const guidance = this.delegationWorker ? 'Use the worker card Clear action or explicit /clear after task closeout.'
           : 'Send a fresh Feishu message to the original thread from an authenticated device. Use explicit /clear only to start fresh.';
         throw new Error(`Saved AGY ACP chat cannot safely resume: pending work is unconfirmed. ${guidance} Original history is retained.`);
@@ -411,7 +438,21 @@ export class AgyExecutor implements IExecutor {
     // A controlled reconnect is single-use; a failed load cannot authorize retries.
     this.resumeCurrent = false;
     this.unpromptedReconnect = undefined;
-    if (this.workerProof) { this.workerProof.closed = false; this.saveWorkerProof(); }
+    const savedWorker = this.workerProof;
+    const interrupted = savedWorker?.interrupted;
+    let binding: string | undefined;
+    let workerDatabase: string | undefined;
+    const databaseIdentity = (id: string): string | undefined => {
+      const file = path.join(fs.realpathSync.native(this.agyHome!), '.gemini', 'antigravity-cli', 'conversations', id + '.db');
+      const stat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false });
+      return stat?.isFile() && stat.nlink === 1n && stat.ino && fs.realpathSync.native(file) === file
+        ? String(stat.dev) + '/' + String(stat.ino) : undefined;
+    };
+    const verifyWorkerBinding = (id: string) => {
+      if (!binding || this.workerBinding(id) !== binding || !isDeepStrictEqual(this.readWorkerProof(), this.workerProof)) {
+        throw new Error('AGY worker ownership changed.');
+      }
+    };
     let firstManualPrompt = !!manual;
     this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome, cwd: this.currentWorkingDirectory,
       threadId: this.threadId, env, model: this.model, effort: this.effort, autoApprove: this.autoApprove,
@@ -420,6 +461,20 @@ export class AgyExecutor implements IExecutor {
       hostScheduleChat, commandCheckpoint: savedCheckpoint?.commands, toolErrorDigest: savedCheckpoint?.toolErrorDigest,
       verifiedHistory: savedCheckpoint?.verifiedHistory,
       validatedChatLoad: !!cleanGeneration,
+      workerHistory: interrupted?.prefix,
+      claimWorkerLoad: original && this.delegationWorker ? () => {
+        binding = this.workerBinding(original);
+        workerDatabase = databaseIdentity(original);
+        if (!savedWorker || !savedWorker.closed || !savedWorker.settled || !isDeepStrictEqual(this.readWorkerProof(), savedWorker)
+          || interrupted && (!isWorkerLaneExecutorId(this.threadId!) || !isAgyVerifiedHistory(interrupted.prefix, true) || interrupted.binding !== binding
+            || interrupted.store !== agyHostScheduleHistory(this.agyHome!, original))) throw new Error('AGY worker continuation proof changed.');
+        this.workerProof = { sessionId: original, policy: 'hook-denial-v2', settled: false, closed: false, claim: randomUUID() };
+        this.saveWorkerProof();
+      } : undefined,
+      verifyWorkerLoad: original && this.delegationWorker ? () => {
+        verifyWorkerBinding(original);
+        if (interrupted && interrupted.store !== agyHostScheduleHistory(this.agyHome!, original)) throw new Error('AGY worker history changed.');
+      } : undefined,
       consumeManualConfirmation: manual ? () => this.consumeConfirmation(manual.source) : undefined,
       beforeManualLoad: manual && original ? () => {
         this.checkConfirmation(manual.source);
@@ -449,6 +504,8 @@ export class AgyExecutor implements IExecutor {
       } : undefined,
       mcpServers: delegationSessionServers(this.delegationConnection), mapTool: mapAgyTool,
       beforeAllocation: () => {
+        if (this.delegationWorker && [this.sessionFilePath, this.sessionFilePath + '.worker-policy'].some(file =>
+          fs.lstatSync(file, { throwIfNoEntry: false }))) throw new Error('AGY worker selection changed before allocation.');
         if (hostScheduleChat) {
           // Ordinary chat can still start when fresh-history provenance is unavailable.
           const root = path.join(fs.realpathSync(this.agyHome!), '.gemini', 'antigravity-cli');
@@ -470,13 +527,23 @@ export class AgyExecutor implements IExecutor {
         this.writeNativeState(this.sessionFilePath + '.allocation-unconfirmed', { kind: 'agy-acp-allocation' });
       },
       saveSession: async id => {
+        if (original && this.delegationWorker) {
+          if (id !== original) throw new Error('AGY loaded identity changed.');
+          if (interrupted && (!workerDatabase || databaseIdentity(id) !== workerDatabase)) throw new Error('AGY worker database was replaced during load.');
+          workerDatabase = databaseIdentity(id);
+        }
         if (original) { if (id !== original) throw new Error('AGY loaded identity changed.'); return; }
         this.conversationId = id; this.acpLeaseUnconfirmed = true; this.awaitingManualRecovery = false;
         this.hostGeneration = priorHostHistories && !priorHostHistories.has(id.toLowerCase()) ? randomUUID() : undefined;
         this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: false, savedAt: new Date().toISOString(),
           hostGeneration: this.hostGeneration });
         fs.rmSync(this.sessionFilePath + '.allocation-unconfirmed', { force: true });
-        if (this.delegationWorker) { this.workerProof = { sessionId: id, policy: 'hook-denial-v2', settled: true, closed: false }; this.saveWorkerProof(); }
+        if (this.delegationWorker) {
+          binding = this.workerBinding(id);
+          workerDatabase = databaseIdentity(id);
+          this.workerProof = { sessionId: id, policy: 'hook-denial-v2', settled: true, closed: false, claim: randomUUID() };
+          this.saveWorkerProof();
+        }
         if (this.nativeObserver) {
           try {
             if (!scope || preexisting.has(id)) throw new Error('AGY allocation is not a fresh owned identity.');
@@ -501,15 +568,38 @@ export class AgyExecutor implements IExecutor {
           }
           this.verifyLiveMainSelection(original);
         }
-        if (this.workerProof) { this.workerProof.settled = false; this.saveWorkerProof(); }
+        if (this.workerProof) {
+          verifyWorkerBinding(this.workerProof.sessionId);
+          this.workerProof.settled = false; this.saveWorkerProof();
+        }
       },
-      settledPrompt: reusable => { if (this.workerProof) { this.workerProof.settled = reusable; this.saveWorkerProof(); } },
+      settledPrompt: reusable => {
+        if (this.workerProof && !this.workerProof.closed) {
+          verifyWorkerBinding(this.workerProof.sessionId);
+          this.workerProof.settled = reusable; this.saveWorkerProof();
+        }
+      },
+      workerClosed: (prefix, aborted) => {
+        const proof = this.workerProof;
+        if (!proof || this.retiringSelection) return;
+        verifyWorkerBinding(proof.sessionId);
+        if (interrupted && !prefix) proof.settled = false;
+        if (prefix && (aborted || proof.settled)) {
+          try {
+            if (!isWorkerLaneExecutorId(this.threadId!) || !workerDatabase || databaseIdentity(proof.sessionId) !== workerDatabase) throw new Error('Original AGY worker database is unavailable.');
+            proof.policy = 'worker-abort-v1';
+            proof.interrupted = { binding: binding!, store: agyHostScheduleHistory(this.agyHome!, proof.sessionId), prefix };
+            proof.settled = true;
+          } catch { proof.settled = false; }
+        }
+        proof.closed = true;
+        this.saveWorkerProof();
+      },
       ownedSessionClosed: (id, cleanHistory, unpromptedHistory, commands, toolErrorDigest, verifiedHistory) => {
         if (id === this.conversationId) this.acpLeaseUnconfirmed = false;
         // The deletion path rechecks the installed pointer after exit. Writing
         // a checkpoint here could replace an intervening selection.
         if (this.retiringSelection) return;
-        if (this.workerProof?.sessionId === id) { this.workerProof.closed = true; this.saveWorkerProof(); }
         if ((cleanHistory || unpromptedHistory) && this.hostGeneration && id === this.conversationId) {
           const pointer = this.hostSelection(id);
           if (pointer.hostGeneration !== this.hostGeneration) throw new Error('AGY host-timed selection changed before retirement.');
@@ -861,7 +951,7 @@ export class AgyExecutor implements IExecutor {
     }
     this.shutdownUncertain = false;
   }
-  async abort(): Promise<boolean> { return await this.acp?.abort() ?? false; }
+  async abort(reason?: 'cancelled' | 'timed_out'): Promise<boolean> { return await this.acp?.abort(reason) ?? false; }
   abortStatusMessage(): string {
     return this.acp?.hasJobs ? 'AGY foreground interrupted; native timers may still queue reminders and dispatch is blocked. Inspect /schedule list. No work is replayed.'
       : 'AGY foreground cancelled. Completed tool side effects remain; unconfirmed outcomes stay blocked.';

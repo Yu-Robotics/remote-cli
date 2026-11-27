@@ -31,7 +31,8 @@ vi.mock('../../src/executor/agy/AgyAcpRuntime', () => ({ AgyAcpRuntime: class {
   constructor(public options: any) { state.clients.push(this); }
   async start() {
     if (this.started) return; this.started = true; this.running = true;
-    if (!this.options.sessionId) this.options.beforeAllocation?.();
+    if (this.options.sessionId) { this.options.claimWorkerLoad?.(); this.options.verifyWorkerLoad?.(); }
+    else this.options.beforeAllocation?.();
     if (state.lostReply) { this.allocationUnconfirmed = true; this.running = false; throw new Error('Synthetic lost allocation reply'); }
     const store = path.join(this.options.home, '.gemini', 'antigravity-cli', 'conversations'); fs.mkdirSync(store, { recursive: true });
     if (!this.options.sessionId) fs.writeFileSync(path.join(store, `${state.id}.db`), 'SQLite format 3\0synthetic');
@@ -43,7 +44,7 @@ vi.mock('../../src/executor/agy/AgyAcpRuntime', () => ({ AgyAcpRuntime: class {
     state.promptStarted?.();
     await state.promptWait; this.options.settledPrompt?.(true); return { success: true, output: 'Synthetic terminal' };
   }
-  async close() { if (!state.group) throw new Error('Unconfirmed group'); this.running = false; this.closed = true; this.options.ownedSessionClosed(this.options.sessionId ?? state.id); }
+  async close() { if (this.closed) return; if (!state.group) throw new Error('Unconfirmed group'); if (this.running) this.options.workerClosed?.(); this.running = false; this.closed = true; this.options.ownedSessionClosed(this.options.sessionId ?? state.id); }
   async waitForManagedProcessGroupExit() { if (!state.group) throw new Error('Unconfirmed group'); }
 } }));
 const lane = 'delegate-lane-33333333-3333-4333-8333-333333333333';

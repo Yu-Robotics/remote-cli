@@ -3,9 +3,10 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AgyHookLease } from '../../scheduling/agy/AgyHookOwnership';
 import { AgyChatHost, restoreAgyToolErrors } from './AgyChatHost';
 import { agyHostScheduleHistory } from './AgySessionSelection';
-import { creationReceipt, nativeRestartNotice, nativeWake, type TranscriptRecord } from '../../scheduling/agy/transcript';
+import { creationReceipt, nativeRestartNotice, nativeWake, receiptText, type TranscriptRecord } from '../../scheduling/agy/transcript';
 import { AgyCommandTasks, type AgyCommandCheckpoint } from './AgyCommandTasks';
 import { agyHistoryDigest, restoreAgyVerifiedHistory, verifyAgyTerminalHistory, type AgyVerifiedHistory } from './AgyRecoveredHistory';
+import { retiredWorkerHistory, workerAbortBoundary, workerBoundary, workerHistoryPrefix, workerNotice } from './AgyWorkerAbortHistory';
 import { AgyPermissions } from './AgyPermissions';
 import type { ApprovalAction } from '../../types';
 import { ActivityTracker } from '../Activity';
@@ -40,6 +41,10 @@ export interface AgyAcpRuntimeOptions {
   verifiedHistory?: AgyVerifiedHistory;
   validatedChatLoad?: boolean;
   beforeSessionLoad?(): void;
+  workerHistory?: AgyVerifiedHistory;
+  claimWorkerLoad?(): void;
+  verifyWorkerLoad?(): void;
+  workerClosed?(prefix?: AgyVerifiedHistory, interrupted?: boolean): void;
   consumeManualConfirmation?(): void;
   beforeManualLoad?(): void;
   saveSession(id: string): void | Promise<void>;
@@ -88,6 +93,10 @@ export class AgyAcpRuntime {
   private manualTurnPending: boolean;
   private humanQueryAdmission?: { open?: () => void };
   private ordinaryMain = false;
+  private workerInFlight = false;
+  private workerAbort?: { prefix: AgyVerifiedHistory; confirmed: boolean };
+  private workerFault = false;
+  private readonly retiredWorkerCommands = new Set<number>();
   private idleStop = false;
   private recoveredHistory?: AgyVerifiedHistory;
   private readonly acceptedMessages = new Map<number, TranscriptRecord>();
@@ -123,6 +132,7 @@ export class AgyAcpRuntime {
         }
       },
       onToolCall: (call: AcpToolCallUpdate & { name?: string }) => {
+        if (this.workerAbort) this.workerFault = true;
         this.chat?.observeDispatch(call);
         if (this.question?.args && call.name === 'ask_question' && call.status === 'pending'
           && isDeepStrictEqual(this.question.args, call.rawInput)) this.question.pendingCall = call.toolCallId;
@@ -133,9 +143,13 @@ export class AgyAcpRuntime {
         if (question && question.pendingCall === call.toolCallId) question.pendingCall = undefined;
       },
       onPermissionRequest: async (title, choices) => {
+        if (this.workerAbort) { this.workerFault = true; return -1; }
         const turn = this.active;
         const index = await this.permissions.request(title, choices, turn, this.options.autoApprove);
-        if (turn && this.active === turn && !choices[index]?.kind.startsWith('allow')) this.permissionDeclined = true;
+        if (turn && this.active === turn && !choices[index]?.kind.startsWith('allow')) {
+          this.permissionDeclined = true;
+          if (this.options.worker) this.workerFault = true;
+        }
         return index;
       },
     };
@@ -154,7 +168,7 @@ export class AgyAcpRuntime {
   }
   // Managed-tool reconnection and control changes retain their own admission rules.
   get reusable(): boolean {
-    return this.checkpointEligible && !this.commands?.liveDenial && !this.options.commandCheckpoint?.idleDenialHistory
+    return !this.workerAbort && this.checkpointEligible && !this.commands?.liveDenial && !this.options.commandCheckpoint?.idleDenialHistory
       && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
   }
   /** Reopening a recovered prefix requires its durable verification receipt. */
@@ -224,10 +238,21 @@ export class AgyAcpRuntime {
       this.activity?.(); this.latestRecords = rows;
       if (this.manualTurnPending) this.idleStop = event === 'Stop' && payload.fullyIdle === true && payload.continuationActive === false;
       let controls = rows;
-      const history = this.recoveredHistory;
+      const aborted = this.workerAbort;
+      if (aborted) {
+        // Cancellation can race with final hooks or immediate process destruction.
+        // Do not dispatch any new work, even while ACP is still acknowledging cancel.
+        if (payload.cwd !== this.options.cwd || payload.conversationId !== this.sessionId || payload.hookEventName !== event
+          || !workerHistoryPrefix(rows, aborted.prefix) || event === 'PreToolUse' || payload.error
+          || event === 'Stop' && (payload.continuationActive === true
+            || !['NO_TOOL_CALL', 'CANCELLED', 'USER_CANCELLED'].includes(String(payload.terminationReason)))) this.workerFault = true;
+        return event === 'PreToolUse' ? { decision: 'deny', reason: 'AGY worker was aborted.' }
+          : event === 'PreInvocation' ? { terminationBehavior: 'terminate' } : {};
+      }
+      const history = this.options.workerHistory ?? this.recoveredHistory;
       if (history) {
         const prefix = rows.slice(0, history.count);
-        if (agyHistoryDigest(prefix) !== history.digest
+        if (prefix.length !== history.count || agyHistoryDigest(prefix) !== history.digest
           || (event === 'PreInvocation' && Number(payload.initialNumSteps) <= history.lastStep)
           || (['PreToolUse', 'PostToolUse'].includes(event) && Number(payload.stepIdx) <= history.lastStep)) {
           this.hostScheduleUnsafe = true;
@@ -236,6 +261,19 @@ export class AgyAcpRuntime {
         // Prior command receipts can remain RUNNING after reboot. Only this host's
         // new rows can establish ownership of a command or authorize tool management.
         controls = rows.slice(history.count).filter(row => {
+          if (this.options.workerHistory && this.commands) {
+            if (this.acceptedMessages.has(row.step_index)) return false;
+            if (!row.tool_calls?.length && nativeRestartNotice(row, 'user force cancellation')) {
+              this.acceptedMessages.set(row.step_index, structuredClone(row));
+              return false;
+            }
+            const target = this.commands.retiredCommandExit(row, this.retiredWorkerCommands);
+            if (target !== undefined) {
+              this.retiredWorkerCommands.delete(target);
+              this.acceptedMessages.set(row.step_index, structuredClone(row));
+              return false;
+            }
+          }
           const wake = nativeWake(row);
           if (!wake) return true;
           if (this.manualTurnPending && this.active && wake.sender.startsWith(this.sessionId + '/task-')
@@ -246,13 +284,20 @@ export class AgyAcpRuntime {
           return !this.acceptedMessages.has(row.step_index);
         });
       }
+      if (this.options.workerHistory && controls.some(row => row.type === 'SYSTEM_MESSAGE' && !workerNotice(row) && !nativeWake(row))) {
+        this.chat?.fence('AGY worker received an unowned native message.');
+      }
       const ordinaryHost = !this.options.worker && (!this.options.sessionId || this.options.validatedChatLoad === true
         || !!this.options.beforeManualLoad && !this.manualTurnPending && !this.hostScheduleUnsafe);
       const observeChat = !this.closing && !this.relayFault && !this.blocked;
-      if (this.commands && observeChat) {
+      if (this.commands && observeChat && (!this.options.worker || this.active)) {
         try {
           if (payload.cwd !== this.options.cwd) throw new Error('AGY command working directory changed.');
           controls = this.commands.observe(event, payload, controls, !!this.active, ordinaryHost || this.hostScheduleSafe && this.hostScheduleSettled, this.ordinaryMain);
+          if (this.options.worker && this.commands.observedBackgroundCommand && event === 'Stop' && payload.terminationReason === 'NO_TOOL_CALL'
+            && (this.commands.pending || payload.fullyIdle !== true || payload.continuationActive !== false)) {
+            throw new Error('AGY worker stopped before its background command settled.');
+          }
           if (!this.active && event === 'Stop' && !this.commands.idleDecision && (payload.terminationReason !== 'NO_TOOL_CALL' || payload.error !== ''
             || payload.continuationActive !== false || !(payload.fullyIdle === true || payload.fullyIdle === false && this.commands.outstandingCount > 0))) {
             throw new Error('AGY command notification Stop is unconfirmed.');
@@ -290,7 +335,10 @@ export class AgyAcpRuntime {
           && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, this.commands, rows,
           (ordinaryHost || scheduledHost || recoveredForeground) && observeChat && !this.permissionDeclined)
           : this.host!.schedules.accept(event, payload, controls);
+      if (this.options.worker && (decision.decision === 'deny' || this.blocked || event === 'PostToolUse' && payload.error
+        || event === 'Stop' && (payload.error || payload.terminationReason !== 'NO_TOOL_CALL'))) this.workerFault = true;
       if (!this.continuityUnsafe && (this.chat?.liveManagement
+        || this.options.worker && this.commands?.observedBackgroundCommand
         || event === 'PreToolUse' && decision.decision === 'deny' && !idleDecision
         || controls.some(row => creationReceipt(row, payload.conversationId as string, row.step_index)))) {
         this.continuityUnsafe = true;
@@ -358,7 +406,10 @@ export class AgyAcpRuntime {
       }
       if (this.options.toolErrorDigest !== undefined) restoredErrors = restoreAgyToolErrors(rows, this.options.toolErrorDigest);
     }
-    if (this.options.sessionId) this.options.beforeSessionLoad?.();
+    if (this.options.sessionId) {
+      this.options.beforeSessionLoad?.();
+      if (this.options.claimWorkerLoad) this.restore.run(this.options.claimWorkerLoad);
+    }
     const args = ['acp', '--stdio', '--process-per-session', '--disable-telemetry'];
     if (this.options.autoApprove) args.push('--dangerously-skip-permissions');
     setStage('process');
@@ -399,6 +450,24 @@ export class AgyAcpRuntime {
         this.recoveredHistory = { count: rows.length, lastStep: rows.at(-1)?.step_index ?? -1, digest: agyHistoryDigest(rows) };
         this.restore.run(this.options.beforeManualLoad);
       }
+      if (this.options.workerHistory) {
+        const rows = await this.relay.readCheckpointTranscript(this.options.sessionId);
+        if (!this.options.worker || !workerHistoryPrefix(rows, this.options.workerHistory)) {
+          throw new Error('The aborted AGY worker history changed before load.');
+        }
+        // Late cancellation notifications can arrive with the next user input. A
+        // verified old creation permits consuming its notice exactly once. It
+        // never registers the command as outstanding on the new process.
+        const prefix = rows.slice(0, this.options.workerHistory.count);
+        this.commands = new AgyCommandTasks(this.options.sessionId, this.options.home);
+        for (const row of prefix) {
+          if (row.status === 'RUNNING' && receiptText(row)?.startsWith('Tool is running as a background task with task id: '
+            + this.options.sessionId + '/task-' + row.step_index + '\n')) this.retiredWorkerCommands.add(row.step_index);
+          const finished = this.commands.retiredCommandExit(row, this.retiredWorkerCommands);
+          if (finished !== undefined) this.retiredWorkerCommands.delete(finished);
+        }
+      }
+      if (this.options.verifyWorkerLoad) this.restore.run(this.options.verifyWorkerLoad);
       session = await this.client.loadSessionWithSetup(this.options.sessionId, this.options.cwd, this.options.mcpServers, setup);
       if (session.sessionId !== this.options.sessionId) throw new Error('AGY loaded a different session; no prompt was sent.');
     } else {
@@ -412,7 +481,7 @@ export class AgyAcpRuntime {
     if (this.relayFault) throw new Error('AGY hook relay failed before session admission.');
     if (this.options.worker || this.options.sessionId || this.options.hostScheduleChat) {
       this.chat = new AgyChatHost(this.client, session.sessionId, this.options.cwd, this.options.threadId, [], restoredErrors, this.nativeVersion);
-      if (this.options.hostScheduleChat && !this.options.worker) {
+      if (this.options.hostScheduleChat || this.options.worker) {
         this.commands ??= new AgyCommandTasks(session.sessionId, this.options.home, this.options.commandCheckpoint);
       }
       if (!checkpointBound) this.relay.bindSession(session.sessionId);
@@ -443,6 +512,7 @@ export class AgyAcpRuntime {
   async execute(prompt: string, options: ExecuteOptions, confirmHuman?: () => void,
     questionAuth?: RecoveryQuestionAuthority): Promise<ExecuteResult> {
     await this.start();
+    if (this.workerAbort) throw new Error('The aborted AGY worker requires confirmed retirement.');
     if (this.active || this.settingsBusy) throw new Error('AGY foreground turn is already active.');
     if (confirmHuman && (options.hostScheduleSessionId !== undefined || !this.needsHumanContinuation)) {
       throw new Error('The AGY foreground is no longer eligible for human continuation.');
@@ -489,12 +559,19 @@ export class AgyAcpRuntime {
       const admission = confirmHuman ? 'confirmed-human' : this.ordinaryMain ? 'main' : 'strict';
       const work = this.chat ? this.chat.prompt(blocks, dispatch, admission) : this.host!.prompt(blocks, dispatch);
       const result = await work;
+      if (this.options.worker && this.commands?.observedBackgroundCommand) {
+        // The current turn can consume its own command exit. Its history still
+        // contains the native RUNNING row and cannot authorize another worker.
+        this.chat!.fence('AGY worker observed a background command; this conversation is not reusable.');
+        if (result.success && result.stopReason !== 'end_turn') throw new Error('AGY worker command turn did not complete.');
+      }
       if (result.stopReason === 'cancelled' && !this.retained && !this.relayFault && !this.continuityUnsafe && !this.chat
         && this.host?.schedules.status.blocked?.startsWith('AGY foreground cancelled:')) {
         this.chat = new AgyChatHost(this.client!, this.sessionId!, this.options.cwd, this.options.threadId, this.latestRecords, [], this.nativeVersion);
         this.host = undefined;
       }
-      this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled');
+      this.options.settledPrompt?.(this.reusable && result.stopReason !== 'cancelled'
+        && (!this.options.worker || result.success && result.stopReason === 'end_turn'));
       const completed = result.success && result.stopReason === 'end_turn';
       if (this.manualTurnPending) {
         if (!completed) return { success: false, error: result.output || 'AGY recovery turn did not complete.', output: result.output };
@@ -549,7 +626,12 @@ export class AgyAcpRuntime {
   private async promptWithQuestions(blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
     for (;;) {
       const question: NonNullable<AgyAcpRuntime['question']> = this.question = {};
-      const terminal = await this.client!.prompt(this.sessionId!, blocks);
+      this.workerInFlight = !!this.options.worker;
+      let terminal;
+      try {
+        terminal = await this.client!.prompt(this.sessionId!, blocks);
+        if (this.workerAbort) this.workerAbort.confirmed = terminal.stopReason === 'cancelled';
+      } finally { this.workerInFlight = false; }
       if (terminal.stopReason !== 'end_turn' || !question.pendingCall || !question.args || this.blocked || this.closing
         || !(this.chat ?? this.host!.schedules).suspendForeground()) return terminal;
       if (this.questionAuth && !this.questionAuth.routeCurrent()) {
@@ -586,9 +668,23 @@ export class AgyAcpRuntime {
       blocks = [{ type: 'text', text: answer }];
     }
   }
-  async abort(): Promise<boolean> {
+  async abort(reason?: 'cancelled' | 'timed_out'): Promise<boolean> {
+    // Only an explicit executor abort can arm worker continuity. Local deadlines
+    // use cancelForeground directly. A prompt must already have reached native hooks.
+    const prefix = reason !== 'timed_out' && !this.workerAbort && this.options.worker && this.workerInFlight && this.chat?.hasForegroundToolCoverage(this.latestRecords)
+      && !this.closing && !this.blocked && !this.workerFault && !this.relayFault && !this.permissionDeclined
+      && !this.isWaitingInput() && this.commands
+      ? workerAbortBoundary(this.latestRecords, this.commands, this.options.workerHistory, this.acceptedMessages) : undefined;
+    if (prefix) this.workerAbort = { prefix, confirmed: false };
     this.permissions.cancel();
-    return this.cancelForeground();
+    try {
+      const sent = this.cancelForeground();
+      if (!sent && prefix) this.workerAbort = undefined;
+      return sent;
+    } catch (error) {
+      if (prefix) this.workerAbort = undefined;
+      throw error;
+    }
   }
   private cancelForeground(): boolean {
     this.humanQueryAdmission = undefined;
@@ -661,6 +757,7 @@ export class AgyAcpRuntime {
   close(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.active || this.settingsBusy || this.scheduleOperations) this.hostScheduleUnsafe = true;
+    if (!this.closing && this.workerAbort && this.workerInFlight) this.workerAbort.confirmed = true;
     this.closing = true; this.permissions.cancel(); this.answerQuestion?.(undefined);
     return this.closePromise ??= (async () => {
       await this.starting?.catch(() => {});
@@ -689,9 +786,25 @@ export class AgyAcpRuntime {
         }
       } catch { /* Missing history withholds checkpoint admission after an otherwise confirmed exit. */ }
     }
+    let workerPrefix: AgyVerifiedHistory | undefined;
+    if (this.workerAbort?.confirmed && !this.workerFault && !this.permissionDeclined && !this.relayFault && this.relay && this.commands) {
+      try {
+        const rows = await this.relay.readCheckpointTranscript();
+        workerPrefix = retiredWorkerHistory(rows, this.workerAbort.prefix, this.commands);
+      } catch { /* Absent or ambiguous history cannot establish worker continuity. */ }
+    }
+    if (!this.workerAbort && this.options.workerHistory && this.reusable && await this.relay?.confirmsTerminal(this.latestRecords)) {
+      workerPrefix = workerBoundary(this.latestRecords);
+    }
     await this.relay?.close();
-    await this.restore?.(); this.restore = undefined;
-    if (!this.reusable) this.options.settledPrompt?.(false);
+    try {
+      if (this.options.worker && this.chat && this.restore) {
+        if (!this.reusable || this.workerFault) this.options.settledPrompt?.(false);
+        this.restore.run(() => this.options.workerClosed?.(this.relayFault || this.workerFault ? undefined : workerPrefix,
+          !!this.workerAbort && !!workerPrefix));
+      }
+    } finally { await this.restore?.(); this.restore = undefined; }
+    if (!this.options.worker && !this.reusable) this.options.settledPrompt?.(false);
     if (this.host || this.chat) {
       const safe = !this.hostScheduleUnsafe && !this.relayFault && this.checkpointEligible;
       const errors = safe && cleanHistory ? this.chat?.checkpointToolErrors() : undefined;

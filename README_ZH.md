@@ -637,11 +637,19 @@ Informational commands remain bounded native CLI helpers, never slash text sent 
 inference. Images are forwarded as ACP content; model support remains native-dependent.
 
 New workers persist their native creation receipt before their first prompt. Reuse
-requires matching worker provenance, observed terminal evidence and exact prior group
-exit. A requested tool denial permanently fences the worker's reuse and controlled
-reconnect, even if native later reports DONE and a successful Stop. Observed
+after normal completion requires matching worker provenance, observed terminal evidence
+and confirmed exit of the previous process group. A requested tool denial permanently
+fences worker reuse and controlled reconnect, even if native later reports DONE and a successful Stop. Observed
 background-task creation receipts also fence reuse regardless of DONE status or
-hook coverage. Previous continuity receipts require explicit clear. Hook failures
+hook coverage. During its current assignment, a worker can continue after its own
+foreground shell command yields to the background and AGY reports a matching exit.
+After an explicit abort, the next assignment on the same lane can load the
+original AGY conversation once the CLI confirms the previous process group
+has exited and verifies the interrupted history.
+It receives the new objective with the earlier conversation as context. The
+cancelled assignment stays cancelled and its commands are not replayed.
+Previous continuity receipts without evidence of a clean turn or verified
+interruption require explicit clear. Hook failures
 can fail open: completely missing hook and transcript evidence remains a native
 limit, not proof that arbitrary saved queues are empty. Nonforeground permission
 requests are denied; only the current foreground turn uses approval cards/text.

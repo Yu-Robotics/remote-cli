@@ -62,6 +62,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
   questionStep?: number;
   controls: Array<[string, string]> = []; model = 'synthetic-default'; thought = 'low'; mode = 'default';
   release?: (value: { stopReason: string }) => void;
+  rejectPrompt?: (error: Error) => void;
   exited: Promise<void>; onExit!: () => void;
   constructor(public command: string, public args: string[], public cwd: string, public callbacks: AcpEventCallbacks, _managed: boolean, public launch: any) {
     native.clients.push(this); this.exited = new Promise(resolve => { this.onExit = resolve; });
@@ -137,7 +138,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({ AcpClient: class {
       this.hook('PostToolUse'); this.hook('PostInvocation');
     }
     this.hook('SessionStart'); this.hook('PreInvocation', { initialNumSteps: this.cursor });
-    if (/(?:^|\n)hold$/.test(text)) return new Promise<{ stopReason: string }>(resolve => { this.release = resolve; });
+    if (/(?:^|\n)hold$/.test(text)) return new Promise<{ stopReason: string }>((resolve, reject) => { this.release = resolve; this.rejectPrompt = reject; });
     if (text === 'missing terminal') return { stopReason: 'end_turn' };
     if (text === 'ask' || text === 'ask again') {
       const args = { questions: [{ question: 'Choose a fixture option.', options: ['First', 'Second'] }] };
@@ -310,6 +311,197 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     const result = `Task id "${task.id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\nFirst line\r\nSecond line\r\n\nLog: ${task.log}`;
     client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + `[Message] timestamp=2026-01-01T00:00:00Z sender=${task.id} priority=MESSAGE_PRIORITY_HIGH content=${result}\n</SYSTEM_MESSAGE>`, 'SYSTEM');
   }
+  it.each(['matched', 'missing completion', 'wrong log', 'foreign task', 'changed receipt', 'active Stop', 'ACP limit'] as const)(
+    'handles a background shell completion within the original worker prompt: %s', async scenario => {
+      executor = new AgyExecutor(new DirectoryGuard([cwd]), { threadId: 'synthetic-worker', initialWorkingDirectory: cwd, delegationWorker: true });
+      const turn = executor.execute('hold');
+      await vi.waitFor(() => expect(last()?.release).toBeDefined());
+      const client = last();
+      client.row('PLANNER_RESPONSE', '');
+      client.rows.at(-1).tool_calls = [{ name: 'run_command', args: {} }];
+      const task = yieldCommand(client);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      const intervening = ordinaryTool(client, 'read_file');
+      expect(client.hook('PreToolUse', intervening).decision).toBe('allow');
+      client.row('GENERIC', 'Synthetic file contents', 'MODEL', 'DONE', intervening.stepIdx);
+      client.hook('PostToolUse', intervening);
+      client.hook('PostInvocation');
+      client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      if (scenario === 'changed receipt') client.rows.find((row: TranscriptRecord) => row.step_index === task.step)!.content += 'changed';
+      if (scenario !== 'missing completion') completion(client, { ...task,
+        ...(scenario === 'wrong log' && { log: task.log + '.other' }),
+        ...(scenario === 'foreign task' && { id: 'another-session/task-' + task.step }) });
+      if (scenario === 'matched') {
+        const next = ordinaryTool(client, 'read_file');
+        expect(client.hook('PreToolUse', next).decision).toBe('allow');
+        client.row('GENERIC', 'Verified output', 'MODEL', 'DONE', next.stepIdx);
+        client.hook('PostToolUse', next);
+      }
+      client.row('PLANNER_RESPONSE', 'Finished the review');
+      client.hook('PostInvocation');
+      client.hook('Stop', { terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: scenario === 'active Stop' });
+      client.release({ stopReason: scenario === 'ACP limit' ? 'max_turn_requests' : 'end_turn' });
+      if (scenario === 'matched') await expect(turn).resolves.toMatchObject({ success: true, output: 'Finished the review' });
+      else await expect(turn).rejects.toThrow();
+      expect(client.prompts).toEqual(['hold']);
+      await expect(executor.execute('another task')).rejects.toThrow();
+      await executor.destroy();
+      const proof = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-worker.json.worker-policy');
+      expect(JSON.parse(await fs.readFile(proof, 'utf8'))).toMatchObject({ settled: false, closed: true });
+    });
+  const workerLane = 'delegate-lane-00000000-0000-4000-8000-000000000001';
+  const makeWorker = (workspace = cwd) => new AgyExecutor(new DirectoryGuard([workspace]), {
+    delegationWorker: true, initialWorkingDirectory: workspace, threadId: workerLane,
+    disposableWorkerCheckout: path.basename(path.dirname(workspace)) === workerLane.slice('delegate-lane-'.length) ? path.dirname(workspace) : undefined,
+  });
+  async function startInterruptibleWorker(command: boolean, options: ExecuteOptions = {}) {
+    executor = makeWorker();
+    const store = path.join(home, '.remote-cli', 'agy-homes', workerLane, '.gemini', 'antigravity-cli');
+    const db = path.join(store, 'conversations', native.sessionId + '.db');
+    await fs.mkdir(path.dirname(db), { recursive: true });
+    await fs.writeFile(db, 'synthetic worker database');
+    const turn = executor.execute('original objective\nhold', options);
+    // A real transport can reject its outstanding request as destroy joins the group.
+    const outcome = turn.catch(() => ({ success: false }));
+    await vi.waitFor(() => expect(last()?.release).toBeDefined());
+    const client = last();
+    client.row('USER_INPUT', 'original objective', 'USER_EXPLICIT');
+    client.row('SYSTEM_MESSAGE', syntheticHistory()[5].content!, 'SYSTEM');
+    client.hook('PostToolUse');
+    if (command) {
+      client.row('PLANNER_RESPONSE', '');
+      client.rows.at(-1).tool_calls = [{ name: 'run_command', args: {} }];
+      yieldCommand(client);
+    }
+    const transcript = transcriptPath(client.launch.env.HOME, client.session);
+    await fs.mkdir(path.dirname(transcript), { recursive: true });
+    const flush = (rows: TranscriptRecord[] = client.rows) => fs.writeFile(transcript, rows.map(row => JSON.stringify(row)).join('\n'));
+    await flush();
+    return { client, outcome, db, flush };
+  }
+
+  it.each(['native cancellation', 'immediate destroy', 'in-flight foreground command', 'old command', 'command cancellation notice', 'command completion notice', 'late cancellation notice', 'recreated managed checkout'])(
+    'resumes the same explicitly aborted worker after %s', async scenario => {
+      if (scenario === 'recreated managed checkout') {
+        cwd = path.join(home, '.remote-cli', 'delegation-workspaces', 'trees', 'a'.repeat(64), workerLane.slice('delegate-lane-'.length), 'subdir');
+        await fs.mkdir(cwd, { recursive: true });
+      }
+      const { client, outcome, flush } = await startInterruptibleWorker(!['native cancellation', 'immediate destroy', 'in-flight foreground command'].includes(scenario));
+      if (scenario === 'in-flight foreground command') {
+        expect(client.hook('PreToolUse', ordinaryTool(client, 'run_command')).decision).toBe('allow');
+        await flush();
+      }
+      if (scenario !== 'native cancellation') {
+        client.sendCancel = vi.fn(); // ACP has not replied yet
+        const destroy = client.destroy.bind(client);
+        client.destroy = () => { client.rejectPrompt(new Error('Synthetic ACP process closed')); destroy(); };
+      }
+      expect(await executor.abort()).toBe(true);
+      if (scenario === 'native cancellation') expect((await outcome).success).toBe(false);
+      if (scenario.endsWith('notice') && scenario !== 'late cancellation notice') {
+        const taskId = client.session + '/task-3';
+        const log = pathToFileURL(path.join(client.launch.env.HOME, '.gemini', 'antigravity-cli', 'brain', client.session,
+          '.system_generated', 'tasks', 'task-3.log')).href;
+        if (scenario === 'command completion notice') completion(client, { id: taskId, log });
+        else client.row('SYSTEM_MESSAGE', NOTIFICATION_PREFIX + '[Message] timestamp=2026-01-01T00:00:00Z sender=' + taskId
+          + ' priority=MESSAGE_PRIORITY_LOW content=Task id "' + taskId + '" was canceled with result:\nTool execution was canceled\nLog: '
+          + log + '\n</SYSTEM_MESSAGE>', 'SYSTEM');
+        await flush();
+      }
+      await executor.destroy();
+      expect((await outcome).success).toBe(false);
+      expect(client.prompts).toEqual(['original objective\nhold']);
+      native.loadedRows = [...structuredClone(client.rows), { ...syntheticHistory().at(-1)!, step_index: client.rows.length }];
+      if (scenario === 'late cancellation notice') {
+        const log = pathToFileURL(path.join(client.launch.env.HOME, '.gemini', 'antigravity-cli', 'brain', client.session,
+          '.system_generated', 'tasks', 'task-3.log')).href;
+        const task = client.session + '/task-3';
+        const restart = native.loadedRows.at(-1)!;
+        native.loadedRows.push({ ...restart, step_index: native.loadedRows.length,
+          content: restart.content!.replace('server restart', 'user force cancellation') });
+        native.loadedRows.push({ ...restart, step_index: native.loadedRows.length, content: NOTIFICATION_PREFIX
+          + '[Message] timestamp=2026-01-01T00:00:00Z sender=' + task + ' priority=MESSAGE_PRIORITY_LOW content=Task id "'
+          + task + '" was canceled with result:\nTool execution was canceled\nLog: ' + log + '\n</SYSTEM_MESSAGE>' });
+      }
+      if (scenario === 'recreated managed checkout') {
+        await fs.rename(path.dirname(cwd), path.dirname(cwd) + '-retired');
+        await fs.mkdir(cwd, { recursive: true });
+      }
+      const stale = makeWorker();
+      executor = makeWorker();
+      expect((await executor.execute('next objective')).success).toBe(true);
+      expect(last().session).toBe(client.session);
+      expect(last().token).toBeUndefined(); // loadSessionWithSetup, never newSessionWithSetup
+      expect(last().prompts).toEqual(['next objective']);
+      await expect(executor.withNativeScheduleOperation('operation', () => true, async () => {}, false)).rejects.toThrow();
+      if (scenario === 'old command') {
+        const pending = executor.execute('hold').catch(() => undefined);
+        await vi.waitFor(() => expect(last().release).toBeDefined());
+        expect(manageCommand(last(), { Action: 'status', TaskId: client.session + '/task-3' }).decision.decision).toBe('deny');
+        last().release({ stopReason: 'cancelled' });
+        await pending;
+      }
+      native.loadedRows = structuredClone(last().rows);
+      await flush(native.loadedRows);
+      await executor.destroy();
+      await expect(stale.execute('stale claim')).rejects.toThrow();
+      expect(native.clients).toHaveLength(2);
+      executor = makeWorker();
+      if (scenario === 'old command') await expect(executor.execute('after denial')).rejects.toThrow();
+      else {
+        expect((await executor.execute('third objective')).success).toBe(true);
+        expect(last().prompts).toEqual(['third objective']);
+        expect(last().token).toBeUndefined();
+      }
+    });
+
+  it.each(['no abort', 'unconfirmed exit', 'denied tool', 'foreign wake', 'changed history', 'changed workspace',
+    'changed pointer', 'missing pointer', 'replaced shared directory', 'replaced database before close', 'relay failure', 'late work', 'late permission', 'late dispatch', 'late tool error', 'missing tool hook', 'timeout', 'manager timeout', 'failed Stop', 'unknown Stop', 'ACP limit'])(
+    'withholds aborted-worker continuation for %s', async scenario => {
+      const { client, outcome, db, flush } = await startInterruptibleWorker(true, scenario === 'timeout' ? { inactivityTimeout: 1000 } : {});
+      if (scenario === 'missing tool hook') {
+        const missed = ordinaryTool(client, 'read_file');
+        client.row('GENERIC', 'synthetic output', 'MODEL', 'DONE', missed.stepIdx);
+        client.hook('PostInvocation');
+        await flush();
+      }
+      if (scenario === 'denied tool') manageCommand(client, { Action: 'list' });
+      if (scenario === 'foreign wake') { completion(client, { id: 'foreign/task-3', log: 'another-log' }); client.hook('PostToolUse'); }
+      if (scenario === 'relay failure') native.fault();
+      if (scenario === 'ACP limit') client.sendCancel = vi.fn(() => client.release({ stopReason: 'max_turn_requests' }));
+      if (scenario === 'timeout') await vi.waitFor(() => expect(client.cancelled).toBe(true), { timeout: 5000 });
+      if (scenario !== 'no abort' && scenario !== 'timeout') await executor.abort(scenario === 'manager timeout' ? 'timed_out' : 'cancelled');
+      if (scenario === 'late tool error') client.hook('PostToolUse', { error: 'Unrelated tool failure' });
+      if (scenario === 'late permission') expect(await client.callbacks.onPermissionRequest('fixture', [{ optionId: 'yes', kind: 'allow_once' }])).toBe(-1);
+      if (scenario === 'late dispatch') client.callbacks.onToolCall({ toolCallId: 'unexpected', name: 'run_command', status: 'pending' });
+      if (scenario === 'unknown Stop') client.hook('Stop', { terminationReason: 'UNRECOGNIZED', error: '' });
+      if (scenario === 'failed Stop') client.hook('Stop', { terminationReason: 'ERROR', error: 'fixture' });
+      if (scenario === 'late work') { client.row('GENERIC', 'unexpected', 'MODEL', 'RUNNING'); await flush(); }
+      if (scenario === 'replaced database before close') {
+        await fs.rename(db, db + '.old'); await fs.copyFile(db + '.old', db);
+      }
+      if (scenario === 'unconfirmed exit') {
+        native.exitConfirmed = false;
+        await expect(executor.destroy()).rejects.toThrow('group unconfirmed');
+      } else await executor.destroy();
+      await outcome;
+      if (scenario === 'changed history') await fs.appendFile(db, 'changed');
+      if (scenario === 'missing pointer') await fs.unlink(path.join(home, '.remote-cli', 'agy-sessions', workerLane + '.json'));
+      if (scenario === 'replaced shared directory') await fs.rename(cwd, cwd + '-retired');
+      if (scenario === 'changed pointer') {
+        const file = path.join(home, '.remote-cli', 'agy-sessions', workerLane + '.json');
+        await fs.rename(file, file + '.old'); await fs.copyFile(file + '.old', file);
+      }
+      const workspace = scenario === 'changed workspace' ? path.join(home, 'other-workspace') : cwd;
+      await fs.mkdir(workspace, { recursive: true });
+      const successor = makeWorker(workspace);
+      await expect(successor.execute('guarded objective')).rejects.toThrow();
+      expect(native.clients).toHaveLength(1);
+      expect(client.prompts).toEqual(['original objective\nhold']);
+      await successor.destroy();
+    });
+
   function manageCommand(client: ReturnType<typeof last>, args: Record<string, string>, plannerArgs = args) {
     client.row('PLANNER_RESPONSE', '');
     client.rows.at(-1).tool_calls = [{ name: 'manage_task', args: plannerArgs }];

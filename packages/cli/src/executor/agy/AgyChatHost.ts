@@ -314,6 +314,12 @@ export class AgyChatHost {
       || (event === 'PreToolUse' || event === 'PostToolUse') && this.managementDenials.has(payload.stepIdx as number)) this.fence(denialFailure);
     this.pendingDenialStep = undefined;
   }
+  /** At an explicit worker abort there may be no Stop to perform the usual hook coverage check. */
+  hasForegroundToolCoverage(rows: TranscriptRecord[]): boolean {
+    const start = this.turnStart;
+    return this.active && start !== undefined && rows.every(row =>
+      row.type !== 'GENERIC' || row.step_index < start || this.observedTools.has(row.step_index));
+  }
   suspendForeground(): boolean { return this.monitor.suspendForeground(); }
   async prompt(blocks: AcpContentBlock[], promptNative = (input: AcpContentBlock[]) => this.client.prompt(this.sessionId, input),
     admission: 'strict' | 'main' | 'confirmed-human' = 'strict'): Promise<{ success: boolean; output: string; stopReason: string }> {

@@ -41,6 +41,19 @@ export class AgyCommandTasks {
 
   get pending(): boolean { return !!this.denial || !!this.kill || !!this.status || this.outstanding.size > 0 || this.idleInvocation || this.notificationWakes.size > 0; }
   get outstandingCount(): number { return this.outstanding.size; }
+  get observedBackgroundCommand(): boolean { return this.owned.size > 0; }
+  /** Evidence from this live worker only. Never reconstruct management authority on load. */
+  witnessedReceipt(row: TranscriptRecord): boolean { return this.receipts.get(row.step_index) === identity(row); }
+  witnessedForegroundCommand(step: number, args: unknown): boolean {
+    const call = this.calls.get(step);
+    return !!call && !call.scheduled && !call.postSeen && isDeepStrictEqual(call.args, args);
+  }
+  retiredCommandExit(row: TranscriptRecord, candidates = this.outstanding): number | undefined {
+    const wake = nativeWake(row);
+    if (wake) return this.commandCompletion(row, wake, candidates)?.step;
+    const target = Number(/ sender=[^\s]+\/task-(\d+) priority=MESSAGE_PRIORITY_LOW /.exec(row.content ?? '')?.[1]);
+    if (candidates.has(target) && row.step_index > target && this.cancellationNotice(row, target, this.session + '/task-' + target)) return target;
+  }
   get pendingStatusStep(): number | undefined { return this.status?.step; }
 
   get ordinaryCommandsPending(): boolean {
@@ -131,6 +144,16 @@ export class AgyCommandTasks {
   private log(step: number): string {
     return pathToFileURL(path.join(this.home, '.gemini', 'antigravity-cli', 'brain', this.session,
       '.system_generated', 'tasks', `task-${step}.log`)).href;
+  }
+
+  private commandCompletion(row: TranscriptRecord, wake: NonNullable<ReturnType<typeof nativeWake>>, candidates = this.outstanding) {
+    const taskStep = Number(/\/task-(\d+)$/.exec(wake.sender)?.[1]);
+    const id = `${this.session}/task-${taskStep}`;
+    const heading = `Task id "${id}" finished with result:\nCommand exited with code `;
+    if (!candidates.has(taskStep) || row.step_index <= taskStep || wake.sender !== id || row.tool_calls?.length || !wake.prompt.startsWith(heading)
+      || !/^\d+\.\n\n(?:Command output:\n[\s\S]*|No output from the command\.)\nLog: [^\r\n]+$/.test(wake.prompt.slice(heading.length))
+      || !wake.prompt.endsWith('\nLog: ' + this.log(taskStep))) return;
+    return { step: taskStep, exitCode: Number.parseInt(wake.prompt.slice(heading.length), 10) };
   }
 
   private cancellationNotice(row: TranscriptRecord, target: number, id: string): boolean {
@@ -237,14 +260,11 @@ export class AgyCommandTasks {
         this.receipts.set(step, identity(row));
       } else if (nativeWake(row)) {
         const wake = nativeWake(row)!;
-        const taskStep = Number(/\/task-(\d+)$/.exec(wake.sender)?.[1]);
-        const id = `${this.session}/task-${taskStep}`;
-        const heading = `Task id "${id}" finished with result:\nCommand exited with code `;
-        if (!this.outstanding.has(taskStep) || step <= taskStep || wake.sender !== id || row.tool_calls?.length || !wake.prompt.startsWith(heading)
-          || !/^\d+\.\n\n(?:Command output:\n[\s\S]*|No output from the command\.)\nLog: [^\r\n]+$/.test(wake.prompt.slice(heading.length))
-          || !wake.prompt.endsWith('\nLog: ' + this.log(taskStep))) throw new Error('Unverified AGY command completion.');
+        const completion = this.commandCompletion(row, wake);
+        if (!completion) throw new Error('Unverified AGY command completion.');
+        const { step: taskStep, exitCode } = completion;
         this.outstanding.delete(taskStep);
-        this.owned.get(taskStep)!.exitCode = Number.parseInt(wake.prompt.slice(heading.length), 10);
+        this.owned.get(taskStep)!.exitCode = exitCode;
         if (!foreground) this.notificationWakes.set(taskStep, step);
         if (this.calls.get(taskStep)?.postSeen) this.calls.delete(taskStep);
         this.posted.delete(taskStep);

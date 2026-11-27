@@ -115,9 +115,11 @@ export function verifyAgyTerminalHistory(rows: TranscriptRecord[], start = 0, li
   }
 }
 
-export function isAgyVerifiedHistory(value: unknown): value is AgyVerifiedHistory {
+export function isAgyVerifiedHistory(value: unknown, allowGaps = false): value is AgyVerifiedHistory {
   return record(value) && exactKeys(value, ['count', 'lastStep', 'digest']) && Number.isSafeInteger(value.count)
-    && (value.count as number) >= 0 && (value.count as number) <= MAX_RECORDS && value.lastStep === (value.count as number) - 1
+    && (value.count as number) >= 0 && (value.count as number) <= MAX_RECORDS
+    && (allowGaps && (value.count as number) > 0 ? Number.isSafeInteger(value.lastStep) && (value.lastStep as number) >= (value.count as number) - 1
+      : value.lastStep === (value.count as number) - 1)
     && typeof value.digest === 'string' && /^[a-f0-9]{64}$/.test(value.digest);
 }
 

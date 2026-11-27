@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.292] - 2026-11-27
+
+### Fixed
+- An AGY worker can finish its current assignment when a foreground shell command moves to the background and its matching exit notification arrives during the same turn. The worker still requires native Stop and ACP completion, and a background receipt still prevents ordinary reuse after completion.
+- Allow a subsequent assignment on the same AGY worker lane to load the original conversation after a confirmed interruption and process-group exit. Keep the cancelled assignment terminal and dispatch only the new objective.
+
 ## [1.6.291] - 2026-11-27
 
 ### Fixed

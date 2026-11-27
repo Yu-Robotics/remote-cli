@@ -370,6 +370,37 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expect((manager as any).running).toBe(0);
   }, 120_000);
 
+  it('reuses the AGY lane after parent abort and preserves the cancelled checkout separately', async () => {
+    const first = manager.begin(parent);
+    const startAgy = (scope: typeof first, objective: string) => scope.invoke(
+      'remote_cli_delegate', { backend: 'agy', mode: 'inherit', objective }, 'start',
+    ) as Promise<DelegatedTaskResult>;
+    const previous = await startAgy(first, 'Original interrupted objective');
+    await waitForWorker(first);
+    const [lane] = await manager.laneStore.lanesForThread(parent.thread.id, 'agy');
+    await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'interrupted edit');
+    await manager.cancelThread(parent.thread.id);
+    await first.close();
+    expect(workers[0].executor.abort).toHaveBeenCalledWith('cancelled');
+    expect(workers[0].executor.waitForManagedProcessGroupExit).toHaveBeenCalled();
+
+    const next = manager.begin({ ...parent, messageId: 'follow-up' });
+    const retained = await next.invoke('remote_cli_integrate', { taskId: previous.taskId, action: 'inspect' }, 'inspect');
+    expect(retained).toMatchObject({ disposition: 'retained' });
+    const followup = await startAgy(next, 'New follow-up objective');
+    expect(workers).toHaveLength(2);
+    const [active] = await manager.laneStore.lanesForThread(parent.thread.id, 'agy');
+    expect(active).toMatchObject({ id: lane.id, executorThreadId: lane.executorThreadId });
+    expect(workers[1].cwd).toBe(workers[0].cwd);
+    await expect(fs.stat(path.join(workers[1].cwd, 'partial.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const [prompt] = vi.mocked(workers[1].executor.execute).mock.calls[0];
+    expect(prompt).toContain('New follow-up objective');
+    expect(prompt).not.toContain('Original interrupted objective');
+    workers[1].finish({ success: true });
+    expect(await result(next, followup.taskId)).toMatchObject({ state: 'succeeded' });
+    await next.close();
+  });
+
   it('preserves an untouched warm lane after cancellation during slow baseline capture', async () => {
     const scope = manager.begin(parent);
     const first = await start(scope);

@@ -1192,6 +1192,7 @@ describe('managed agent delegation', () => {
     const scope = manager.begin(parent);
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'timed_out' });
+    expect(worker.abort).toHaveBeenCalledWith('timed_out');
     expect(worker.destroy).toHaveBeenCalled();
     expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Timed out'));
   });

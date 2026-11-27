@@ -137,7 +137,7 @@ export interface IExecutor {
   /** Managed workers only: persist a fresh native identity before dispatching its first turn. */
   observeNativeSessionCreation?(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void;
   resetContext(): void;
-  abort(): Promise<boolean>;
+  abort(reason?: 'cancelled' | 'timed_out'): Promise<boolean>;
   hasActiveNativeScheduledOccurrence?(): boolean;
   /** Capture and interrupt the native scheduled batch synchronously, before foreground cleanup.
    * Undefined means no native occurrence. True requires confirmed interruption; false means no stop.

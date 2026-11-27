@@ -581,7 +581,8 @@ export class DelegationManager {
       }
       try {
         captureWorkerMetadata(task);
-        try { await deadline(() => task.executor!.abort(), Math.min(2000, this.cleanupMs)); } catch { /* Force cleanup still runs. */ }
+        const reason = task.record.state === 'timed_out' ? 'timed_out' : 'cancelled';
+        try { await deadline(() => task.executor!.abort(reason), Math.min(2000, this.cleanupMs)); } catch { /* Force cleanup still runs. */ }
         await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
       } finally { task.interrupt(); }
     })();
@@ -718,7 +719,9 @@ export class DelegationManager {
           assertStartable();
           worker = this.factory(workerGuard, configuration, executionCwd, task.lane.executorThreadId,
             resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
-            { lifecycleHooks: false, delegationWorker: true, ...(parent.thread.speeds?.[backend] !== undefined ? { speed: parent.thread.speeds[backend] } : {}) });
+            { lifecycleHooks: false, delegationWorker: true,
+              ...(backend === 'agy' && task.workspace?.disposalPolicy === 1 && { disposableWorkerCheckout: task.workspace.directory }),
+              ...(parent.thread.speeds?.[backend] !== undefined ? { speed: parent.thread.speeds[backend] } : {}) });
           task.executor = worker;
           const observedLane = task.lane;
           worker.observeNativeSessionCreation?.(target => this.laneStore.captureNativeSession(

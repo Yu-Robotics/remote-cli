@@ -86,8 +86,9 @@ export function matchesWake(prompt: string, actual: string, recurring: boolean):
 /** Native load emits this informational notice even for a proven empty session.
  * It is not a task wake or queue-absence proof. Keep its source and full payload
  * exact; an arbitrary SYSTEM sender or MODEL echo does not qualify. */
-export function nativeRestartNotice(record: TranscriptRecord): boolean {
+export function nativeRestartNotice(record: TranscriptRecord, reason: 'server restart' | 'user force cancellation' = 'server restart'): boolean {
   if (record.source !== 'SYSTEM' || record.type !== 'SYSTEM_MESSAGE' || record.status !== 'DONE'
     || !record.content?.startsWith(NOTIFICATION_PREFIX)) return false;
-  return /^\[Message\] timestamp=\S+ sender=system priority=MESSAGE_PRIORITY_LOW content=\[Notice\] All your subagents and background tasks have been stopped due to server restart\. If you want a subagent to continue working, it needs to be revived by sending it a new message\. If resuming work, please check on status and restart as needed\.\n<\/SYSTEM_MESSAGE>$/.test(record.content.slice(NOTIFICATION_PREFIX.length));
+  const match = /^\[Message\] timestamp=\S+ sender=system priority=MESSAGE_PRIORITY_LOW content=\[Notice\] All your subagents and background tasks have been stopped due to (server restart|user force cancellation)\. If you want a subagent to continue working, it needs to be revived by sending it a new message\. If resuming work, please check on status and restart as needed\.\n<\/SYSTEM_MESSAGE>$/.exec(record.content.slice(NOTIFICATION_PREFIX.length));
+  return match?.[1] === reason;
 }
