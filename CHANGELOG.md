@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.291] - 2026-11-27
+
+### Fixed
+- Preserve the original AGY conversation and its bound host timer when a settings request arrives immediately after a clean restart.
+- Preserve authenticated foreground continuation when managed tool registration changes on a recovered AGY host with unverified history.
+
 ## [1.6.290] - 2026-11-27
 
 ### Fixed

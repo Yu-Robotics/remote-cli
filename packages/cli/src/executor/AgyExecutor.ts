@@ -801,8 +801,10 @@ export class AgyExecutor implements IExecutor {
     }
     if (this.isBusy()) throw new Error('AGY work or native notifications are busy.');
     this.assertNoRetainedSchedules();
-    if (this.acp && !this.acp.reusable) {
-      if (this.acp.exitedBetweenTurns || this.acp.needsHumanContinuation) {
+    if (this.acp && (!this.acp.reusable || this.acp.requiresVerifiedReconnect && !this.acp.hostScheduleAvailable)) {
+      // Keep the live chat and its scheduling fence; apply the change at the next
+      // authenticated recovery or explicit reset rather than an unconfirmed reload.
+      if (this.acp.exitedBetweenTurns || this.acp.needsHumanContinuation || this.acp.reusable) {
         this.pendingDelegationConnection = { connection };
         return;
       }
@@ -811,9 +813,12 @@ export class AgyExecutor implements IExecutor {
     this.transitioning = true;
     try {
       if (this.acp) {
+        const requiresCheckpoint = this.acp.requiresVerifiedReconnect;
         await this.acp.close();
         this.acp = undefined;
-        this.resumeCurrent = true;
+        // runtime() must validate the saved prefix again. If close could not
+        // seal it, only a new authenticated foreground message may resume it.
+        this.resumeCurrent = !requiresCheckpoint;
         this.awaitingManualRecovery = true;
       }
       this.delegationConnection = connection;
@@ -876,7 +881,14 @@ export class AgyExecutor implements IExecutor {
   }
   private async settings(change: { model?: string; effort?: string; mode?: string; resetModel?: boolean; resetEffort?: boolean }): Promise<void> {
     this.assertNoRetainedSchedules();
-    if (this.isBusy() || this.isDestroyed) throw new Error('AGY is busy or destroyed.'); this.transitioning = true;
+    if (this.isBusy() || this.isDestroyed) throw new Error('AGY is busy or destroyed.');
+    if (!this.acp && this.conversationId && !this.delegationWorker && !this.legacy
+      && Object.hasOwn(this.hostSelection(this.conversationId), 'hostScheduleCheckpoint')) {
+      // Loading consumes the checkpoint before a native control can run.
+      this.cleanHostSelection(this.conversationId);
+      throw new Error('Send a normal message in this AGY thread to resume the saved conversation before changing settings, then retry.');
+    }
+    this.transitioning = true;
     let runtime: AgyAcpRuntime | undefined;
     try { runtime = await this.runtime(); await runtime.changeSettings(change); }
     catch (error) {

@@ -18,6 +18,8 @@ vi.mock('child_process', () => ({ spawn: vi.fn(() => { throw new Error('No legac
 vi.mock('../../src/executor/agy/AgyAcpRuntime', () => ({ AgyAcpRuntime: class {
   running = false; busy = false; hasJobs = false; blocked?: string; sessionId?: string; closed = false; canRetireForContextReset = true;
   get reusable() { return !this.blocked && !this.hasJobs; }
+  // Fixture sessions are fresh allocations without a recovered history prefix.
+  requiresVerifiedReconnect = false;
   changes: any[] = []; prompts: string[] = []; optionsSeen: any[] = [];
   constructor(public options: any) { fixture.runtimes.push(this); }
   async start() {

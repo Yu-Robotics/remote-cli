@@ -855,13 +855,15 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
           expect(JSON.parse(await fs.readFile(pointer, 'utf8')).hostScheduleCheckpoint).toEqual(saved);
           return;
         }
-        await expect(executor.setModel('synthetic-model')).rejects.toThrow('idle chat');
+        await expect(executor.setModel('synthetic-model')).rejects.toThrow('Send a normal message');
+        expect(JSON.parse(await fs.readFile(pointer, 'utf8')).hostScheduleCheckpoint).toEqual(saved);
         const prompt = 'ordinary restart ' + restart;
         await expect(executor.execute(prompt)).resolves.toMatchObject({ success: true });
         expect(executor.getSessionId()).toBe(id);
         expect(native.clients).toHaveLength(restart + 1);
         expect(last().prompts).toEqual([prompt]);
         expect(() => executor.checkHostScheduleSession(id)).toThrow();
+        await expect(executor.setModel('synthetic-model')).rejects.toThrow('idle chat');
         await expect(executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-new', groups: [] }))
           .rejects.toThrow('reconnect was refused');
       }
@@ -1308,6 +1310,39 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(last().prompts).toEqual(['first timed task']);
     expect(last().session).toBe(id);
   });
+  it.each([['chat', 1], ['chat', 2], ['bound timer', 1], ['bound timer', 2]] as const)(
+    'preserves a retired main checkpoint for the first %s after %i restart(s)', async (first, restarts) => {
+      const { id } = await captureTimedSession();
+      await executor.destroy();
+      const file = path.join(home, '.remote-cli', 'agy-sessions', 'synthetic-thread.json');
+      const saved = await fs.readFile(file, 'utf8');
+      expect(JSON.parse(saved).hostScheduleCheckpoint).toBeDefined();
+      executor = make();
+      for (const change of [
+        () => executor.setEffort('low'), () => executor.setEffort('auto'),
+        () => executor.setModel('another-model'), () => executor.clearModel(), () => executor.setMode('plan'),
+      ]) {
+        await expect(change()).rejects.toThrow('Send a normal message');
+      }
+      expect(native.clients).toHaveLength(1);
+      expect(await fs.readFile(file, 'utf8')).toBe(saved);
+      executor.checkHostScheduleSession(id);
+      if (restarts === 2) {
+        await executor.destroy();
+        expect(await fs.readFile(file, 'utf8')).toBe(saved);
+        executor = make();
+      }
+      if (first === 'chat') {
+        await expect(executor.execute('resume chat')).resolves.toMatchObject({ success: true });
+      }
+      executor.checkHostScheduleSession(id);
+      await expect(executor.execute('original timer', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+      expect(last().session).toBe(id);
+      expect(last().prompts).toEqual(first === 'chat' ? ['resume chat', 'original timer'] : ['original timer']);
+      await expect(executor.setEffort('low')).resolves.toMatchObject({ success: true });
+      expect(last().controls.at(-1)).toEqual(['thought_level', 'low']);
+      expect(native.clients).toHaveLength(2);
+    });
   it.each(['intact', 'intact parallel', 'changed parallel sibling', 'changed digest', 'missing digest', 'changed generation', 'changed configuration', 'changed stored history',
     'changed saved planner', 'missing saved receipt', 'changed loaded receipt', 'extra loaded error', 'unconfirmed terminal', 'unconfirmed exit'])(
     'binds ordinary tool error history to its clean retirement: %s', async scenario => {
@@ -1893,6 +1928,27 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
   const saveTranscript = (client: ReturnType<typeof last>, id: string) =>
     fs.writeFile(transcriptPath(client.launch.env.HOME, id), client.rows.map((row: TranscriptRecord) => JSON.stringify(row)).join('\n'));
 
+  it.each([true, false])('requires the recovered checkpoint when reconnecting a verified host (sealed=%s)', async sealed => {
+    const { id, pointer, client } = await recoverVerifiedHistory();
+    await saveTranscript(client, id);
+    native.loadedRows = structuredClone(client.rows);
+    native.confirmTranscript.mockResolvedValueOnce(sealed);
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-new', groups: ['scheduling'] });
+    expect(executor.hasDeferredManagedTools()).toBe(false);
+    expect(executor.needsAgyHumanRecovery('fresh-id')).toBe(!sealed);
+    const saved = JSON.parse(await fs.readFile(pointer, 'utf8'));
+    if (sealed) {
+      expect(saved.hostScheduleCheckpoint.policy).toBe('host-timed-chat-v4');
+      await expect(executor.execute('bound occurrence', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+      expect(last().session).toBe(id);
+    } else {
+      expect(saved.hostScheduleCheckpoint).toBeUndefined();
+      await expect(executor.execute('unsourced follow-up')).rejects.toThrow();
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      expect(native.clients).toHaveLength(1);
+    }
+  });
+
   it('restores bound host timing after recovering settled historical calls, then reloads the clean checkpoint twice', async () => {
     const { id, pointer, client } = await recoverVerifiedHistory();
     executor.checkHostScheduleSession(id);
@@ -2001,8 +2057,12 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(native.clients).toHaveLength(0);
   });
 
-  it('continues foreground chat with historical RUNNING receipts and a bundled old command wake, without admitting its timer', async () => {
-    const { id, threadHome } = await savedManualChat();
+  /** Authenticated recovery over unverified history: ordinary chat stays live, timers stay fenced. */
+  async function recoverWithRunningReceipt(withTools = false) {
+    const { id, threadHome, pointer } = await savedManualChat();
+    if (withTools) {
+      await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-existing', groups: ['scheduling'] });
+    }
     const task = id + '/task-2';
     native.loadedRows!.push({ step_index: 2, type: 'GENERIC', source: 'MODEL', status: 'RUNNING',
       content: 'Tool is running as a background task with task id: ' + task + '\nTask Description: Fixture\nTask logs are available at: file:///fixture' },
@@ -2014,6 +2074,74 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     last().finish(); last().release({ stopReason: 'end_turn' });
     await expect(work).resolves.toMatchObject({ success: true });
     expect(() => executor.checkHostScheduleSession(id)).toThrow();
+    return { id, pointer, client: last() };
+  }
+
+  it.each(['scheduling', 'delegation and scheduling', 'removed'] as const)(
+    'defers a %s tool-bridge change on a timer-fenced recovered host without a controlled reload', async change => {
+      const { id, pointer, client } = await recoverWithRunningReceipt(change === 'removed');
+      const selected = await fs.readFile(pointer, 'utf8');
+      const connection = change === 'removed' ? undefined : { url: 'http://127.0.0.1:1', token: 'synthetic-reconnect',
+        groups: change === 'scheduling' ? ['scheduling' as const] : ['delegation' as const, 'scheduling' as const] };
+      await executor.configureManagedTools(connection);
+      expect(executor.hasDeferredManagedTools()).toBe(true);
+      expect(client.closed).toBe(false);
+      expect(executor['resumeCurrent']).toBe(false);
+      expect(await fs.readFile(pointer, 'utf8')).toBe(selected);
+      // Repeating the staged request remains deferred and never retires the host.
+      await executor.configureManagedTools(connection);
+      expect(executor.hasDeferredManagedTools()).toBe(true);
+      await expect(executor.execute('follow-up')).resolves.toMatchObject({ success: true });
+      await expect(executor.execute('second follow-up')).resolves.toMatchObject({ success: true });
+      expect(native.clients).toHaveLength(1);
+      expect(client.prompts).toEqual(['hold', 'follow-up', 'second follow-up']);
+      expect(() => executor.checkHostScheduleSession(id)).toThrow();
+      await expect(executor.execute('timer', { hostScheduleSessionId: id })).rejects.toThrow();
+      expect(client.prompts).not.toContain('timer');
+    });
+
+  it('applies a deferred recovered-host bridge only after a fresh authenticated recovery', async () => {
+    const { id, client } = await recoverWithRunningReceipt();
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-reconnect', groups: ['scheduling'] });
+    await fs.writeFile(transcriptPath(client.launch.env.HOME, id), client.rows.map((row: TranscriptRecord) => JSON.stringify(row)).join('\n'));
+    native.loadedRows = structuredClone(client.rows);
+    client.onExit();
+    await Promise.resolve();
+    await expect(executor.execute('automatic follow-up')).rejects.toThrow();
+    await expect(executor.execute('timer', { hostScheduleSessionId: id })).rejects.toThrow();
+    expect(native.clients).toHaveLength(1);
+    await expect(resume('fresh human')).resolves.toMatchObject({ success: true });
+    expect(native.clients).toHaveLength(2);
+    expect(last().session).toBe(id);
+    expect(last().prompts).toEqual(['fresh human']);
+    expect(last().launch.env.REMOTE_CLI_TOOL_GROUPS).toBe('["scheduling"]');
+    expect(executor.hasDeferredManagedTools()).toBe(false);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+  });
+
+  it('keeps live settings available on a timer-fenced recovered host without enabling timers', async () => {
+    const { id, client } = await recoverWithRunningReceipt();
+    await executor.setEffort('low');
+    expect(client.controls.at(-1)).toEqual(['thought_level', 'low']);
+    await expect(executor.execute('after settings')).resolves.toMatchObject({ success: true });
+    expect(native.clients).toHaveLength(1);
+    expect(() => executor.checkHostScheduleSession(id)).toThrow();
+  });
+
+  it('still reconnects a reusable freshly allocated host in place', async () => {
+    await executor.execute('first chat');
+    const first = last();
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-fresh', groups: ['scheduling'] });
+    expect(executor.hasDeferredManagedTools()).toBe(false);
+    expect(first.closed).toBe(true);
+    await expect(executor.execute('after reconnect')).resolves.toMatchObject({ success: true });
+    expect(native.clients).toHaveLength(2);
+    expect(last().session).toBe(first.session);
+    expect(last().launch.env.REMOTE_CLI_TOOL_GROUPS).toBe('["scheduling"]');
+  });
+
+  it('continues foreground chat with historical RUNNING receipts and a bundled old command wake, without admitting its timer', async () => {
+    await recoverWithRunningReceipt();
     await expect(executor.execute('follow-up')).resolves.toMatchObject({ success: true });
     expect(last().prompts).toEqual(['hold', 'follow-up']);
   });

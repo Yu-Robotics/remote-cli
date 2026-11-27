@@ -724,6 +724,14 @@ This includes a completed read-only schedule query that returned an error. Unkno
 background work or unresolved ownership keeps the timer waiting. Missed slots stay
 skipped. If AGY asks a question during recovery, reply in the original Feishu thread.
 
+From CLI 1.6.291, if you change the model, effort or mode before the first
+turn after a clean restart, the CLI keeps the saved conversation ready for
+your next message or its next bound timer. Send a normal message in the
+original thread before retrying the setting.
+If the recovered session still has unverified history, changes to its managed
+tools wait while chat continues on the current connection. A verified session
+can reconnect with its new tools once the CLI confirms the saved history.
+
 Explicit `/clear` may archive a selection when ownership guards permit,
 without executing or erasing its native history. Unconfirmed allocation and schedule
 ownership remain blockers; use a new thread when guided to do so. Thread data erasure

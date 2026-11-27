@@ -157,6 +157,8 @@ export class AgyAcpRuntime {
     return this.checkpointEligible && !this.commands?.liveDenial && !this.options.commandCheckpoint?.idleDenialHistory
       && !this.options.toolErrorDigest && !this.chat?.hasForegroundToolErrors;
   }
+  /** Reopening a recovered prefix requires its durable verification receipt. */
+  get requiresVerifiedReconnect(): boolean { return !!this.recoveredHistory; }
   get needsHumanContinuation(): boolean {
     return !!this.chat?.humanContinuation && !this.chat.reusable && !this.commands?.pending && !this.blocked
       && !this.retained && !this.closing && !this.closed && !this.relayFault && !this.permissionDeclined;
