@@ -385,6 +385,83 @@ describe('Claude sandbox launch policy', () => {
     expect(restricted.isProcessRunning()).toBe(false);
   });
 
+  function requestApproval(active: ClaudePersistentExecutor, id: string) {
+    const socket = Object.assign(new EventEmitter(), { writable: true, destroyed: false, end: vi.fn() });
+    (active as any).handleApprovalSocketRequest({ id, tool_name: 'Write', input: { file_path: path.join(home, 'output') } },
+      socket, (active as any).approvalGeneration);
+    return socket;
+  }
+
+  it('denies unattended approval fallbacks immediately and reports only once per turn', async () => {
+    for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
+    const active = create({ mode: 'read-only' });
+    const ready = active.execute('Establish the original chat');
+    await vi.advanceTimersByTimeAsync(1000);
+    child.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init","session_id":"synthetic-chat"}\n{"type":"result","subtype":"success"}\n'));
+    await ready;
+    const onStream = vi.fn(), onUnattendedInputRequired = vi.fn(), onApprovalResolved = vi.fn();
+    const onApprovalRequest = vi.fn().mockReturnValueOnce(false).mockImplementationOnce(() => { throw new Error('Synthetic failure'); });
+    const result = active.execute('Scheduled task', { hostScheduleSessionId: 'synthetic-chat', onStream, onUnattendedInputRequired, onApprovalRequest, onApprovalResolved });
+    await vi.advanceTimersByTimeAsync(1000);
+    for (const id of ['first', 'second']) {
+      const socket = requestApproval(active, id);
+      expect(JSON.parse(socket.end.mock.calls[0][0])).toMatchObject({ id, behavior: 'deny' });
+      expect(onApprovalResolved).toHaveBeenCalledWith(id, 'denied');
+      expect(active.isWaitingInput()).toBe(false);
+    }
+    expect(onUnattendedInputRequired).toHaveBeenCalledOnce();
+    expect(onStream).not.toHaveBeenCalled();
+    child.stdout.emit('data', Buffer.from('{"type":"result","subtype":"success"}\n'));
+    await result;
+
+    const followup = active.execute('Interactive task', { onStream });
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = requestApproval(active, 'interactive');
+    expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Reply yes or no'));
+    expect(active.sendInput('yes')).toBe(true);
+    expect(JSON.parse(socket.end.mock.calls[0][0]).behavior).toBe('allow');
+    child.stdout.emit('data', Buffer.from('{"type":"result","subtype":"success"}\n'));
+    await followup;
+  });
+
+  it.each(['approve', 'deny'] as const)('keeps a routed standalone scheduled approval available for %s', async action => {
+    for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
+    const active = create({ mode: 'read-only' });
+    const onUnattendedInputRequired = vi.fn(), onStream = vi.fn();
+    const result = active.execute('Scheduled task', { onApprovalRequest: () => true, onUnattendedInputRequired, onStream });
+    await vi.advanceTimersByTimeAsync(1000);
+    const socket = requestApproval(active, 'routed');
+    expect(socket.end).not.toHaveBeenCalled();
+    expect(active.sendInput('yes')).toBe(false);
+    expect(active.respondToApproval('routed', action)).toBe(true);
+    expect(JSON.parse(socket.end.mock.calls[0][0]).behavior).toBe(action === 'approve' ? 'allow' : 'deny');
+    expect(onUnattendedInputRequired).not.toHaveBeenCalled();
+    expect(onStream).not.toHaveBeenCalled();
+    child.stdout.emit('data', Buffer.from('{"type":"result","subtype":"success"}\n'));
+    await result;
+  });
+
+  it('cancels explicit unattended input without a waiter or user notification', async () => {
+    const active = create();
+    const onUnattendedInputRequired = vi.fn(), onStream = vi.fn();
+    const hook = vi.spyOn(claudeCodeHooks, 'requestUserInput');
+    const result = active.execute('Scheduled task', { onUnattendedInputRequired, onStream });
+    await vi.advanceTimersByTimeAsync(1000);
+    const output = (content: string) => child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'assistant', content }) + '\n'));
+    output('Would you like to know more?');
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(onUnattendedInputRequired).not.toHaveBeenCalled();
+    output('\nPress Enter to continue');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(onStream).not.toHaveBeenCalledWith(expect.stringContaining('Press Enter'));
+    expect(onUnattendedInputRequired).toHaveBeenCalledOnce();
+    expect(hook).not.toHaveBeenCalled();
+    expect(active.isWaitingInput()).toBe(false);
+    expect(active.sendInput('continue')).toBe(false);
+    child.stdout.emit('data', Buffer.from('{"type":"result","subtype":"success"}\n'));
+    await result;
+  });
+
   it.each(['timeout', 'exit', 'error'] as const)('invalidates pending approvals on command %s', async ending => {
     for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
     const resolved = vi.fn();

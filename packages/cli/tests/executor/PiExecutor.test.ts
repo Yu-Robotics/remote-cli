@@ -1632,4 +1632,62 @@ describe('PiExecutor', () => {
       cancelled: true,
     });
   });
+
+  it('marks an extension dialog pending before streaming its prompt', async () => {
+    await executor.listModels();
+    let resolvePrompt!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => command.type === 'prompt'
+      ? new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; })
+      : Promise.resolve({ type: 'response', command: String(command.type), success: true }));
+    const waiting: boolean[] = [];
+    const pending = executor.execute('needs input', { onStream: () => { waiting.push(executor.isWaitingInput()); } });
+    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
+    transport.emit({ type: 'extension_ui_request', id: 'ui-order', method: 'confirm', title: 'Proceed?' });
+    expect(waiting).toEqual([true]);
+    await executor.abort();
+    resolvePrompt({ type: 'response', command: 'prompt', success: true });
+    await pending;
+  });
+
+  it('cancels every reply-requiring extension dialog on an unattended run and keeps notifications', async () => {
+    await executor.listModels();
+    let resolvePrompt!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => command.type === 'prompt'
+      ? new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; })
+      : Promise.resolve({ type: 'response', command: String(command.type), success: true }));
+    const stream = vi.fn();
+    const onUnattendedInputRequired = vi.fn();
+    const pending = executor.execute('scheduled', { onStream: stream, onUnattendedInputRequired } as Parameters<typeof executor.execute>[1]);
+    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
+    transport.emit({ type: 'extension_ui_request', id: 'ui-note', method: 'notify', message: 'still visible' });
+    const dialogs = [['ui-confirm-u', 'confirm'], ['ui-select-u', 'select'], ['ui-input-u', 'input'], ['ui-editor-u', 'editor']] as const;
+    for (const [id, method] of dialogs) {
+      transport.emit({ type: 'extension_ui_request', id, method, title: 'Hidden question', options: [{ label: 'A', value: 'a' }] });
+      expect(transport.send).toHaveBeenCalledWith({ type: 'extension_ui_response', id, cancelled: true });
+      expect(executor.isWaitingInput()).toBe(false);
+    }
+    expect(onUnattendedInputRequired).toHaveBeenCalledTimes(1);
+    expect(executor.sendInput('yes')).toBe(false);
+    expect(stream.mock.calls.flat().join('')).toContain('still visible');
+    expect(stream.mock.calls.flat().join('')).not.toContain('Hidden question');
+    expect((executor as any).pendingUiExpiry).toBeNull();
+    expect((executor as any).activeTurn.inactivityTimer).toBeDefined();
+    resolvePrompt({ type: 'response', command: 'prompt', success: true });
+    transport.emit({ type: 'agent_end', messages: [] });
+    await pending;
+
+    // An ordinary turn afterwards still waits for its human reply.
+    let resolveNext!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => command.type === 'prompt'
+      ? new Promise<PiRpcResponse>((resolve) => { resolveNext = resolve; })
+      : Promise.resolve({ type: 'response', command: String(command.type), success: true }));
+    const next = executor.execute('ordinary');
+    await vi.waitFor(() => expect(resolveNext).toBeTypeOf('function'));
+    transport.emit({ type: 'extension_ui_request', id: 'ui-later', method: 'confirm', title: 'Later?' });
+    expect(executor.isWaitingInput()).toBe(true);
+    expect(executor.sendInput('yes')).toBe(true);
+    await executor.abort();
+    resolveNext({ type: 'response', command: 'prompt', success: true });
+    await next;
+  });
 });

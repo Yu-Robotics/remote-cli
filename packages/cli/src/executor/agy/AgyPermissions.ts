@@ -7,7 +7,7 @@ import type { ApprovalAction } from '../../types';
 export class AgyPermissions {
   private pending?: { id: string; choices: AcpPermissionOption[]; finish(index: number): void };
   get waiting(): boolean { return !!this.pending; }
-  request(title: string, choices: AcpPermissionOption[], active: ExecuteOptions | undefined, automatic: boolean): Promise<number> {
+  request(title: string, choices: AcpPermissionOption[], active: ExecuteOptions | undefined, automatic: boolean, unattended?: () => void): Promise<number> {
     if (!active) return Promise.resolve(-1);
     const question = choices.some(choice => /^q\d+_/.test(choice.optionId));
     if (automatic && !question) return Promise.resolve(choices.findIndex(choice => choice.kind === 'allow_once'));
@@ -24,6 +24,11 @@ export class AgyPermissions {
       this.pending = { id, choices, finish };
       // Questions preserve native choice identity and use the existing text-input channel.
       const card = !question && active.onApprovalRequest?.({ requestId: id, kind: 'permissions', description: title, canRemember: false });
+      if (!card && unattended) {
+        finish(-1);
+        unattended();
+        return;
+      }
       if (!card) active.onStream?.(question
         ? `\n${title}\n${choices.map((choice, index) => `${index + 1}. ${choice.name ?? choice.optionId}`).join('\n')}\nReply with an option number, no, or cancel.\n`
         : `\nApproval required for ${title}. Reply yes, no, or cancel.\n`);

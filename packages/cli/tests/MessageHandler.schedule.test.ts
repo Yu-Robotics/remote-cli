@@ -226,6 +226,65 @@ describe('MessageHandler schedule management and delivery', () => {
     expect(frames).toContainEqual(expect.objectContaining({ type: 'approval_resolved', messageId: 'approval-one', status: 'expired' }));
   });
 
+  it.each(backends)('finishes an unattended %s occurrence once when input has no delivery route', async backend => {
+    f.setBackend(backend);
+    const { dispatch } = await dispatchFixture();
+    let finish!: () => void;
+    f.executor.execute.mockImplementationOnce(async (_prompt, options) => {
+      options.onUnattendedInputRequired!();
+      options.onUnattendedInputRequired!();
+      return new Promise(resolve => { finish = () => resolve({ success: true }); });
+    });
+    f.executor.abort.mockImplementationOnce(async () => { finish(); return true; });
+    await expect(dispatch()).resolves.toMatchObject({ success: false, error: expect.stringContaining('interactive input') });
+    expect(f.executor.abort).toHaveBeenCalledOnce();
+    await expect(dispatch(undefined, undefined, 'next-run')).resolves.toMatchObject({ success: true });
+    expect(f.executor.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['send failed', 'Router unavailable', 'disconnected'])('retires a scheduled approval when %s', async failure => {
+    const { dispatch } = await dispatchFixture();
+    (f.handler as any).approvalCardsSupported = true;
+    const deny = vi.fn(() => true);
+    Object.assign(f.executor, { respondToApproval: deny });
+    let finish!: () => void;
+    f.executor.abort.mockImplementationOnce(async () => { finish(); return true; });
+    const approval = { requestId: 'scheduled-approval', kind: 'permissions' as const, description: 'Synthetic approval', canRemember: false };
+    f.executor.execute.mockImplementationOnce(async (_prompt, options) => {
+      if (failure === 'send failed') f.ws.send.mockReturnValueOnce(false);
+      const handled = options.onApprovalRequest!(approval);
+      expect(handled).toBe(failure !== 'send failed');
+      if (!handled) options.onUnattendedInputRequired!();
+      return new Promise(resolve => { finish = () => resolve({ success: false }); });
+    });
+    const running = dispatch();
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledOnce());
+    if (failure === 'Router unavailable') {
+      await f.handler.handleMessage({ type: 'approval_unavailable', messageId: approval.requestId } as any);
+    } else if (failure === 'disconnected') f.disconnect();
+    await expect(running).resolves.toMatchObject({ success: false, error: expect.stringContaining('interactive input') });
+    if (failure !== 'send failed') expect(deny).toHaveBeenCalledWith(approval.requestId, 'deny');
+    expect(f.executor.abort).toHaveBeenCalledOnce();
+    expect(f.ws.send.mock.calls.filter(([message]) => message.type === 'stream')).toHaveLength(0);
+  });
+
+  it('rejects a stale binding at the final scheduled dispatch check', async () => {
+    f.setBackend('codex');
+    const { dispatch } = await dispatchFixture();
+    const submit = vi.fn();
+    f.executor.execute.mockImplementationOnce(async (_prompt, options) => {
+      options.resolvePrompt!('bound');
+      f.disconnect();
+      options.beforeHostScheduleDispatch!();
+      submit();
+      return { success: true };
+    });
+    const result = await dispatch();
+    expect(result).toMatchObject({ success: false });
+    expect(result).not.toHaveProperty('outcomeUnknown');
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('joins host admission during shutdown without starting its pending prompt', async () => {
     const { dispatch } = await dispatchFixture();
     let release!: (allowed: boolean) => void;

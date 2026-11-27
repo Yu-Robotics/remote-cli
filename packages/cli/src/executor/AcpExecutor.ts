@@ -72,6 +72,8 @@ interface ActiveCallbacks {
   onToolResult?: ExecuteOptions['onToolResult'];
   onPlanMode?: ExecuteOptions['onPlanMode'];
   onImage?: ExecuteOptions['onImage'];
+  /** Present only on host-scheduled runs: required input is cancelled, never awaited. */
+  onUnattendedInputRequired?: () => void;
 }
 
 interface PendingPermission {
@@ -79,6 +81,17 @@ interface PendingPermission {
   options: AcpPermissionOption[];
   isQuestion: boolean;
   resolve: (index: number) => void;
+}
+
+function unattendedOnce(options: ExecuteOptions): (() => void) | undefined {
+  const report = options.onUnattendedInputRequired;
+  if (!report) return undefined;
+  let reported = false;
+  return () => {
+    if (reported) return;
+    reported = true;
+    report();
+  };
 }
 
 function mapAcpToolCall(tool: AcpToolCallUpdate): { name: string; input: Record<string, unknown> } {
@@ -672,6 +685,7 @@ export abstract class AcpExecutor implements IExecutor {
       onToolResult: options.onToolResult,
       onPlanMode: options.onPlanMode,
       onImage: options.onImage,
+      onUnattendedInputRequired: unattendedOnce(options),
     };
     const pinned = options.hostScheduleSessionId;
     const revision = this.catalogLifecycleRevision;
@@ -895,13 +909,21 @@ export abstract class AcpExecutor implements IExecutor {
           return allowed;
         }
         this.cancelPendingPermission();
+        const unattended = this.activeCallbacks.onUnattendedInputRequired;
+        if (unattended) {
+          // No reply can reach this turn. Cancel natively instead of choosing an option.
+          unattended();
+          return -1;
+        }
         const prompt = isQuestion
           ? [`\n${title}`, ...options.filter((option) => option.kind.startsWith('allow')).map((option, index) => `${index + 1}. ${option.name ?? option.optionId}`), 'Reply with an option number, option name, skip, or cancel.\n'].join('\n')
           : `\nApproval required for ${title}. Reply yes, always, no, or cancel.\n`;
-        this.activeCallbacks.onStream?.(prompt);
-        return new Promise<number>((resolve) => {
+        // Mark the turn as waiting before its prompt is observed by stream consumers.
+        const pending = new Promise<number>((resolve) => {
           this.pendingPermission = { title, options, isQuestion, resolve };
         });
+        this.activeCallbacks.onStream?.(prompt);
+        return pending;
       },
     };
     client = this.clientFactory(callbacks, this.currentWorkingDirectory);

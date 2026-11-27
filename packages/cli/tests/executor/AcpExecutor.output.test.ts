@@ -301,4 +301,51 @@ describe.each([
     expect(result.output).not.toContain('PRIVATE_PROMPT');
     expect(stream.mock.calls.flat().join('')).not.toContain('PRIVATE_PROMPT');
   });
+
+  it('marks interactive input pending before streaming its prompt', async () => {
+    let selected: Promise<number> | undefined;
+    transport.prompt.mockImplementationOnce(async () => {
+      selected = callbacks.onPermissionRequest!('Write file', [{ optionId: 'yes', kind: 'allow_once' }, { optionId: 'no', kind: 'reject_once' }]);
+      return { stopReason: 'end_turn' };
+    });
+    const waiting: boolean[] = [];
+    const running = executor.execute('review', { onStream: () => { waiting.push(executor.isWaitingInput()); } });
+    await vi.waitFor(() => expect(waiting).toEqual([true]));
+    expect(executor.sendInput('no')).toBe(true);
+    expect(await selected).toBe(1);
+    await running;
+  });
+
+  it.each([false, true])('cancels required input on an unattended run without waiting (question=%s)', async question => {
+    const outcomes: number[] = [];
+    transport.prompt.mockImplementationOnce(async () => {
+      const options = question
+        ? [{ optionId: 'q0_a', kind: 'allow_once' as const, name: 'First' }, { optionId: 'q0_skip', kind: 'reject_once' as const, name: 'Skip' }]
+        : [{ optionId: 'yes', kind: 'allow_once' as const }, { optionId: 'always', kind: 'allow_always' as const }, { optionId: 'no', kind: 'reject_once' as const }];
+      // A second required interaction in the same turn is also cancelled, but reported once.
+      outcomes.push(await callbacks.onPermissionRequest!('Choose an action', options));
+      outcomes.push(await callbacks.onPermissionRequest!('Another action', options));
+      return { stopReason: 'end_turn' };
+    });
+    const stream = vi.fn();
+    const onUnattendedInputRequired = vi.fn(() => expect(executor.isWaitingInput()).toBe(false));
+    const result = await executor.execute('scheduled', { onStream: stream, onUnattendedInputRequired } as Parameters<typeof executor.execute>[1]);
+    expect(outcomes).toEqual([-1, -1]);
+    expect(onUnattendedInputRequired).toHaveBeenCalledTimes(1);
+    expect(executor.isWaitingInput()).toBe(false);
+    expect(executor.sendInput('yes')).toBe(false);
+    expect(stream.mock.calls.flat().join('')).not.toContain('Choose an action');
+    expect(result.output ?? '').not.toContain('Reply');
+    // The next ordinary interactive turn is unaffected.
+    let selected: Promise<number> | undefined;
+    transport.prompt.mockImplementationOnce(async () => {
+      selected = callbacks.onPermissionRequest!('Later action', [{ optionId: 'yes', kind: 'allow_once' }]);
+      return { stopReason: 'end_turn' };
+    });
+    const next = executor.execute('ordinary');
+    await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
+    expect(executor.sendInput('yes')).toBe(true);
+    expect(await selected).toBe(0);
+    await next;
+  });
 });

@@ -53,6 +53,9 @@ export interface CodexAppServerExecutorOptions {
 
 interface ActiveTurn {
   options: ExecuteOptions;
+  unattendedInputReported?: boolean;
+  scheduledAbort?: Promise<boolean>;
+  settleScheduledAbort?: (interrupted: boolean) => void;
   resolve: (result: ExecuteResult) => void;
   turnId: string | null;
   output: string[];
@@ -100,6 +103,7 @@ interface PendingUserInput {
 
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
+const SCHEDULE_INTERRUPT_TIMEOUT_MS = 10_000;
 const ACCOUNT_USAGE_TIMEOUT_MS = 10_000;
 const GOAL_CONTROL_TIMEOUT_MS = 10_000;
 const GOAL_RECOVERY_GUIDANCE = 'Use /goal resume to continue the saved native goal, or /goal pause or /goal clear before sending another task.';
@@ -210,6 +214,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private readonly nativeDeletionCommand: string;
   private codexThreadId: string | null = null;
   private threadReady = false;
+  private preparingSchedule?: { cancelled: boolean };
   private activeTurn: ActiveTurn | null = null;
   private compactWaiter: CompactWaiter | null = null;
   private transportStop: Promise<void> | null = null;
@@ -310,28 +315,20 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     const pinned = options.hostScheduleSessionId;
-    try {
-      await this.ensureThread(pinned);
-      if (pinned !== undefined) this.checkHostScheduleSession(pinned);
-      if (this.isBusy()) return { success: false, error: 'Codex thread is already running a command' };
-    } catch (error) {
-      return { success: false, error: this.errorMessage(error) };
-    }
-
+    const preparation = pinned === undefined ? undefined : { cancelled: false };
+    this.preparingSchedule = preparation;
     const temporaryFiles: string[] = [];
     try {
+      await this.ensureThread(pinned);
+      if (pinned !== undefined) this.checkPreparingSchedule(pinned);
+      if (this.hasOtherWork(preparation)) throw new Error('Codex thread is already running a command');
       // Resolve paths before marking a turn active so a rejected policy cannot
       // leave the executor busy without an actual app-server turn.
       const input = await this.buildInput(options.resolvePrompt?.(this.codexThreadId) ?? prompt, options.attachments, temporaryFiles);
+      if (preparation?.cancelled) throw new Error('Scheduled Codex turn cancelled before dispatch.');
       const speedOptions = await this.speedOptions();
-      if (this.isBusy()) {
-        await this.cleanupTemporaryFiles(temporaryFiles);
-        return { success: false, error: 'Codex thread is already running a command' };
-      }
-      if (pinned !== undefined) {
-        this.checkHostScheduleSession(pinned);
-        if (!this.threadReady || !this.client.isRunning()) throw new Error('The scheduled Codex thread is no longer loaded.');
-      }
+      if (preparation?.cancelled) throw new Error('Scheduled Codex turn cancelled before dispatch.');
+      if (this.hasOtherWork(preparation)) throw new Error('Codex thread is already running a command');
       const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       return await new Promise<ExecuteResult>((resolve) => {
         const active: ActiveTurn = {
@@ -346,16 +343,6 @@ export class CodexAppServerExecutor implements IExecutor {
           images: new CodexImages(),
           inactivityTimeoutMs: options.inactivityTimeout,
         };
-        this.activityTracker.setCallback(options.onActivity);
-        this.activityTracker.reset();
-        if (options.timeout && options.timeout > 0) {
-          active.timeoutTimer = setTimeout(() => {
-            void this.failAndRestart(`Command timed out after ${options.timeout}ms`);
-          }, options.timeout);
-        }
-        this.activeTurn = active;
-        this.armInactivityTimer();
-
         const params: any = {
           threadId: pinned ?? this.codexThreadId,
           input,
@@ -369,6 +356,23 @@ export class CodexAppServerExecutor implements IExecutor {
           } : {}),
           ...sandboxOptions,
         };
+
+        if (pinned !== undefined) {
+          // Keep authorization, ownership transfer and the requireRunning transport write in the same tick.
+          options.beforeHostScheduleDispatch?.();
+          this.checkPreparingSchedule(pinned);
+          if (!this.threadReady || !this.client.isRunning()) throw new Error('The scheduled Codex thread is no longer loaded.');
+          this.preparingSchedule = undefined;
+        }
+        this.activityTracker.setCallback(options.onActivity);
+        this.activityTracker.reset();
+        if (options.timeout && options.timeout > 0) {
+          active.timeoutTimer = setTimeout(() => {
+            void this.failAndRestart(`Command timed out after ${options.timeout}ms`);
+          }, options.timeout);
+        }
+        this.activeTurn = active;
+        this.armInactivityTimer();
 
         void this.client.request('turn/start', params, undefined, pinned !== undefined).then((response) => {
           if (this.activeTurn !== active) return;
@@ -387,7 +391,9 @@ export class CodexAppServerExecutor implements IExecutor {
       });
     } catch (error) {
       await this.cleanupTemporaryFiles(temporaryFiles);
-      return { success: false, error: this.errorMessage(error) };
+      return { success: false, error: preparation?.cancelled ? 'Scheduled Codex turn cancelled before dispatch.' : this.errorMessage(error) };
+    } finally {
+      if (this.preparingSchedule === preparation) this.preparingSchedule = undefined;
     }
   }
 
@@ -613,7 +619,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
   private async stopGoalControl(run: GoalRun | null, clear: boolean): Promise<ExecuteResult> {
     if (this.destroyed) return { success: false, error: 'Executor has been destroyed' };
-    if (!run && (this.activeTurn || this.compactWaiter || this.threadLoads)) {
+    if (!run && (this.preparingSchedule || this.activeTurn || this.compactWaiter || this.threadLoads)) {
       return { success: false, error: 'Wait for the current ordinary task before changing its goal.' };
     }
     if (!this.codexThreadId && !run) return { success: true, output: 'No native goal is set.' };
@@ -693,7 +699,11 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   isBusy(): boolean {
-    return this.activeTurn !== null || this.compactWaiter !== null || this.transportStop !== null
+    return this.hasOtherWork();
+  }
+
+  private hasOtherWork(ownPreparation?: { cancelled: boolean }): boolean {
+    return this.preparingSchedule !== ownPreparation || this.activeTurn !== null || this.compactWaiter !== null || this.transportStop !== null
       || this.goalControl !== null || this.threadLoads > 0;
   }
 
@@ -768,8 +778,13 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async abort(): Promise<boolean> {
+    if (this.preparingSchedule) {
+      this.preparingSchedule.cancelled = true;
+      return true;
+    }
     if (this.goalRun) return (await this.pauseGoal()).success;
     if (this.transportStop) {
+      const scheduled = this.activeTurn?.options.hostScheduleSessionId !== undefined;
       await this.transportStop;
       if (this.transportStop) {
         // Only an explicit abort may retry a failed ordinary transport stop.
@@ -780,7 +795,7 @@ export class CodexAppServerExecutor implements IExecutor {
       if (this.transportStop) return false;
       this.completeActive({ success: false, error: 'Aborted by user' });
       this.completeCompact({ success: false, error: 'Aborted by user' });
-      return true;
+      return !scheduled;
     }
     const active = this.activeTurn;
     if (!active || !this.codexThreadId) return false;
@@ -799,18 +814,30 @@ export class CodexAppServerExecutor implements IExecutor {
 
     if (!active.turnId) {
       await this.failAndRestart('Aborted by user');
-      return !this.hasUncertainShutdown();
+      return active.options.hostScheduleSessionId === undefined && !this.hasUncertainShutdown();
     }
 
+    if (active.scheduledAbort) return active.scheduledAbort;
+    if (active.options.hostScheduleSessionId !== undefined) {
+      active.scheduledAbort = new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (this.activeTurn === active) void this.failAndRestart('Scheduled Codex interruption was not confirmed.');
+        }, SCHEDULE_INTERRUPT_TIMEOUT_MS);
+        active.settleScheduledAbort = interrupted => {
+          clearTimeout(timer);
+          resolve(interrupted);
+        };
+      });
+    }
     try {
       await this.client.request('turn/interrupt', {
         threadId: this.codexThreadId,
         turnId: active.turnId,
-      });
+      }, undefined, active.options.hostScheduleSessionId !== undefined);
     } catch {
-      await this.failAndRestart('Aborted by user');
+      if (this.activeTurn === active) await this.failAndRestart('Aborted by user');
     }
-    return !this.hasUncertainShutdown();
+    return active.scheduledAbort ?? !this.hasUncertainShutdown();
   }
 
   async destroy(): Promise<void> {
@@ -853,6 +880,11 @@ export class CodexAppServerExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.codexThreadId;
+  }
+
+  private checkPreparingSchedule(id: string): void {
+    if (this.preparingSchedule?.cancelled) throw new Error('Scheduled Codex turn cancelled before dispatch.');
+    this.checkHostScheduleSession(id);
   }
 
   checkHostScheduleSession(id: string): void {
@@ -1322,7 +1354,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private async loadThread(pinned?: string): Promise<void> {
-    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+    if (pinned !== undefined) this.checkPreparingSchedule(pinned);
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.goalManaged && this.codexThreadId && !this.goalRun) {
       const goal = await this.getGoal();
@@ -1335,7 +1367,7 @@ export class CodexAppServerExecutor implements IExecutor {
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
     await this.client.start();
-    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+    if (pinned !== undefined) this.checkPreparingSchedule(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     if (typeof this.speed === 'string') {
       const available = await (goalOwner ? this.goalDeadline(this.listSpeeds()) : this.listSpeeds());
@@ -1346,7 +1378,7 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     const speedOptions = await this.speedOptions();
-    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+    if (pinned !== undefined) this.checkPreparingSchedule(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     const common: any = {
       ...(this.model ? { model: this.model } : {}),
@@ -1379,7 +1411,7 @@ export class CodexAppServerExecutor implements IExecutor {
           excludeTurns: true,
           ...common,
         }, undefined, pinned !== undefined);
-        if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+        if (pinned !== undefined) this.checkPreparingSchedule(pinned);
         if (response?.thread?.id !== resumeId || this.codexThreadId !== resumeId) {
           throw new Error('Codex app-server resumed an unexpected thread');
         }
@@ -1417,7 +1449,7 @@ export class CodexAppServerExecutor implements IExecutor {
       this.legacyFollowReady = this.speed === null && !Object.prototype.hasOwnProperty.call(common, 'serviceTier');
     }
     if (typeof this.speed === 'string') await this.assertReportedSpeed(this.speed);
-    if (pinned !== undefined) this.checkHostScheduleSession(pinned);
+    if (pinned !== undefined) this.checkPreparingSchedule(pinned);
     if (goalOwner) this.assertGoalOwner(goalOwner);
     this.threadReady = true;
   }
@@ -1606,10 +1638,34 @@ export class CodexAppServerExecutor implements IExecutor {
     ].filter(Boolean).join('\n') || 'Codex requested permission for file changes.';
     const approval: ApprovalRequestInfo = { requestId: randomUUID(), kind, description,
       canRemember: !!writableRoots?.length, ...(writableRoots ? { writableRoots } : {}) };
-    this.pendingUserInputs.push({ id, method, params, approval, resolved: this.activeTurn?.options.onApprovalResolved });
+    const pending = { id, method, params, approval, resolved: this.activeTurn?.options.onApprovalResolved };
+    this.pendingUserInputs.push(pending);
     let cardHandled = false;
     try { cardHandled = this.activeTurn?.options.onApprovalRequest?.(approval) === true; } catch { /* Keep text approvals available. */ }
-    if (!cardHandled) this.activeTurn?.options.onStream?.(fallback);
+    if (cardHandled) return;
+    if (this.activeTurn?.options.onUnattendedInputRequired) {
+      const index = this.pendingUserInputs.indexOf(pending);
+      if (index < 0) return;
+      this.pendingUserInputs.splice(index, 1);
+      this.denyUnattendedInput(id, method === 'item/permissions/requestApproval'
+        ? { permissions: {}, scope: 'turn' } : { decision: 'cancel' });
+      this.finishApproval(pending, 'denied');
+      return;
+    }
+    this.activeTurn?.options.onStream?.(fallback);
+  }
+
+  private denyUnattendedInput(id: number | string, result: object): void {
+    const active = this.activeTurn!;
+    const notify = active.unattendedInputReported ? undefined : active.options.onUnattendedInputRequired;
+    active.unattendedInputReported = true;
+    try {
+      this.client.respond(id, result);
+    } catch (error) {
+      void this.failAndRestart(this.errorMessage(error));
+    } finally {
+      notify?.();
+    }
   }
 
   private finishApproval(pending: PendingUserInput, status: ApprovalStatus): void {
@@ -1655,11 +1711,26 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     if (method === 'item/tool/requestUserInput') {
+      if (this.activeTurn.options.onUnattendedInputRequired) {
+        this.denyUnattendedInput(id, { answers: {} });
+        return;
+      }
       this.pendingUserInputs.push({ id, method, params });
       const questions = Array.isArray(params.questions) ? params.questions : [];
       const text = questions.map((question: any) => question?.question).filter(Boolean).join('\n');
       this.activeTurn?.options.onStream?.(`\n${text || 'Codex requires input.'}\nReply with your answer.\n`);
       return;
+    }
+
+    if (this.activeTurn.options.onUnattendedInputRequired) {
+      if (method === 'mcpServer/elicitation/request' && params.threadId === this.codexThreadId) {
+        this.denyUnattendedInput(id, { action: 'cancel', content: null, _meta: null });
+        return;
+      }
+      if ((method === 'applyPatchApproval' || method === 'execCommandApproval') && params.conversationId === this.codexThreadId) {
+        this.denyUnattendedInput(id, { decision: 'abort' });
+        return;
+      }
     }
 
     this.client.respondError(id, `Unsupported Codex app-server request: ${method}`);
@@ -1831,7 +1902,7 @@ export class CodexAppServerExecutor implements IExecutor {
       return;
     }
     if (turn.status === 'interrupted') {
-      this.completeActive({ success: false, error: 'Aborted by user' });
+      this.completeActive({ success: false, error: 'Aborted by user' }, 'interrupted');
       return;
     }
     const rawError = turn.error?.message ?? active.error ?? 'Codex turn failed';
@@ -1839,7 +1910,7 @@ export class CodexAppServerExecutor implements IExecutor {
     const error = code === 'ContextWindowExceeded' && !active.sideEffectsStarted
       ? `Prompt too long: ${rawError}`
       : rawError;
-    this.completeActive({ success: false, error });
+    this.completeActive({ success: false, error }, turn.status === 'failed' ? 'failed' : undefined);
   }
 
   private emitCommandUse(active: ActiveTurn, item: any): void {
@@ -1880,7 +1951,7 @@ export class CodexAppServerExecutor implements IExecutor {
     }
   }
 
-  private completeActive(result: ExecuteResult): void {
+  private completeActive(result: ExecuteResult, nativeTerminal?: 'interrupted' | 'failed'): void {
     const active = this.activeTurn;
     if (!active) return;
     this.activeTurn = null;
@@ -1894,7 +1965,10 @@ export class CodexAppServerExecutor implements IExecutor {
     this.clearInactivityTimer();
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);
     void this.cleanupTemporaryFiles(active.temporaryFiles);
-    active.resolve(result);
+    const outcomeUnknown = !result.success && !nativeTerminal && active.options.hostScheduleSessionId !== undefined;
+    active.settleScheduledAbort?.(nativeTerminal === 'interrupted');
+    const finalResult = outcomeUnknown ? { ...result, outcomeUnknown: true } : result;
+    active.resolve(finalResult);
   }
 
   private completeCompact(result: ExecuteResult): void {
@@ -1968,8 +2042,8 @@ export class CodexAppServerExecutor implements IExecutor {
       const extension = this.extensionForMimeType(attachment.mimeType);
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'remote-cli-codex-image-'));
       const filePath = path.join(directory, `attachment.${extension}`);
-      await fs.promises.writeFile(filePath, Buffer.from(attachment.data, 'base64'), { mode: 0o600 });
       temporaryFiles.push(filePath);
+      await fs.promises.writeFile(filePath, Buffer.from(attachment.data, 'base64'), { mode: 0o600 });
       input.push({ type: 'localImage', path: filePath });
     }
     return input;

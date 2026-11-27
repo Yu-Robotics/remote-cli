@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.293] - 2026-11-27
+
+### Fixed
+- Host-scheduled turns stop with an actionable result when a required question or approval has no interactive delivery route. Supported approval cards remain available.
+- AGY keeps its original main chat available after a verified ordinary tool error on a scheduled turn following restart. Changes to managed tools can wait for a confirmed reload.
+- Codex honors cancellation and rechecks the original session and owner before submitting a scheduled turn, including during session restoration and speed lookup.
+
 ## [1.6.292] - 2026-11-27
 
 ### Fixed

@@ -68,6 +68,8 @@ interface ActiveTurn {
   /** Fallback ids from tool_execution_start events lacking toolCallId, consumed FIFO by matching end events. */
   pendingToolFallbackIds: string[];
   nextToolFallbackId: number;
+  /** Required input on a host-scheduled run is reported once per turn. */
+  unattendedReported?: boolean;
 }
 
 interface PendingUiRequest {
@@ -1339,6 +1341,17 @@ export class PiExecutor implements IExecutor {
     }
 
     this.cancelPendingUi(true);
+    const active = this.activeTurn;
+    const unattended = active.options.onUnattendedInputRequired;
+    if (unattended) {
+      // No reply can reach this turn. Cancel natively without choosing an answer.
+      this.client.send({ type: 'extension_ui_response', id, cancelled: true });
+      if (!active.unattendedReported) {
+        active.unattendedReported = true;
+        unattended();
+      }
+      return;
+    }
     let lines: string[];
     if (method === 'confirm') {
       lines = [`\n${title}`, 'Reply yes or no.\n'];
@@ -1351,8 +1364,9 @@ export class PiExecutor implements IExecutor {
     } else {
       lines = [`\n${title}`, 'Reply with a value, or send skip or cancel.\n'];
     }
-    this.activeTurn?.options.onStream?.(lines.join('\n'));
+    // Mark the turn as waiting before its prompt is observed by stream consumers.
     this.pendingUi = { id, method, title, options };
+    this.activeTurn?.options.onStream?.(lines.join('\n'));
     // The turn now waits for a human, not for Pi; suspend the watchdog until the
     // reply re-arms it, so a slow answer is never reported as Pi inactivity. The
     // hard limit stays armed because it bounds the whole turn.

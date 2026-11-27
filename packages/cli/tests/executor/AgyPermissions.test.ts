@@ -27,6 +27,19 @@ describe('AGY local approval lifecycle', () => {
     expect(text).toHaveBeenCalled(); expect(p.input('always')).toBe(false); expect(p.input('unknown')).toBe(false);
     expect(p.input(input)).toBe(true); expect(await pending).toBe(input === 'yes' ? 0 : input === 'no' ? 1 : -1);
   });
+  it.each([true, false])('uses a routed standalone scheduled approval card when available (%s)', async handled => {
+    const permissions = new AgyPermissions(), report = vi.fn(), stream = vi.fn();
+    let requestId = '';
+    const pending = permissions.request('tool', choices, { onStream: stream, onApprovalRequest: request => {
+      requestId = request.requestId;
+      return handled;
+    } }, false, report);
+    expect(permissions.waiting).toBe(handled);
+    if (handled) expect(permissions.respond(requestId, 'approve')).toBe(true);
+    expect(await pending).toBe(handled ? 0 : -1);
+    expect(report).toHaveBeenCalledTimes(handled ? 0 : 1);
+    expect(stream).not.toHaveBeenCalled();
+  });
   it('does not auto-answer native questions and validates the selected option', async () => {
     const p = new AgyPermissions();
     const pending = p.request('Choose', [{ kind: 'allow_once', optionId: 'q0_yes', name: 'First' }], {}, true);

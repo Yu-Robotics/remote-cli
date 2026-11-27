@@ -161,6 +161,7 @@ interface HostOccurrence {
   cancelled: boolean;
   executor?: IExecutor;
   abort?: Promise<false | 'interrupted' | 'local-cancellation'>;
+  inputStop?: Promise<boolean>;
   abortBeforeDispatch?: boolean;
   abortReceipt?: string;
 }
@@ -290,7 +291,7 @@ export class MessageHandler {
   private readonly settingsAdmission = new SettingsAdmission();
   private readonly settingsCatalogReader: SettingsCatalogReader;
   private readonly settingsService: SettingsService;
-  private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean }>();
+  private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean; unattendedInput?: () => void }>();
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
   private fileInbox?: FileInbox;
@@ -356,6 +357,9 @@ export class MessageHandler {
       this.discardQueueCommands(command => !command.binding);
       this.authenticatedRegistration = undefined;
       this.scheduleBinding = undefined;
+      for (const [id, pending] of this.pendingApprovalCards) {
+        if (pending.unattendedInput) this.showApprovalFallback(id);
+      }
       this.cancelRecoveredInputs();
       this.scheduleResultsSupported = false;
       this.scheduleCardsSupported = false;
@@ -613,8 +617,9 @@ export class MessageHandler {
             this.resolveApprovalCard(pending.request.messageId, 'expired');
             continue;
           }
-          if (this.approvalCardsSupported) this.sendApprovalMessage(pending.request);
-          else this.showApprovalFallback(pending.request.messageId);
+          if (!this.approvalCardsSupported || (!this.sendApprovalMessage(pending.request) && pending.unattendedInput)) {
+            this.showApprovalFallback(pending.request.messageId);
+          }
         }
         return;
       }
@@ -1283,6 +1288,10 @@ export class MessageHandler {
       if (!operation || this.isDestroyed || occurrence.record.openId !== this.messageOpenIds.get(messageId)
         || !this.hostBindingCurrent(occurrence.record)) {
         this.sendResponse(messageId, threadId, { success: false, error: 'Scheduled occurrence ownership changed.' });
+        return;
+      }
+      if (occurrence.inputStop) {
+        this.sendResponse(messageId, threadId, { success: true, output: 'This scheduled occurrence is already stopping because it requires interactive input.' });
         return;
       }
       if (!occurrence.executor) {
@@ -3687,14 +3696,18 @@ You can also use natural language commands to control Claude Code CLI.`,
       cwd: this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory(), preview: content });
   }
 
-  private forwardApproval(approval: ApprovalRequestInfo, executor: IExecutor, taskMessageId: string, threadId: string, delegated = false): boolean {
+  private forwardApproval(approval: ApprovalRequestInfo, executor: IExecutor, taskMessageId: string, threadId: string, delegated = false, unattendedInput?: () => void): boolean {
     const openId = this.getMessageOpenId(taskMessageId);
     if (!openId) return false;
     const request: ApprovalRequestMessage = { type: 'approval_request', messageId: approval.requestId,
       taskMessageId, openId, threadId, threadName: this.threadManager.getThread(threadId)?.name ?? threadId,
       cwd: executor.getCurrentWorkingDirectory(), approval, timestamp: Date.now() };
-    this.pendingApprovalCards.set(approval.requestId, { request, executor, delegated });
-    if (this.approvalCardsSupported) this.sendApprovalMessage(request);
+    if (unattendedInput && !this.approvalCardsSupported) return false;
+    this.pendingApprovalCards.set(approval.requestId, { request, executor, delegated, unattendedInput });
+    if (this.approvalCardsSupported && !this.sendApprovalMessage(request) && unattendedInput) {
+      this.pendingApprovalCards.delete(approval.requestId);
+      return false;
+    }
     return this.approvalCardsSupported;
   }
 
@@ -3704,13 +3717,20 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  private sendApprovalMessage(message: ApprovalRequestMessage | ApprovalResolvedMessage): void {
-    try { this.wsClient.send(message); } catch { /* Pending approvals are resent after registration. */ }
+  private sendApprovalMessage(message: ApprovalRequestMessage | ApprovalResolvedMessage): boolean {
+    try { return this.wsClient.send(message) !== false; } catch { return false; }
   }
 
   private showApprovalFallback(requestId: string): void {
     const pending = this.pendingApprovalCards.get(requestId);
     if (!pending) return;
+    if (pending.unattendedInput) {
+      pending.unattendedInput();
+      try { pending.executor.respondToApproval?.(requestId, 'deny'); }
+      catch { /* Interruption still retires the occurrence. */ }
+      finally { this.resolveApprovalCard(requestId, 'expired'); }
+      return;
+    }
     const { request } = pending;
     const description = request.approval.description;
     const longest = (description.match(/`+/g) ?? []).reduce((length, run) => Math.max(length, run.length), 2);
@@ -4222,11 +4242,24 @@ You can also use natural language commands to control Claude Code CLI.`,
           // Consume only the durably admitted slot. Returning undefined here would leave its outcome unknown.
           return { success: false, abortedByUser: true, error: 'Scheduled occurrence stopped by /abort before dispatch.' };
         }
+        const stopForInput = () => {
+          if (occurrence.inputStop || occurrence.abort || this.hostOccurrences.get(threadId) !== occurrence) return;
+          // Let the backend send its native denial before requesting interruption.
+          occurrence.inputStop = Promise.resolve().then(() => executor.abort()).catch(() => false);
+        };
         let display = '';
         occurrence.executor = executor;
         executionStarted = true;
         const result = await executor.execute(record.prompt, {
           hostScheduleSessionId: sessionId,
+          beforeHostScheduleDispatch: () => {
+            try { beforePrompt(); }
+            catch (error) {
+              executionStarted = false;
+              throw error;
+            }
+          },
+          onUnattendedInputRequired: stopForInput,
           // Claude checks queued authorization before process startup and again before stdin.
           ...(record.backend === 'claude' && { nativeScheduleCurrent: () => {
             try { beforePrompt(); return true; } catch { return false; }
@@ -4242,15 +4275,10 @@ You can also use natural language commands to control Claude Code CLI.`,
           onDisplayText: chunk => { if (display.length < 65537) display += chunk.slice(0, 65537 - display.length); },
           onApprovalRequest: approval => {
             try { check(); } catch { return false; }
-            return this.forwardApproval(approval, executor, messageId, threadId);
+            return this.forwardApproval(approval, executor, messageId, threadId, false, stopForInput);
           },
           onApprovalResolved: (id, status) => this.resolveApprovalCard(id, status),
-          onStream: chunk => {
-            if (!executor.isWaitingInput?.()) return;
-            try { check(); } catch { return; }
-            this.sendStreamChunk(messageId, threadId, chunk);
-          },
-        }).catch((error: unknown) => ({ success: false, output: undefined, outcomeUnknown: true as const,
+        }).catch((error: unknown) => ({ success: false, output: undefined, outcomeUnknown: executionStarted,
           error: error instanceof Error ? error.message : 'Scheduled execution failed.' }));
         // Hold the thread until executor cleanup settles, even if a successful result won the race.
         const aborted = occurrence.abort && await occurrence.abort.catch(error => {
@@ -4259,20 +4287,30 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         // An observed AGY command may still be pending when this admitted turn returns its answer.
         // The result belongs to this occurrence. Only a later prompt needs to wait.
-        check(true, true);
+        const outcomeUnknown = 'outcomeUnknown' in result && result.outcomeUnknown === true;
+        if (occurrence.inputStop) {
+          const interrupted = await occurrence.inputStop;
+          checkOwner(true);
+          return { success: false, output: display || result.output,
+            error: 'This scheduled occurrence required interactive input. Send the task as a normal message to answer it.',
+            ...((outcomeUnknown || (!interrupted && executor.hasUncertainShutdown?.())) && { outcomeUnknown: true }) };
+        }
         if (aborted && !result.success) {
+          checkOwner(true);
           occurrence.abortReceipt = aborted === 'local-cancellation'
             ? 'The local scheduled request was cancelled by /abort. Its native outcome is unconfirmed.'
             : 'The scheduled occurrence was interrupted by /abort.';
-          return { success: false, abortedByUser: true, ...(aborted === 'local-cancellation' && { outcomeUnknown: true }), output: display || result.output,
+          return { success: false, abortedByUser: true, ...((aborted === 'local-cancellation' || outcomeUnknown) && { outcomeUnknown: true }),
+            output: display || result.output,
             error: occurrence.abortReceipt };
         }
+        check(true, true);
         // Prefer the public display stream, but preserve the executor's final
         // output when a backend only returns its answer at turn completion.
         const error = !result.success && this.hostBindingCurrent(record)
           ? this.pauseQueueAfterFailure(threadId, result.error || 'Scheduled execution failed.') : result.error;
         return { success: result.success, output: display || result.output, error,
-          ...('outcomeUnknown' in result && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
+          ...(outcomeUnknown && { outcomeUnknown: true }), ...(stopSchedule ? { stopSchedule: true } : {}) };
       } catch (error) {
         if (!admitted && stopSchedule && record.backend === 'agy' && error instanceof AgyManualResumeScheduleSkip) {
           return { success: false, skippedBeforeAdmission: true, error: 'Scheduled occurrence skipped without execution. ' + error.message };

@@ -894,7 +894,13 @@ export class AgyExecutor implements IExecutor {
     if (this.acp && (!this.acp.reusable || this.acp.requiresVerifiedReconnect && !this.acp.hostScheduleAvailable)) {
       // Keep the live chat and its scheduling fence; apply the change at the next
       // authenticated recovery or explicit reset rather than an unconfirmed reload.
-      if (this.acp.exitedBetweenTurns || this.acp.needsHumanContinuation || this.acp.reusable) {
+      const verifiedError = this.acp.canDeferToolsAfterVerifiedError;
+      if (verifiedError) {
+        const id = this.acp.sessionId;
+        if (!id || !this.ownedPointerCurrent()) throw new Error('The original AGY conversation changed.');
+        this.checkHostScheduleSession(id);
+      }
+      if (this.acp.exitedBetweenTurns || this.acp.needsHumanContinuation || this.acp.reusable || verifiedError) {
         this.pendingDelegationConnection = { connection };
         return;
       }

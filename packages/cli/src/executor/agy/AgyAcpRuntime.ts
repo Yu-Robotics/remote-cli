@@ -117,6 +117,7 @@ export class AgyAcpRuntime {
   private nativeVersion?: string;
   private streamed = '';
   private question?: { args?: Record<string, unknown>; pendingCall?: string };
+  private unattendedInput?: () => void;
   private questionAuth?: RecoveryQuestionAuthority;
   private answerQuestion?: (answer: string | undefined, source?: AgyHumanConfirmation) => void;
   private callbacks: AcpEventCallbacks;
@@ -145,7 +146,7 @@ export class AgyAcpRuntime {
       onPermissionRequest: async (title, choices) => {
         if (this.workerAbort) { this.workerFault = true; return -1; }
         const turn = this.active;
-        const index = await this.permissions.request(title, choices, turn, this.options.autoApprove);
+        const index = await this.permissions.request(title, choices, turn, this.options.autoApprove, this.unattendedInput);
         if (turn && this.active === turn && !choices[index]?.kind.startsWith('allow')) {
           this.permissionDeclined = true;
           if (this.options.worker) this.workerFault = true;
@@ -173,6 +174,10 @@ export class AgyAcpRuntime {
   }
   /** Reopening a recovered prefix requires its durable verification receipt. */
   get requiresVerifiedReconnect(): boolean { return !!this.recoveredHistory; }
+  get canDeferToolsAfterVerifiedError(): boolean {
+    return this.options.validatedChatLoad === true && !this.options.worker && !this.busy && this.hostScheduleAvailable
+      && !this.commands?.liveDenial && !this.permissionDeclined && !!this.chat?.hasForegroundToolErrors;
+  }
   get needsHumanContinuation(): boolean {
     return !!this.chat?.humanContinuation && !this.chat.reusable && !this.commands?.pending && !this.blocked
       && !this.retained && !this.closing && !this.closed && !this.relayFault && !this.permissionDeclined;
@@ -328,13 +333,18 @@ export class AgyAcpRuntime {
       // human turn even when the recovered history permanently excludes timers.
       const recoveredForeground = !!history && !this.options.worker && !!this.active
         && this.active.hostScheduleSessionId === undefined;
-      const decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
+      let decision = this.options.hostScheduleChat && !this.active && event === 'PreToolUse'
         ? idleDecision ?? { decision: 'deny' as const, reason: 'AGY command notifications cannot start another tool.' }
         : this.chat ? this.chat.accept(event, payload, controls, !!this.active && !!ordinaryCommands
           && !!this.options.hostScheduleChat && observeChat && !this.blocked
           && !this.settingsBusy && !this.scheduleOperations && !this.permissionDeclined, this.commands, rows,
           (ordinaryHost || scheduledHost || recoveredForeground) && observeChat && !this.permissionDeclined)
           : this.host!.schedules.accept(event, payload, controls);
+      if (this.unattendedInput && event === 'PreToolUse' && decision.decision === 'allow'
+        && (payload.toolCall as { name?: string } | undefined)?.name === 'ask_question') {
+        decision = { decision: 'deny', reason: 'The scheduled AGY turn requires user input.' };
+        this.unattendedInput();
+      }
       if (this.options.worker && (decision.decision === 'deny' || this.blocked || event === 'PostToolUse' && payload.error
         || event === 'Stop' && (payload.error || payload.terminationReason !== 'NO_TOOL_CALL'))) this.workerFault = true;
       if (!this.continuityUnsafe && (this.chat?.liveManagement
@@ -525,6 +535,14 @@ export class AgyAcpRuntime {
     this.active = options; this.permissionDeclined = false; this.streamed = ''; this.tools.clear(); this.tracker.setCallback(options.onActivity); this.tracker.reset();
     this.hostScheduleSettled = false;
     this.questionAuth = questionAuth;
+    if (options.hostScheduleSessionId !== undefined && options.onUnattendedInputRequired) {
+      let reported = false;
+      this.unattendedInput = () => {
+        if (reported) return;
+        reported = true;
+        options.onUnattendedInputRequired?.();
+      };
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inactive: ReturnType<typeof setTimeout> | undefined;
     this.activity = () => {
@@ -603,7 +621,7 @@ export class AgyAcpRuntime {
     } finally {
       if (timer) clearTimeout(timer);
       if (inactive) clearTimeout(inactive);
-      this.permissions.cancel(); this.answerQuestion?.(undefined); this.question = undefined; this.questionAuth = undefined;
+      this.permissions.cancel(); this.answerQuestion?.(undefined); this.question = undefined; this.questionAuth = undefined; this.unattendedInput = undefined;
       this.tracker.reset(); this.tracker.setCallback(undefined); this.activity = undefined; this.active = undefined; this.tools.clear();
       this.humanQueryAdmission = undefined;
       this.ordinaryMain = false;

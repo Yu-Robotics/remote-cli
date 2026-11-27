@@ -888,6 +888,66 @@ describe('AGY production fresh-session entry (synthetic native records)', () => 
     expect(runtime.reusable).toBe(false);
     expect(client.prompts).toEqual(['hold']);
   });
+  it.each(['restored', 'live'])('defers managed tools after the first scheduled turn with a %s verified error', async source => {
+    const { id } = await captureTimedSession();
+    const failedTool = async () => {
+      const turn = executor.execute('hold', { hostScheduleSessionId: id });
+      await vi.waitFor(() => {
+        expect(native.clients).toHaveLength(source === 'live' ? 2 : 1);
+        expect(last()?.prompts).toHaveLength(source === 'live' ? 1 : 2);
+      });
+      const client = last(), payload = ordinaryTool(client, 'read_file');
+      expect(client.hook('PreToolUse', payload).decision).toBe('allow');
+      client.hook('PostToolUse', { ...payload, error: 'synthetic failure' });
+      client.row('GENERIC', 'Encountered error in step execution: synthetic failure', 'MODEL', 'ERROR', payload.stepIdx);
+      client.hook('PostInvocation'); client.hook('PreInvocation', { initialNumSteps: client.cursor });
+      client.finish(); client.release({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ success: true });
+    };
+    if (source === 'restored') await failedTool();
+    native.loadedRows = structuredClone(last().rows);
+    await fs.writeFile(transcriptPath(last().launch.env.HOME, id), last().rows.map((row: TranscriptRecord) => JSON.stringify(row)).join('\n'));
+    await executor.destroy();
+    executor = make();
+    if (source === 'live') await failedTool();
+    else await expect(executor.execute('first timer', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    const client = last();
+    await executor.configureManagedTools({ url: 'http://127.0.0.1:1', token: 'synthetic-new', groups: ['scheduling'] });
+    expect(executor.hasDeferredManagedTools()).toBe(true);
+    await expect(executor.execute('human follow-up', { agyHumanMessage: true })).resolves.toMatchObject({ success: true });
+    await expect(executor.execute('second timer', { hostScheduleSessionId: id })).resolves.toMatchObject({ success: true });
+    expect(last()).toBe(client);
+    expect(client.launch.env.REMOTE_CLI_TOOL_GROUPS).toBeUndefined();
+    native.loadedRows = structuredClone(client.rows);
+    await fs.writeFile(transcriptPath(client.launch.env.HOME, id), client.rows.map((row: TranscriptRecord) => JSON.stringify(row)).join('\n'));
+    client.onExit();
+    await Promise.resolve();
+    await expect(resume('fresh human after idle exit')).resolves.toMatchObject({ success: true });
+    expect(last().session).toBe(id);
+    expect(last().prompts).toEqual(['fresh human after idle exit']);
+    expect(last().launch.env.REMOTE_CLI_TOOL_GROUPS).toBe('["scheduling"]');
+    expect(executor.hasDeferredManagedTools()).toBe(false);
+  });
+
+  it.each(['question', 'permission'])('declines unattended input once with %s first', async first => {
+    const { id } = await captureTimedSession();
+    const required = vi.fn(), stream = vi.fn();
+    const options = { hostScheduleSessionId: id, onUnattendedInputRequired: required, onStream: stream };
+    const turn = executor.execute('scheduled\nhold', options);
+    await vi.waitFor(() => expect(last().prompts.at(-1)).toBe('scheduled\nhold'));
+    const client = last();
+    const permission = async () => expect(await client.callbacks.onPermissionRequest('Choose', [{ optionId: 'q0_yes', kind: 'allow_once' }])).toBe(-1);
+    if (first === 'permission') await permission();
+    const question = ordinaryTool(client, 'ask_question');
+    expect(client.hook('PreToolUse', question).decision).toBe('deny');
+    expect(required).toHaveBeenCalledOnce();
+    if (first === 'question') await permission();
+    expect(required).toHaveBeenCalledOnce();
+    expect(executor.isWaitingInput()).toBe(false);
+    expect(stream).not.toHaveBeenCalled();
+    client.release({ stopReason: 'cancelled' });
+    await expect(turn).resolves.toMatchObject({ success: false });
+  });
   it('continues ordinary and pinned chat after a verified scheduled-turn tool error', async () => {
     const { runtime, ownedSessionClosed } = initialRuntime({ hostScheduleChat: true, env: { HOME: home } });
     const turn = runtime.execute('hold', { hostScheduleSessionId: native.sessionId });

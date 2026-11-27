@@ -179,6 +179,7 @@ interface ClaudeOutputMessage {
  */
 export interface PersistentClaudeOptions {
   hostScheduleSessionId?: string;
+  onUnattendedInputRequired?: () => void;
   /** Executor-internal queued management turn; never accepted from model tool input. */
   nativeScheduleManagement?: boolean;
   nativeScheduleCurrent?: () => boolean;
@@ -389,6 +390,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     fileTool?: string;
     resolved?: (requestId: string, status: ApprovalStatus) => void;
   }>();
+  private currentUnattendedInputRequired?: () => void;
   private currentApprovalRequestCallback?: (request: ApprovalRequestInfo) => boolean;
   private currentApprovalResolvedCallback?: (requestId: string, status: ApprovalStatus) => void;
   private filePolicyToken?: string;
@@ -1389,7 +1391,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     try { cardShown = this.currentApprovalRequestCallback?.({ requestId, kind, description, canRemember, writableRoots: grantRoots }) === true; }
     catch { /* A rendering failure can fall back to the text prompt. */ }
     if (!cardShown && this.pendingApprovals.has(requestId)) {
-      if (this.currentStreamCallback) {
+      const unattended = this.currentUnattendedInputRequired;
+      if (unattended) {
+        this.answerApproval(requestId, { behavior: 'deny', message: 'Scheduled execution requires interactive approval.' }, 'denied');
+        unattended();
+      } else if (this.currentStreamCallback) {
         this.currentStreamCallback(`\nApproval required (${requestId}): ${description}\nReply yes or no. For multiple requests, reply yes <request ID> or no <request ID>.\n`);
       } else {
         this.answerApproval(requestId, { behavior: 'deny', message: 'No interactive approval channel is available.' }, 'denied');
@@ -1470,6 +1476,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   private clearApprovals(message: string): void {
     this.approvalGeneration++;
     this.approvalTurnActive = false;
+    this.currentUnattendedInputRequired = undefined;
     this.currentApprovalRequestCallback = undefined;
     this.currentApprovalResolvedCallback = undefined;
     this.denyAllPendingApprovals(message);
@@ -1935,12 +1942,18 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
           // Also handle simple string content (fallback)
           if (typeof message.content === 'string' && message.content) {
+            // The legacy interactive detector also matches ordinary prose such as
+            // headings. Only an explicit foreground prompt requires unattended input.
+            const unattended = this.currentUnattendedInputRequired;
+            const explicitPrompt = unattended && !message.parent_tool_use_id && !message.partial && !message.message?.stop_reason
+              && this.isExplicitInputPrompt(message.content);
             this.currentOutputBuffer.push(message.content);
-            if (this.currentStreamCallback) {
-              this.currentStreamCallback(message.content);
+            if (!explicitPrompt) {
+              this.currentStreamCallback?.(message.content);
+              if (!message.parent_tool_use_id) this.currentDisplayTextCallback?.(message.content);
             }
-            if (!message.parent_tool_use_id) this.currentDisplayTextCallback?.(message.content);
-            this.startInputDetectionTimer(message.content);
+            if (!unattended || explicitPrompt) this.startInputDetectionTimer(message.content);
+            else clearTimeout(this.inputDetectionTimer);
           }
 
           // Check if this is the final message (stop_reason indicates completion)
@@ -2039,7 +2052,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         return;
       }
 
-      const output = this.currentOutputBuffer.join('');
+      const output = this.currentUnattendedInputRequired ? content : this.currentOutputBuffer.join('');
       if (this.isInputRequest(output)) {
         console.log('[ClaudePersistent] Detected input request in output');
         this.handleInputRequest(output);
@@ -2072,6 +2085,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     }
   }
 
+  private isExplicitInputPrompt(content: string): boolean {
+    const lastLine = content.trim().split('\n').at(-1)?.trim() ?? '';
+    return /(?:\(y\/n\??\)|\[y\/n\])[?:]?$/i.test(lastLine)
+      || /^(?:press enter to continue|type 'yes' to continue|waiting for your (?:response|input))[.:?]*$/i.test(lastLine);
+  }
+
   /**
    * Check if the output indicates a request for user input
    * This detects patterns like "Press Enter to continue", "(y/n)", etc.
@@ -2098,6 +2117,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Returns a promise that resolves when user provides input via sendInput()
    */
   private async requestInteractiveInput(prompt: string): Promise<string | null> {
+    if (this.currentUnattendedInputRequired) {
+      this.isWaitingForInput = false;
+      this.currentUnattendedInputRequired();
+      return null;
+    }
     console.log('[ClaudePersistent] Requesting interactive input:', prompt);
     this.isWaitingForInput = true;
 
@@ -2130,7 +2154,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * This is called by MessageHandler when user sends a message while waiting for input
    */
   sendInput(input: string): boolean {
-    if (this.hasPendingCancellation() || this.abortOperation) return false;
+    if (this.hasPendingCancellation() || this.abortOperation || this.currentUnattendedInputRequired) return false;
     if (this.pendingApprovals.size > 0) {
       const match = /^(yes|y|approve|accept|no|n|deny|decline|cancel)(?:\s+(\S+))?$/i.exec(input.trim());
       const requestId = match?.[2] ?? (this.pendingApprovals.size === 1 ? this.pendingApprovals.keys().next().value : undefined);
@@ -2393,6 +2417,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.currentToolResultCallback = command.options.onToolResult;
     this.currentRedactedThinkingCallback = command.options.onRedactedThinking;
     this.currentPlanModeCallback = command.options.onPlanMode;
+    const unattended = command.options.onUnattendedInputRequired;
+    let reported = false;
+    this.currentUnattendedInputRequired = unattended && (() => {
+      if (reported) return;
+      reported = true;
+      try { unattended(); }
+      catch { console.error('[ClaudePersistent] Scheduled input failure callback threw.'); }
+    });
     this.currentApprovalRequestCallback = command.options.onApprovalRequest;
     this.currentApprovalResolvedCallback = command.options.onApprovalResolved;
     this.activityTracker.setCallback(command.options.onActivity);

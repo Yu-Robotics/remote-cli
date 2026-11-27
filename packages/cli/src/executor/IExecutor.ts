@@ -20,6 +20,10 @@ export interface ExecuteOptions {
   onAgyHumanPromptAdmitted?(current: () => boolean): void;
   /** Pin a host-timed foreground turn to the session captured at creation. */
   hostScheduleSessionId?: string;
+  /** Revalidate a pinned occurrence after preparation, immediately before native submission. */
+  beforeHostScheduleDispatch?: () => void;
+  /** No interactive text route is available. Reject the request and end this occurrence. */
+  onUnattendedInputRequired?: () => void;
   /** Resolve task text after native session restoration, immediately before dispatch.
    * Null means conversation identity is not yet known; callers must include full context. */
   resolvePrompt?: (sessionId: string | null) => string;

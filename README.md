@@ -584,10 +584,18 @@ an executing run of the same schedule. If a queued turn fails and pauses the
 thread queue, use `/queue continue` to resume the waiting work.
 When an occurrence finishes, its owner receives a scheduled result card in the
 original Feishu thread with a task preview and the final output or error.
+A scheduled turn can request approval through a supported approval card. If a
+required question or approval has no delivery route, the occurrence stops and
+its result explains how to continue interactively. Send the task as a normal
+message to answer it. Stopping a Codex occurrence with `/abort` during startup
+also prevents its prompt from being submitted.
 
 In an AGY main conversation, a scheduled prompt waits while a verified
 `run_command` is running in the background. It can use the same live conversation
 once AGY confirms the command ended and the foreground turn has settled.
+If a scheduled turn encounters a confirmed ordinary tool error after restart,
+the next human message can continue in that AGY chat. A pending managed-tool
+connection change takes effect on the next verified reload.
 
 From CLI 1.6.266, `/abort` interrupts the current scheduled run. A recurring
 task keeps its next scheduled time. To stop future runs, use `/schedule cancel <id>`.

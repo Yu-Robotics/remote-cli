@@ -270,6 +270,153 @@ describe('CodexAppServerExecutor', () => {
     else expect(executor.getSessionId()).toBeNull();
   });
 
+  it.each(['start', 'resume', 'image', 'speed'])('cancels pinned preparation during %s before any turn write', async stage => {
+    await establishSession();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const hold = async () => { entered.resolve(); await release.promise; };
+    if (stage === 'start' || stage === 'resume') await executor.configureManagedTools(undefined);
+    if (stage === 'start') vi.spyOn(transport, 'start').mockImplementationOnce(async () => {
+      await hold(); transport.running = true;
+    });
+    if (stage === 'resume') {
+      const request = transport.request.bind(transport);
+      vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+        const result = await request(method, params);
+        if (method === 'thread/resume') await hold();
+        return result;
+      });
+    }
+    if (stage === 'image') {
+      const write = fs.writeFile.bind(fs);
+      vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (...args) => { await write(...args); await hold(); });
+    }
+    if (stage === 'speed') vi.spyOn(executor as any, 'speedOptions').mockImplementationOnce(async () => {
+      await hold(); return {};
+    });
+    const finalCheck = vi.fn();
+    const resolvePrompt = vi.fn(() => 'Scheduled input');
+    const pending = executor.execute('Scheduled input', { hostScheduleSessionId: transport.nextThreadId, resolvePrompt,
+      beforeHostScheduleDispatch: finalCheck, attachments: [{ type: 'image', mimeType: 'image/png', data: 'AA==' }] });
+    try {
+      expect(executor.isBusy()).toBe(true);
+      await entered.promise;
+      expect(await executor.abort()).toBe(true);
+      expect(() => executor.checkHostScheduleSession(transport.nextThreadId)).not.toThrow();
+      expect(executor.isBusy()).toBe(true);
+      expect((await executor.execute('Other turn')).success).toBe(false);
+    } finally { release.resolve(); }
+    const result = await pending;
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('cancelled before dispatch') });
+    expect(result).not.toHaveProperty('outcomeUnknown');
+    expect(resolvePrompt).toHaveBeenCalledTimes(stage === 'image' || stage === 'speed' ? 1 : 0);
+    expect(finalCheck).not.toHaveBeenCalled();
+    expect(transport.requests.filter(r => r.method === 'turn/start')).toEqual([]);
+    expect((await fs.readdir(tempHome)).filter(name => name.startsWith('remote-cli-codex-image-'))).toEqual([]);
+    expect(executor.isBusy()).toBe(false);
+  });
+
+  it.each(['reject', 'abort', 'allow'])('checks ownership in the dispatch tick without resolving the prompt twice (%s)', async action => {
+    await establishSession();
+    const resolvePrompt = vi.fn(() => 'Resolved once');
+    let wroteBeforeMicrotask = false;
+    const check = vi.fn(() => {
+      if (action === 'reject') throw new Error('Owner changed');
+      if (action === 'abort') void executor.abort();
+      queueMicrotask(() => { wroteBeforeMicrotask = transport.requests.some(r => r.method === 'turn/start'); });
+    });
+    const pending = executor.execute('Scheduled input', { hostScheduleSessionId: transport.nextThreadId, resolvePrompt,
+      beforeHostScheduleDispatch: check });
+    if (action === 'allow') {
+      await vi.waitFor(() => expect(wroteBeforeMicrotask).toBe(true));
+      transport.emit({ method: 'turn/completed', params: { turn: { id: transport.nextTurnId, status: 'completed' } } });
+    }
+    const result = await pending;
+    expect(result.success).toBe(action === 'allow');
+    expect(result).not.toHaveProperty('outcomeUnknown');
+    expect(transport.requests.filter(r => r.method === 'turn/start')).toHaveLength(action === 'allow' ? 1 : 0);
+    expect(check).toHaveBeenCalledOnce();
+    expect(resolvePrompt).toHaveBeenCalledOnce();
+    expect(executor.isBusy()).toBe(false);
+  });
+
+  it.each(['lost start reply', 'lost terminal', 'missing terminal', 'native interruption'])('distinguishes the pinned outcome after dispatch: %s', async outcome => {
+    await establishSession();
+    const reply = deferred<void>();
+    const request = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      if (method === 'turn/start' && outcome === 'lost start reply') await reply.promise;
+      return result;
+    });
+    const pending = executor.execute('Scheduled input', { hostScheduleSessionId: transport.nextThreadId });
+    await vi.waitFor(() => expect(transport.requests.filter(r => r.method === 'turn/start')).toHaveLength(1));
+    if (outcome === 'missing terminal') vi.useFakeTimers();
+    const abort = executor.abort();
+    if (outcome === 'missing terminal') {
+      try { await vi.advanceTimersByTimeAsync(10_000); }
+      finally { vi.useRealTimers(); }
+    }
+    if (outcome === 'lost terminal') transport.emit({ method: 'client/disconnected' });
+    if (outcome === 'native interruption') transport.emit({ method: 'turn/completed', params: {
+      turn: { id: transport.nextTurnId, status: 'interrupted' } } });
+    const result = await pending;
+    expect(await abort).toBe(outcome === 'native interruption');
+    expect(result.success).toBe(false);
+    if (outcome === 'native interruption') expect(result).not.toHaveProperty('outcomeUnknown');
+    else expect(result).toHaveProperty('outcomeUnknown', true);
+    reply.resolve();
+    expect(transport.requests.filter(r => r.method === 'turn/start')).toHaveLength(1);
+  });
+
+  it('keeps routed scheduled approvals and immediately declines unattended fallback requests', async () => {
+    await executor.configureSandbox('on');
+    await establishSession();
+    const onApprovalRequest = vi.fn((_approval: any) => false).mockReturnValueOnce(true);
+    const onUnattendedInputRequired = vi.fn();
+    const onStream = vi.fn();
+    const running = executor.execute('Scheduled input', { hostScheduleSessionId: transport.nextThreadId,
+      onApprovalRequest, onUnattendedInputRequired, onStream });
+    await vi.waitFor(() => expect(transport.requests.some(r => r.method === 'turn/start')).toBe(true));
+    const params = { threadId: transport.nextThreadId, turnId: transport.nextTurnId };
+    transport.emit({ id: 1, method: 'item/commandExecution/requestApproval', params });
+    expect(onUnattendedInputRequired).not.toHaveBeenCalled();
+    expect(executor.isWaitingInput()).toBe(true);
+    expect(executor.respondToApproval(onApprovalRequest.mock.calls[0][0].requestId, 'approve')).toBe(true);
+    for (const [index, method] of ['item/tool/requestUserInput', 'item/permissions/requestApproval',
+      'item/fileChange/requestApproval', 'item/commandExecution/requestApproval'].entries()) {
+      transport.emit({ id: index + 2, method, params });
+    }
+    expect(transport.responses).toEqual([{ id: 1, result: { decision: 'accept' } }, { id: 2, result: { answers: {} } },
+      { id: 3, result: { permissions: {}, scope: 'turn' } }, { id: 4, result: { decision: 'cancel' } },
+      { id: 5, result: { decision: 'cancel' } }]);
+    expect(onUnattendedInputRequired).toHaveBeenCalledOnce();
+    expect(onStream).not.toHaveBeenCalled();
+    expect(executor.isWaitingInput()).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { ...params, turn: { id: transport.nextTurnId, status: 'completed' } } });
+    await running;
+  });
+
+  it.each([
+    ['mcpServer/elicitation/request', { action: 'cancel', content: null, _meta: null }],
+    ['applyPatchApproval', { decision: 'abort' }],
+    ['execCommandApproval', { decision: 'abort' }],
+  ] as const)('declines %s only for the original unattended conversation', async (method, response) => {
+    await establishSession();
+    const onUnattendedInputRequired = vi.fn();
+    const pending = executor.execute('Scheduled input', { hostScheduleSessionId: transport.nextThreadId, onUnattendedInputRequired });
+    await vi.waitFor(() => expect(transport.requests.some(r => r.method === 'turn/start')).toBe(true));
+    const identity = method === 'mcpServer/elicitation/request' ? 'threadId' : 'conversationId';
+    transport.emit({ id: 6, method, params: { [identity]: 'other-session' } });
+    expect(onUnattendedInputRequired).not.toHaveBeenCalled();
+    transport.emit({ id: 7, method, params: { [identity]: transport.nextThreadId } });
+    expect(onUnattendedInputRequired).toHaveBeenCalledOnce();
+    expect(transport.responses).toEqual([{ id: 7, result: response }]);
+    expect(executor.isWaitingInput()).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { turn: { id: transport.nextTurnId, status: 'completed' } } });
+    await pending;
+  });
+
   it.each(['missing', 'different-id'])('preserves the pin after a %s native resume reply', async fault => {
     await establishSession();
     await executor.configureManagedTools(undefined);
